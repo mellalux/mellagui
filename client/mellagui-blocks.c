@@ -166,6 +166,7 @@ struct app {
 	int nsoldiers_conf;
 	float soldier_conf[BL_SOLDIER_MAX][3];
 	bool wave_msg_done;                                     /* the message of the wave's end was given */
+	bool brute_warned;                                      /* the first brute of the game has been told about */
 
 	struct bl_hit aim;
 	bool aimed;
@@ -1487,6 +1488,10 @@ static void mobs_advance(struct app *a, float dt)
 		if (a->keep_hp <= 0.0f)
 			keep_fall(a);
 	}
+	if (R.born_brutes > 0 && !a->brute_warned) {
+		a->brute_warned = true;
+		say(a, "A brute! Seven blows of the sword, and it hits for five");
+	}
 	if (R.born && !a->warned && before == 0) {
 		a->warned = true;
 		say(a, "A goblin! The left button is the sword");
@@ -1536,16 +1541,29 @@ static void survival_tick(struct app *a, float dt)
 	if (day < 0.3f) {
 		if (!a->in_night && a->have_keep && a->mobs_on) {              /* a night begins: a wave comes for the keep (the bigger the more nights are behind him) */
 			int n = 3 + 2 * a->nights > 18 ? 18 : 3 + 2 * a->nights, cap = 3 + a->nights > 10 ? 10 : 3 + a->nights;
-			bl_mobs_start_wave(&a->mobs, n, cap);
+			int brutes = a->nights == 0 ? 0 : (a->nights + 1) / 2 > 4 ? 4 : (a->nights + 1) / 2;       /* from the second night on: the big ones, last of the wave */
+			bl_mobs_start_wave(&a->mobs, n, cap, brutes);
 			a->wave_msg_done = false;
-			say(a, "Night %d: a wave of %d goblins comes for the keep!", a->nights + 1, n);
+			if (brutes > 0)
+				say(a, "Night %d: a wave of %d goblins, %d of them brute%s, comes for the keep!", a->nights + 1, n, brutes, brutes == 1 ? "" : "s");
+			else
+				say(a, "Night %d: a wave of %d goblins comes for the keep!", a->nights + 1, n);
 			sound(a, "no");
 		}
 		a->in_night = true;
 	} else if (day > 0.6f) {
 		if (a->in_night && a->have_keep) {
 			a->nights++;
-			say(a, "Night %d survived", a->nights);
+			if (a->mobs.wave_size > 0 && a->survival) {                 /* a wave that was fought: the tribute of the dawn */
+				int planks = 4 + 2 * a->nights > 30 ? 30 : 4 + 2 * a->nights, cobble = 3 + 2 * a->nights > 24 ? 24 : 3 + 2 * a->nights;
+				inv_add(a, BL_PLANKS, planks);
+				inv_add(a, BL_COBBLE, cobble);
+				say(a, "Night %d survived: %d planks and %d cobble were left at the keep", a->nights, planks, cobble);
+				sound(a, "win");
+			} else {
+				say(a, "Night %d survived", a->nights);
+			}
+			a->mobs.wave_size = 0;
 		}
 		if (a->mobs.wave_on)
 			bl_mobs_end_wave(&a->mobs);
@@ -1749,7 +1767,11 @@ static void paint_survival(struct app *a)
 		snprintf(l, sizeof l, "Keep %d   Nights %d   Workers %d   Soldiers %d   (Tab: command view)", (int)ceilf(a->keep_hp), a->nights, nworkers(a), nsoldiers(a));
 		shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, 0xffffffu);
 		if (a->mobs.wave_on && bl_mobs_wave_remaining(&a->mobs) > 0) {
-			snprintf(l, sizeof l, "Wave: %d goblins left", bl_mobs_wave_remaining(&a->mobs));
+			int br = bl_mobs_count_brutes(&a->mobs) + a->mobs.wave_brutes;
+			if (br > 0)
+				snprintf(l, sizeof l, "Wave: %d goblins left, %d of them brute%s", bl_mobs_wave_remaining(&a->mobs), br, br == 1 ? "" : "s");
+			else
+				snprintf(l, sizeof l, "Wave: %d goblins left", bl_mobs_wave_remaining(&a->mobs));
 			shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18 + LM_FONT_H + 2, l, 0xff9a70u);
 		}
 	}
@@ -1932,6 +1954,8 @@ static const char *const HP_NIGHT[] = {
 	"# Goblins",
 	"At night goblins come out of the ground fourteen to twenty-six blocks from you, in the open. They walk at you, climb a block that is one high, and hit when they are near: three of your twenty hit points a blow, once a second, and they push you away.",
 	"In daylight a goblin that stands in the open burns up in about five seconds; one under a roof or in water does not. They never come by day.",
+	"# Brutes",
+	"From the second night on the last goblins of a wave are brutes: bigger (taller than you), darker, with horns and a plate on the chest. A brute has twenty-six hit points - seven blows of the sword - walks slower than a goblin, and hits for five of your hit points, a worker's or a soldier's, and four of the keep's.",
 	"# The sword",
 	"The left button is the sword when a goblin is nearer than the block you aim at: three blows kill one and no block behind it is broken. The crosshair turns red when a blow lands.",
 	"# Hit points",
@@ -1963,7 +1987,8 @@ static const char *const HP_SOLDIERS[] = {
 	"Goblins go for soldiers as they go for workers: four of them kill one, two soldiers can hold off two.",
 	"# Waves",
 	"When night begins and the keep stands a wave of goblins comes out of the ground twenty to thirty-two blocks from the KEEP (not from you) and walks at it. The first night it is three, each night after it two more (up to eighteen), and no more than three to ten are there at a time. The top of the window tells how many are left.",
-	"At dawn the wave is over and the keep mends. Surviving the night is counted. Soldiers are what makes the difference: put the barracks and the soldiers between the goblins and the keep.",
+	"From the second night on the last goblins of the wave are brutes: one on the second night, one more every two nights, four at most. They come last.",
+	"At dawn the wave is over and the keep mends. Surviving the night is counted, and when a wave was fought the keep's people leave a tribute at its foot: four planks and three cobble, and two more of each for every night you have survived (thirty planks and twenty-four cobble at most). Soldiers are what makes the difference: put the barracks and the soldiers between the goblins and the keep.",
 };
 
 static const char *const HP_COMMAND[] = {
@@ -2178,8 +2203,8 @@ static void write_dump(struct app *a)
 			const struct bl_mob *m = &a->mobs.mob[i];
 			fprintf(f, "mob %d x=%.3f y=%.3f z=%.3f hp=%.1f yaw=%.3f hurt=%.2f dist=%.2f\n", i, m->x, m->y, m->z, m->hp, m->yaw, m->hurt, hypotf(m->x - a->pl.x, m->z - a->pl.z));
 		}
-	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f wave=%d/%d/%d barracks=%d\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
-	        a->dig_on ? a->dig_t : -1.0f, a->mobs.wave_on ? bl_mobs_wave_remaining(&a->mobs) : 0, a->mobs.wave_on ? a->mobs.wave_size : 0, a->mobs.wave_on, barracks_find(a, NULL));
+	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f wave=%d/%d/%d barracks=%d brutes=%d\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
+	        a->dig_on ? a->dig_t : -1.0f, a->mobs.wave_on ? bl_mobs_wave_remaining(&a->mobs) : 0, a->mobs.wave_on ? a->mobs.wave_size : 0, a->mobs.wave_on, barracks_find(a, NULL), bl_mobs_count_brutes(&a->mobs));
 	{
 		struct bl_camera cam;
 		cmd_camera(a, &cam);
@@ -3405,8 +3430,8 @@ static int selftest(void)
 		CHECK(!wa.mobs.wave_on, "no wave by day");
 		wa.time_h = 0.0f;
 		survival_tick(&wa, 0.1f);
-		CHECK(wa.mobs.wave_on && wa.mobs.wave_size == 3 && wa.mobs.wave_cap == 3 && wa.in_night, "the first night: a wave of three");
-		bl_mobs_start_wave(&wa.mobs, 99, 99);
+		CHECK(wa.mobs.wave_on && wa.mobs.wave_size == 3 && wa.mobs.wave_cap == 3 && wa.in_night && wa.mobs.wave_brutes == 0, "the first night: a wave of three, no brute");
+		bl_mobs_start_wave(&wa.mobs, 99, 99, 0);
 		int left = wa.mobs.wave_left;
 		survival_tick(&wa, 0.1f);
 		CHECK(wa.mobs.wave_left == left, "one wave a night (the night going on starts no other)");
@@ -3416,15 +3441,30 @@ static int selftest(void)
 		wa.nights = 5;
 		wa.time_h = 0.0f;
 		survival_tick(&wa, 0.1f);
-		CHECK(wa.mobs.wave_size == 13 && wa.mobs.wave_cap == 8, "after five nights thirteen goblins, eight at a time (%d, %d)", wa.mobs.wave_size, wa.mobs.wave_cap);
+		CHECK(wa.mobs.wave_size == 13 && wa.mobs.wave_cap == 8 && wa.mobs.wave_brutes == 3, "after five nights thirteen goblins, eight at a time, three of them brutes (%d, %d, %d)", wa.mobs.wave_size, wa.mobs.wave_cap, wa.mobs.wave_brutes);
 		wa.time_h = 12.0f;
 		survival_tick(&wa, 0.1f);
 		wa.nights = 30;
 		wa.time_h = 0.0f;
 		survival_tick(&wa, 0.1f);
-		CHECK(wa.mobs.wave_size == 18 && wa.mobs.wave_cap == 10, "never more than eighteen, ten at a time");
+		CHECK(wa.mobs.wave_size == 18 && wa.mobs.wave_cap == 10 && wa.mobs.wave_brutes == 4, "never more than eighteen, ten at a time, four brutes");
 		wa.time_h = 12.0f;
 		survival_tick(&wa, 0.1f);
+		/* the second night brings one brute, and the dawn after a fought wave leaves planks and cobble at the keep */
+		wa.nights = 1;
+		wa.in_night = false;
+		wa.inv[BL_PLANKS] = 0;
+		wa.inv[BL_COBBLE] = 0;
+		wa.time_h = 0.0f;
+		survival_tick(&wa, 0.1f);
+		CHECK(wa.mobs.wave_size == 5 && wa.mobs.wave_brutes == 1, "the second night: five goblins, one a brute");
+		wa.time_h = 12.0f;
+		survival_tick(&wa, 0.1f);
+		CHECK(wa.nights == 2 && wa.inv[BL_PLANKS] == 8 && wa.inv[BL_COBBLE] == 7, "the dawn leaves 8 planks and 7 cobble (%d, %d)", wa.inv[BL_PLANKS], wa.inv[BL_COBBLE]);
+		wa.in_night = true;                                    /* a night with no wave (the goblins were off) leaves nothing */
+		wa.mobs.wave_size = 0;
+		survival_tick(&wa, 0.1f);
+		CHECK(wa.inv[BL_PLANKS] == 8 && wa.nights == 3, "no wave, no tribute");
 		wa.mobs_on = false;
 		wa.mobs.enabled = false;
 		bl_mobs_clear_kind(&wa.mobs, BL_MOB_SOLDIER);
@@ -3520,6 +3560,7 @@ int main(int argc, char **argv)
 	char give[256] = "";
 	int ngob = 0;
 	float gob[4][2] = { { 0 } };
+	bool gob_brute[4] = { false };
 	float pet_at = -1.0f;
 	a.day_minutes = 20.0f;
 	a.threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
@@ -3602,11 +3643,13 @@ int main(int argc, char **argv)
 				fprintf(stderr, "mellagui-blocks: --day-minutes wants 0.05 to 600\n");
 				return 2;
 			}
-		} else if (!strcmp(argv[i], "--goblin") && i + 1 < argc) {                 /* a goblin at DX,DZ blocks from where the player starts (for the tests) */
+		} else if ((!strcmp(argv[i], "--goblin") || !strcmp(argv[i], "--brute")) && i + 1 < argc) {   /* a goblin (a brute) at DX,DZ blocks from where the player starts (for the tests) */
+			bool brute = !strcmp(argv[i], "--brute");
 			if (ngob >= 4 || sscanf(argv[++i], "%f,%f%c", &gob[ngob][0], &gob[ngob][1], &junk) != 2) {
-				fprintf(stderr, "mellagui-blocks: --goblin wants DX,DZ (at most four)\n");
+				fprintf(stderr, "mellagui-blocks: --goblin / --brute want DX,DZ (at most four together)\n");
 				return 2;
 			}
+			gob_brute[ngob] = brute;
 			ngob++;
 		} else if (!strcmp(argv[i], "--pet-at") && i + 1 < argc) {
 			pet_at = (float)atof(argv[++i]);
@@ -3629,7 +3672,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -3721,7 +3764,9 @@ int main(int argc, char **argv)
 	for (int i = 0; i < ngob && a.mobs_on; i++) {
 		int gx = (int)floorf(a.pl.x + gob[i][0]), gz = (int)floorf(a.pl.z + gob[i][1]);
 		int top = bl_top(a.world, gx, gz);
-		if (top >= 0)
+		if (top >= 0 && gob_brute[i])
+			bl_mobs_add_brute(&a.mobs, a.world, (float)gx + 0.5f, (float)(top + 1), (float)gz + 0.5f);
+		else if (top >= 0)
 			bl_mobs_add(&a.mobs, a.world, BL_MOB_GOBLIN, (float)gx + 0.5f, (float)(top + 1), (float)gz + 0.5f);
 	}
 	if (!isnan(yaw))

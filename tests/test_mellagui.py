@@ -21016,6 +21016,38 @@ class TestBlocks(Base):
         self.start(flat=False, data=self.data)
         self.assertEqual(self.state()['cmd']['soldiers'], '3')
 
+    def test_a_brute_hits_for_five_and_takes_seven_blows_of_the_sword(self):
+        self.start('--time', '17.9', '--brute', '0,6', mobs=True, survival=False)
+        st = self.state()
+        self.assertEqual(st['game']['brutes'], '1')
+        self.play()
+        hp0 = float(self.state()['player']['hp'])
+        self.assertEqual(hp0, 20.0)
+        st = self.wait(lambda s: float(s['player']['hp']) < 20.0, timeout=20.0)
+        self.assertAlmostEqual(float(st['player']['hp']), 15.0, delta=0.6, msg='a blow of a brute takes five of twenty')
+        # (the seven blows of the sword are counted by blocks-test)
+        mob = list(st['mobs'].values())[0]
+        self.assertEqual(len(st['mobs']), 1)
+        self.assertGreater(mob['hp'], 20.0, 'the brute has more than twenty hit points')
+
+    def test_a_night_survived_leaves_a_tribute_at_the_keep(self):
+        self.start('--time', '22', mobs=True, survival=True)
+        self.play()
+        self.wait(lambda s: s['game']['wave'].split('/')[2] == '1')
+        for i in range(10):                                   # the clock to eight in the morning
+            self.tap('rbrace')
+        st = self.wait(lambda s: s['game']['nights'] == '1', timeout=10.0)
+        self.assertEqual(st['game']['wave'], '0/0/0')
+        self.assertEqual((st['inv'].get('planks'), st['inv'].get('cobble')), (6, 5), 'four and three, and two more of each for the night')
+
+    def test_a_night_with_no_goblins_leaves_nothing(self):
+        self.start('--time', '22', survival=True)             # (the goblins are off: no wave)
+        self.play()
+        for i in range(10):
+            self.tap('rbrace')
+        st = self.wait(lambda s: s['game']['nights'] == '1', timeout=10.0)
+        self.assertEqual(st['inv'].get('planks', 0), 0)
+
     def test_the_palette_has_the_barracks(self):
         self.start()
         self.play()
@@ -21026,7 +21058,7 @@ class TestBlocks(Base):
     def test_the_goblins_are_a_setting_of_the_world_and_a_bad_goblin_option_is_refused(self):
         p = subprocess.run([self.EXE, '--goblin', '1'], capture_output=True, text=True, timeout=10)
         self.assertEqual(p.returncode, 2)
-        self.assertIn('--goblin wants', p.stderr)
+        self.assertIn('--goblin / --brute want', p.stderr)
         self.start('--time', '0', '--save', mobs=True)
         self.play()
         self.tap('m')                                         # off ...

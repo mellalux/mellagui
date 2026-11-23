@@ -2618,7 +2618,7 @@ static void test_soldiers(void)
 		const float keep[3] = { 64.5f, 20.0f, 64.5f }, pl[3] = { 8.5f, 20.0f, 8.5f };
 		bl_mobs_init(&M, 5);
 		bl_mobs_set_keep(&M, true, keep[0], keep[1], keep[2]);
-		bl_mobs_start_wave(&M, 7, 3);
+		bl_mobs_start_wave(&M, 7, 3, 0);
 		CHECK(M.wave_on && M.wave_left == 7 && M.wave_size == 7 && M.wave_cap == 3 && bl_mobs_wave_remaining(&M) == 7, "a wave of seven, three at a time");
 		float dmin = 1e9f, dmax = 0.0f;
 		int maxalive = 0, born = 0, kept_hits = 0, in_block = 0;
@@ -2669,20 +2669,136 @@ static void test_soldiers(void)
 		const float keep[3] = { 64.5f, 20.0f, 64.5f }, pl[3] = { 8.5f, 20.0f, 8.5f };
 		bl_mobs_init(&M, 6);
 		bl_mobs_set_keep(&M, true, keep[0], keep[1], keep[2]);
-		bl_mobs_start_wave(&M, 5, 5);
+		bl_mobs_start_wave(&M, 5, 5, 0);
 		for (int i = 0; i < 30 * 20; i++)
 			bl_mobs_step(&M, w, pl, true, 12.0f, 1.0f / 30.0f, NULL);
 		CHECK(bl_mobs_count_kind(&M, BL_MOB_GOBLIN) == 0 && M.wave_left == 5, "by day nobody comes");
 		bl_mobs_end_wave(&M);
 		CHECK(!M.wave_on && M.wave_left == 0 && bl_mobs_wave_remaining(&M) == 0, "end_wave");
-		bl_mobs_start_wave(&M, 0, 3);
+		bl_mobs_start_wave(&M, 0, 3, 0);
 		CHECK(!M.wave_on, "a wave of none is no wave");
 		bl_mobs_init(&M, 7);                                    /* with no keep a wave does nothing and the old spawning goes on at night near the player */
-		bl_mobs_start_wave(&M, 5, 5);
+		bl_mobs_start_wave(&M, 5, 5, 0);
 		const float pl2[3] = { 64.5f, 20.0f, 64.5f };
 		for (int i = 0; i < 30 * 30; i++)
 			bl_mobs_step(&M, w, pl2, true, 0.0f, 1.0f / 30.0f, NULL);
 		CHECK(bl_mobs_count_kind(&M, BL_MOB_GOBLIN) > 0 && M.wave_left == 5, "no keep: the goblins come round the player as before (%d)", bl_mobs_count_kind(&M, BL_MOB_GOBLIN));
+	}
+	bl_world_free(w);
+}
+
+static void test_brutes(void)
+{
+	const float dusk = 17.9f;
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 31);
+	M.spawn_t = 1e9f;
+
+	/* a brute is a taller, tougher goblin */
+	CHECK(bl_mobs_add_brute(&M, w, 50.5f, 20.0f, 50.5f) && M.mob[0].brute && M.mob[0].kind == BL_MOB_GOBLIN && M.mob[0].hp == BL_BRUTE_HP, "a brute: a goblin with 26 hit points");
+	CHECK(bl_mobs_add(&M, w, BL_MOB_GOBLIN, 60.5f, 20.0f, 50.5f) && !M.mob[1].brute && M.mob[1].hp == BL_GOBLIN_HP, "a plain goblin is none");
+	bl_set(w, 70, 22, 50, BL_STONE);
+	CHECK(!bl_mobs_add_brute(&M, w, 70.5f, 20.0f, 50.5f) && bl_mobs_add(&M, w, BL_MOB_GOBLIN, 70.5f, 20.0f, 50.5f), "under a roof two blocks up there is room for a goblin and none for a brute");
+	bl_set(w, 70, 22, 50, BL_AIR);
+	CHECK(bl_mobs_hit_cell(&M, 50, 21, 50) && bl_mobs_hit_cell(&M, 50, 22, 50) && !bl_mobs_hit_cell(&M, 60, 22, 50), "a block cannot be put in it up to 2.1 m");
+	float eye[3] = { 50.5f, 21.9f, 46.0f }, look[3] = { 0, 0, 1 }, eye2[3] = { 60.5f, 21.9f, 46.0f }, t = 0;
+	CHECK(bl_mobs_pick(&M, eye, look, 6.0f, &t) == 0 && bl_mobs_pick(&M, eye2, look, 6.0f, &t) < 0, "the sword finds a brute at 1.9 m and the goblin's head is lower");
+	/* seven blows of the sword, not three */
+	{
+		int blows = 0;
+		while (M.mob[0].alive && blows < 20) {
+			bl_mobs_hurt(&M, 0, BL_SWORD_DAMAGE, 0, 1);
+			blows++;
+		}
+		CHECK(blows == 7 && M.kills == 1, "seven blows kill a brute (%d)", blows);
+	}
+	bl_mobs_clear(&M);
+
+	/* the picture: taller than a goblin, darker, with horns */
+	{
+		bl_mobs_add_brute(&M, w, 50.5f, 20.0f, 50.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 56.5f, 20.0f, 50.5f);
+		for (int i = 0; i < 2; i++) {
+			M.mob[i].yaw = 0.0f;
+			M.mob[i].ycos = 1.0f;
+			M.mob[i].ysin = 0.0f;
+		}
+		bl_mobs_light(&M, w, 12.0f);
+		struct bl_mob_hit hit;
+		float d[3] = { 0, 0, 1 }, o1[3] = { 50.5f, 22.0f, 46.0f }, o2[3] = { 56.5f, 22.0f, 46.0f };
+		CHECK(bl_mobs_ray(&M, o1, d, 20.0f, &hit) && hit.id == 0, "a ray at 2.0 m hits the brute");
+		CHECK(!bl_mobs_ray(&M, o2, d, 20.0f, &hit), "and goes over the goblin's head");
+		float o3[3] = { 50.5f, 20.0f + 1.15f * 1.5f, 46.0f };
+		struct bl_mob_hit h3;
+		CHECK(bl_mobs_ray(&M, o3, d, 20.0f, &h3) && h3.id == 0 && h3.rgb[1] > h3.rgb[0], "its chest plate is grey-green (%.2f %.2f %.2f)", h3.rgb[0], h3.rgb[1], h3.rgb[2]);
+	}
+	bl_mobs_clear(&M);
+
+	/* it is slower than a goblin (2.1 against 2.7 m/s) and a blow of it is 5 of the player's hit points, with a bigger push */
+	{
+		const float pl[3] = { 55.5f, 20.0f, 72.5f };
+		bl_mobs_add_brute(&M, w, 50.5f, 20.0f, 50.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 60.5f, 20.0f, 50.5f);
+		float dist_b = 0, dist_g = 0, pz = M.mob[0].z, gz = M.mob[1].z;
+		for (int i = 0; i < 30 * 4; i++) {
+			bl_mobs_step(&M, w, pl, true, dusk, 1.0f / 30.0f, NULL);
+			dist_b = M.mob[0].z - pz;
+			dist_g = M.mob[1].z - gz;
+		}
+		CHECK(dist_b > 6.0f && dist_b < 8.8f && dist_g > 8.8f && dist_g < 11.5f, "a brute walks about 8 m in four seconds, a goblin about 10 (%.1f, %.1f)", dist_b, dist_g);
+	}
+	bl_mobs_clear(&M);
+	{
+		const float pl[3] = { 50.5f, 20.0f, 52.5f };
+		bl_mobs_add_brute(&M, w, 50.5f, 20.0f, 50.5f);
+		float damage = 0, kb = 0;
+		int hits = 0;
+		for (int i = 0; i < 30 * 6; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, pl, true, dusk, 1.0f / 30.0f, &R);
+			damage += R.damage;
+			hits += R.hits;
+			kb = fmaxf(kb, hypotf(R.kbx, R.kbz));
+		}
+		CHECK(hits >= 3 && fabsf(damage - 5.0f * (float)hits) < 0.01f, "a blow of a brute takes five hit points (%d blows, %.0f)", hits, damage);
+		CHECK(kb > 7.0f, "and pushes harder (%.1f)", kb);
+	}
+	bl_mobs_clear(&M);
+
+	/* a wave with brutes: they are the last ones, and they hit the keep for four */
+	{
+		const float keep[3] = { 64.5f, 20.0f, 64.5f }, pl[3] = { 8.5f, 20.0f, 8.5f };
+		bl_mobs_init(&M, 8);
+		bl_mobs_set_keep(&M, true, keep[0], keep[1], keep[2]);
+		bl_mobs_start_wave(&M, 5, 5, 2);
+		CHECK(M.wave_brutes == 2, "two of the five are brutes");
+		bl_mobs_start_wave(&M, 5, 5, 9);
+		CHECK(M.wave_brutes == 5, "never more brutes than goblins");
+		bl_mobs_start_wave(&M, 5, 5, 2);
+		int born = 0, born_brutes = 0, order_ok = 1, seen_brute = 0;
+		float kd = 0.0f;
+		int kh = 0;
+		for (int i = 0; i < 30 * 60; i++) {
+			bool had[BL_MOBS_MAX];
+			for (int k = 0; k < BL_MOBS_MAX; k++)
+				had[k] = M.mob[k].alive;
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, pl, true, 0.0f, 1.0f / 30.0f, &R);
+			born += R.born;
+			born_brutes += R.born_brutes;
+			kd += R.keep_damage;
+			kh += R.keep_hits;
+			for (int k = 0; k < BL_MOBS_MAX; k++)
+				if (M.mob[k].alive && !had[k]) {
+					if (M.mob[k].brute)
+						seen_brute = 1;
+					else if (seen_brute)
+						order_ok = 0;                       /* a plain goblin after a brute */
+				}
+		}
+		CHECK(born == 5 && born_brutes == 2 && bl_mobs_count_brutes(&M) == 2 && order_ok, "five born, two of them brutes, and the brutes last (%d, %d)", born, born_brutes);
+		CHECK(kh > 0 && kd > 2.0f * (float)kh, "the keep took %.0f in %d blows: the brutes hit harder", kd, kh);
 	}
 	bl_world_free(w);
 }
@@ -3299,6 +3415,7 @@ int main(int argc, char **argv)
 	printf("workers\n");
 	test_workers();
 	test_soldiers();
+	test_brutes();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

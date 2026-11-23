@@ -36,6 +36,11 @@
 #define BL_WORKER_MAX 8
 #define BL_WORKER_SPEED 2.2f
 
+#define BL_BRUTE_H 2.10f                /* a brute: a goblin that is bigger, tougher and slower; it comes at the end of a wave on the later nights */
+#define BL_BRUTE_HP 26.0f               /* (a sword blow is 4: seven of them) */
+#define BL_BRUTE_HIT 5.0f               /* hit points a blow of it takes from the player, a worker or a soldier (a goblin's is 3) */
+#define BL_BRUTE_KEEP_HIT 4.0f          /* and from the keep (a goblin's is 2) */
+
 #define BL_SOLDIER_H 1.65f              /* the soldier: a little taller than a worker, with a helmet (the model is 1.15 times its boxes) */
 #define BL_SOLDIER_HP 14.0f
 #define BL_SOLDIER_MAX 8
@@ -87,7 +92,13 @@ struct bl_mob {
 	float stuck;                    /* seconds it has got no nearer to where it is going */
 	float best_d;                   /* the nearest it has been to it so far */
 	bool selected;                  /* the player has chosen it (drawn lighter) */
+	bool brute;                     /* a goblin of the big kind (BL_BRUTE_*) */
 };
+
+static inline float bl_mob_height(const struct bl_mob *b)       /* the height of this one's box (a brute is taller than a goblin) */
+{
+	return b->brute ? BL_BRUTE_H : bl_mob_h(b->kind);
+}
 
 struct bl_mobs {
 	struct bl_mob mob[BL_MOBS_MAX];
@@ -103,6 +114,7 @@ struct bl_mobs {
 	int wave_left;                  /* goblins still to appear */
 	int wave_cap;                   /* how many may be there at a time */
 	int wave_size;                  /* how many the wave was made of */
+	int wave_brutes;                /* the last this many goblins of the wave are brutes */
 };
 
 /* what a call of `bl_mobs_step` did to the player */
@@ -115,6 +127,7 @@ struct bl_mobs_result {
 	int keep_hits;
 	int workers_lost;               /* workers the goblins killed */
 	int soldiers_lost;              /* soldiers the goblins killed */
+	int born_brutes;                /* brutes that appeared (they are in `born`, too) */
 	int slain;                      /* goblins the soldiers killed */
 	int nbreak;                     /* blocks the workers have finished: the caller takes them away (bl_break) and keeps what they leave */
 	struct bl_break { int x, y, z; } brk[64];
@@ -125,8 +138,10 @@ void bl_mobs_clear(struct bl_mobs *m);                      /* every mob gone (t
 void bl_mobs_set_keep(struct bl_mobs *m, bool on, float x, float y, float z);    /* where the keep is (the middle of its bottom), or that there is none */
 int bl_mobs_count(const struct bl_mobs *m);                 /* every kind */
 int bl_mobs_count_kind(const struct bl_mobs *m, int kind);
-/* A wave: `n` goblins in all, at most `cap` of them at a time, coming out of the ground 20 to 32 blocks from the keep while it is night (it ends by itself at dawn). */
-void bl_mobs_start_wave(struct bl_mobs *m, int n, int cap);
+/* A wave: `n` goblins in all, at most `cap` of them at a time, coming out of the ground 20 to 32 blocks from the keep while it is night (it ends by itself at dawn).
+ * The last `brutes` of them are brutes. */
+void bl_mobs_start_wave(struct bl_mobs *m, int n, int cap, int brutes);
+int bl_mobs_count_brutes(const struct bl_mobs *m);
 void bl_mobs_end_wave(struct bl_mobs *m);
 int bl_mobs_wave_remaining(const struct bl_mobs *m);        /* goblins still to come + goblins alive */
 void bl_mobs_clear_kind(struct bl_mobs *m, int kind);       /* only that kind (the player died: the goblins go, the workers stay) */
@@ -143,6 +158,8 @@ bool bl_mobs_hurt(struct bl_mobs *m, int i, float damage, float dx, float dz);
 bool bl_mobs_hit_cell(const struct bl_mobs *m, int x, int y, int z);
 /* put one at a place: false when there is no room, the spot is inside a block, or there are too many of the kind (a worker: BL_WORKER_MAX) */
 bool bl_mobs_add(struct bl_mobs *m, const struct bl_world *w, int kind, float x, float y, float z);
+/* a brute (a goblin of the big kind); false when there is no room for one 2.1 m tall */
+bool bl_mobs_add_brute(struct bl_mobs *m, const struct bl_world *w, float x, float y, float z);
 
 /* ---- workers: friendly, they do what they are told ------------------------------------------------------------------------ */
 

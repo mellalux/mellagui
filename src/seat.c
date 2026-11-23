@@ -1451,7 +1451,7 @@ static void dnd_update_action(struct lm_seat *seat)
     uint32_t act = 0;
     if (o) {
         uint32_t avail = (s->dnd_actions_set ? s->dnd_actions : (uint32_t)LM_DND_ACTION_COPY) & o->actions;
-        bool ctrl = ((seat->mods_dep | seat->mods_lat) & LM_MOD_CTRL) != 0;
+        bool ctrl = ((seat->mods_dep | seat->mods_lat | seat->mods_lock) & LM_MOD_CTRL) != 0;      /* (held, latched by a tap with sticky keys, or locked by a second tap) */
         if (ctrl && (avail & LM_DND_ACTION_COPY))               /* Ctrl held: a copy, whatever the target would rather do */
             act = LM_DND_ACTION_COPY;
         else if (o->preferred && (avail & o->preferred))

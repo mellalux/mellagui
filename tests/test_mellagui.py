@@ -30924,7 +30924,7 @@ class TestDesktop(Base):
         st, items = self.state(lambda s, i: 'a.txt' not in i)
         self.assertNotIn('a.txt', items)
 
-    def drop_from_elsewhere(self, c, actions=3, ctrl=False, name='from away.txt', at=(850, 480)):
+    def drop_from_elsewhere(self, c, actions=3, ctrl=False, name='from away.txt', at=(850, 480), before=None):
         """Another program drags a file (in a folder of its own) over `at` on the desktop and lets go; returns the path of that file."""
         src_dir = os.path.join(self.d, 'elsewhere')
         os.makedirs(src_dir, exist_ok=True)
@@ -30943,6 +30943,8 @@ class TestDesktop(Base):
         win = Window(a, 120, 60, title='A')
         a.wl.roundtrip()
         r = [w for w in c.windows()['windows'] if w['title'] == 'A'][0]
+        if before:
+            before()
         c.abs(r['x'] + 6, r['y'] + 6)
         c.sync()
         self.assertIsNotNone(a.wl.wait_for(lambda e: e.obj == ptr and e.name == 'enter', 2.0))
@@ -30988,6 +30990,22 @@ class TestDesktop(Base):
         self.assertTrue(self.wait_file(os.path.join(self.dir, 'from away.txt')), 'the file did not arrive')
         time.sleep(0.3)
         self.assertTrue(os.path.exists(outside), 'Ctrl: a copy, the original stays')
+
+    def test_a_sticky_ctrl_copies_too(self):
+        """With sticky keys a tap of Ctrl latches it (it stays through the whole drag), a second tap locks it: both make the drop a copy."""
+        for taps, tag in ((1, 'latched'), (2, 'locked')):
+            c = self.start('sticky' + tag, files=('here.txt',), folders=())
+            self.state(lambda s, i: len(i) == 1)
+            c.cmd('sticky 1')
+            self.addCleanup(lambda c=c: c.cmd('sticky 0'))
+
+            def press_ctrl(c=c, taps=taps):
+                for _ in range(taps):
+                    c.tap(KEY_LEFTCTRL)
+            outside = self.drop_from_elsewhere(c, before=press_ctrl)
+            self.assertTrue(self.wait_file(os.path.join(self.dir, 'from away.txt')), '%s: the file did not arrive' % tag)
+            time.sleep(0.4)
+            self.assertTrue(os.path.exists(outside), 'a %s Ctrl: a copy, the original stays' % tag)
 
     def test_a_file_that_exists_on_the_desktop_is_asked_about_before_it_is_replaced(self):
         c = self.start('dropask', files=('from away.txt',), folders=())

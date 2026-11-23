@@ -102,7 +102,7 @@ struct hold {
     uint64_t until;
 };
 
-enum job_type { J_QR_START, J_QR_POLL, J_LOAD, J_POLL, J_CMD, J_SCENE, J_LOGOUT, J_QUIT };
+enum job_type { J_QR_START, J_QR_POLL, J_LOAD, J_POLL, J_CMD, J_LOGOUT, J_QUIT };
 
 struct job {
     enum job_type type;
@@ -118,9 +118,6 @@ struct results {
     char qr[200], username[80];
     bool have_msg, msg_err;
     char msg[200];
-    bool have_scenes;
-    struct tuya_scene scenes[TUYA_MAX_SCENE];
-    int nscenes;
 };
 
 /* A device heard in this network (tuyalan). */
@@ -170,9 +167,6 @@ struct app {
     int ncanim;
     bool animating;                     /* a card is still sliding: the loop wakes up every frame */
     double crx, cry;                    /* where the pointer was when the places last changed (the next change waits for 10 px) */
-    struct tuya_scene scene[TUYA_MAX_SCENE];    /* the app's scenes: a row of buttons above the cards */
-    struct box scene_box[TUYA_MAX_SCENE];
-    int nscene;
     char modal_dev[40];                 /* the device whose own view is open ("" = none) */
     char want_dev[40];                  /* a device whose view was asked for (the gadget's card was clicked, `--device ID`): opened as soon as the devices are known */
     int modal_scroll, modal_h;
@@ -479,21 +473,9 @@ static void publish_devs(struct app *a)
 }
 
 /* The devices and their values; a device seen for the first time is also asked what it can be told. */
-static void load_all(struct app *a, bool scenes)
+static void load_all(struct app *a)
 {
     char err[200] = "";
-    if (scenes) {                                               /* (they change rarely: at the start and when the user asks again) */
-        static struct tuya_scene list[TUYA_MAX_SCENE];
-        int n = 0;
-        if (tuya_load_scenes(&a->sess, list, &n, err, sizeof(err))) {
-            pthread_mutex_lock(&a->lock);
-            memcpy(a->res.scenes, list, sizeof(list));
-            a->res.nscenes = n;
-            a->res.have_scenes = true;
-            pthread_mutex_unlock(&a->lock);
-        }
-        err[0] = 0;
-    }
     bool ok = tuya_load_devices(&a->sess, a->master, &a->nmaster, err, sizeof(err));
     if (ok) {
         publish_devs(a);
@@ -568,21 +550,14 @@ static void *worker(void *arg)
             pthread_mutex_unlock(&a->lock);
             if (r == 1) {
                 a->nmaster = 0;
-                load_all(a, true);
+                load_all(a);
             }
             break;
         }
         case J_LOAD:
         case J_POLL:
-            load_all(a, j.type == J_LOAD || j.a[0]);
+            load_all(a);
             break;
-        case J_SCENE: {
-            char text[200];
-            bool ok = tuya_trigger_scene(&a->sess, j.a, j.b, err, sizeof(err));
-            snprintf(text, sizeof(text), "%s%.100s", ok ? "Started: " : "", ok ? j.c : err);
-            result_msg(a, !ok, text);
-            break;
-        }
         case J_CMD: {                                           /* the local network when the device is heard there, else the cloud */
             struct tuya_dev *d = NULL;
             struct lanent e;
@@ -1401,19 +1376,6 @@ static void build_layout(struct app *a)
 {
     int bw = a->win.bw - sbar_w() - 2, y = HEAD_H + PAD - a->scroll;
     a->nctl = 0;
-    if (a->nscene > 0) {                                        /* the scenes: a heading and a row of buttons that wraps */
-        int cx = PAD, cy = y + 22;
-        for (int i = 0; i < a->nscene; i++) {
-            int w = LM_MIN(lm_font_text_width(a->scene[i].name) + 28, bw - 2 * PAD);
-            if (cx + w > bw - PAD && cx > PAD) {
-                cx = PAD;
-                cy += ROW + 6;
-            }
-            a->scene_box[i] = (struct box){ cx, cy, w, ROW };
-            cx += w + 8;
-        }
-        y = cy + ROW + 14;
-    }
     /* The cards in columns: as many as fit at CARD_MIN_W, each card goes (in the order of the list) under the shortest column. */
     int cols = list_cols(bw), cw = (bw - 2 * PAD - (cols - 1) * CARD_GAP) / cols, ybot[MAX_COLS];
     for (int c = 0; c < cols; c++)
@@ -1625,8 +1587,6 @@ static void dump_state(struct app *a)
                 fprintf(f, "bar %s %d %d %d %d %d %d %d\n", which == 1 ? "list" : "view", s.track.x, s.track.y, s.track.w, s.track.h, t.y, t.h, *s.scroll);
             }
         }
-        for (int i = 0; i < a->nscene; i++)
-            fprintf(f, "scene %s %d %d %d %d %s\n", a->scene[i].id, a->scene_box[i].x, a->scene_box[i].y, a->scene_box[i].w, a->scene_box[i].h, a->scene[i].name);
         for (int i = 0; i < a->nctl; i++) {                     /* "ctl" = on a card, "mctl" = in the open device view */
             const struct ctl *c = &a->ctl[i];
             struct tuya_dev *d = &a->dev[c->dev];
@@ -1814,14 +1774,8 @@ static void paint_devices(struct app *a)
     clamp_scroll(a);
     build_layout(a);
     bool live = !a->modal_dev[0] && a->py >= HEAD_H && a->py < w->bh - FOOT_H;
-    if (a->nscene > 0) {
-        wlwin_text(w, PAD + 2, a->scene_box[0].y - 22, "Scenes", 1, lm_theme.accent, 0);
-        for (int i = 0; i < a->nscene; i++)
-            button(w, a->scene_box[i], a->scene[i].name, live && a->scene[i].enabled && in(a->px, a->py, a->scene_box[i]), lm_theme.button_alt,
-                   a->scene[i].enabled ? lm_theme.text : lm_theme.text_dim);
-    }
     if (!a->ndev)
-        wlwin_text(w, 24, HEAD_H + (a->nscene ? 90 : 16), a->loaded ? "This account has no devices." : "Asking for the devices...", 1, lm_theme.text_dim, w->bw - 48);
+        wlwin_text(w, 24, HEAD_H + 16, a->loaded ? "This account has no devices." : "Asking for the devices...", 1, lm_theme.text_dim, w->bw - 48);
     for (int i = 0; i < a->ndev; i++) {
         struct tuya_dev *d = &a->dev[i];
         struct box c = a->card[i];
@@ -1957,10 +1911,10 @@ static void start_qr(struct app *a)
     }
 }
 
-/* Asks for the values again; `full` = the list of scenes too (the user asked). */
-static void refresh(struct app *a, bool full)
+/* Asks for the values again. */
+static void refresh(struct app *a)
 {
-    if (!a->poll_busy && push_job(a, J_POLL, full ? "scenes" : NULL, NULL, NULL)) {
+    if (!a->poll_busy && push_job(a, J_POLL, NULL, NULL, NULL)) {
         a->poll_busy = true;
         a->poll_at = mono_ms() + (uint64_t)a->poll_ms;
     }
@@ -2222,7 +2176,7 @@ static void press_devices(struct app *a)
         return;
     }
     if (in(a->px, a->py, btn_refresh(a))) {
-        refresh(a, true);
+        refresh(a);
         return;
     }
     if (in(a->px, a->py, btn_account(a))) {
@@ -2233,14 +2187,6 @@ static void press_devices(struct app *a)
         return;
     if (a->py < HEAD_H - 8 || a->py >= w->bh - FOOT_H)
         return;
-    for (int i = 0; i < a->nscene; i++)
-        if (in(a->px, a->py, a->scene_box[i])) {
-            if (!a->scene[i].enabled)
-                set_msg(a, true, "%s is switched off in the app", a->scene[i].name);
-            else if (push_job(a, J_SCENE, a->scene[i].home, a->scene[i].id, a->scene[i].name))
-                set_msg(a, false, "Starting %s...", a->scene[i].name);
-            return;
-        }
     for (int i = 0; i < a->nctl; i++)
         if (!a->ctl[i].modal && in(a->px, a->py, a->ctl[i].b)) {
             press_ctl(a, &a->ctl[i]);
@@ -2450,7 +2396,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     else if (ks == LM_KS_Escape)
         w->running = false;
     else if (ks == LM_KS_F1 + 4 || ks == 'r' || ks == 'R')
-        refresh(a, true);
+        refresh(a);
     else if (ks == LM_KS_Down)
         *scroll += 48;
     else if (ks == LM_KS_Up)
@@ -2506,11 +2452,6 @@ static void apply_results(struct app *a)
         copy(a->username, sizeof(a->username), r.username);
         set_msg(a, false, "Logged in");
     }
-    if (r.have_scenes && a->view == V_DEVICES) {
-        memcpy(a->scene, r.scenes, sizeof(a->scene));
-        a->nscene = r.nscenes;
-        a->win.redraw = true;
-    }
     if (r.have_devs) {
         if (!a->dragging && a->cdrag < 0 && a->view == V_DEVICES) {
             a->ndev = 0;
@@ -2546,7 +2487,6 @@ static void apply_results(struct app *a)
     if (r.logged_out) {
         close_modal(a);
         a->confirm_logout = false;
-        a->nscene = 0;
         a->view = V_LOGIN;
         a->ndev = 0;
         a->loaded = false;
@@ -2615,7 +2555,7 @@ static void tick(struct app *a)
         }
     }
     if (a->view == V_DEVICES && !a->poll_busy && !a->dragging && now >= a->poll_at)
-        refresh(a, false);
+        refresh(a);
 }
 
 /* ---- without a window ----------------------------------------------------------------------------------------------------------------------- */

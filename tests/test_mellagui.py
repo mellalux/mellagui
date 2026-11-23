@@ -29162,7 +29162,7 @@ class TestSmart(Base):
 
     SCENES = [{'scene_id': 'sc1', 'name': 'Movie night', 'home': 7}, {'scene_id': 'sc2', 'name': 'Leaving', 'home': 7}]
 
-    def test_the_apps_scenes_are_buttons_and_start_from_the_command_line(self):
+    def test_the_apps_scenes_start_from_the_command_line_and_the_window_has_no_scene_row(self):
         self.cloud('scn', scenes=self.SCENES)
         self.assertEqual(self.cli('--login', 'abc123')[0], 0)
         code, out = self.cli('--scenes')
@@ -29175,15 +29175,8 @@ class TestSmart(Base):
         code, out = self.cli('--scene', 'Nothing')
         self.assertEqual(code, 1)
         self.assertIn('no scene', out)
-        c = self.window('scn')
-        self.wait(lambda: self.devices_shown() and len(self.view().get('scenes', {})) == 2, 'the scenes above the cards')
-        x, y = self.view()['scenes']['Movie night']
-        c.click(self.x0 + x + 10, self.y0 + y + 10)
-        self.wait(lambda: '"sceneId": "sc1"' in self.log(), 'a click starts the scene')
-        self.wait(lambda: self.view()['msg'] == 'Started: Movie night', 'and the foot says so')
-
-    def test_an_account_without_scenes_has_no_scene_row(self):
-        c = self.logged_in_window('noscn')
+        self.window('scn')                                                      # the window has no row of scene buttons (only the command line does)
+        self.wait(self.devices_shown, 'the devices')
         self.assertNotIn('scenes', self.view())
         self.assertEqual(self.view()['ctl'][('plug1', '-', 'details')][0][1], 78)       # the first card is where it always was
 

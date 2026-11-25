@@ -18359,6 +18359,87 @@ class TestCardSounds(Base):
         self.assertGreater(flicks, 20, 'a riffle is many flicks')
 
 
+class TestGameSounds(Base):
+    """src/gamesound.c: the block game's own sounds, made in code. MELLAGUI_SOUND_RAW_DIR writes their samples where the test can look at them."""
+
+    # family: variants, shortest and longest it may be (seconds)
+    FAMILIES = {
+        'break-stone': (3, 0.08, 0.35), 'break-wood': (3, 0.08, 0.35), 'break-dirt': (3, 0.1, 0.3), 'break-glass': (2, 0.2, 0.5), 'break-leaves': (2, 0.15, 0.35),
+        'dig-stone': (3, 0.03, 0.1), 'dig-wood': (3, 0.04, 0.1), 'dig-dirt': (3, 0.05, 0.12),
+        'place-stone': (2, 0.07, 0.2), 'place-wood': (2, 0.08, 0.2), 'place-dirt': (2, 0.08, 0.2), 'place-glass': (2, 0.1, 0.25), 'splash': (2, 0.3, 0.5),
+        'hit': (3, 0.15, 0.35), 'goblin-die': (2, 0.45, 0.8), 'goblin-near': (3, 0.35, 0.7), 'brute': (2, 0.7, 1.1), 'hurt': (3, 0.15, 0.3), 'die': (1, 0.8, 1.3),
+        'arrow': (2, 0.2, 0.35), 'clash': (2, 0.15, 0.3), 'wall-hit': (3, 0.12, 0.25), 'wall-break': (2, 0.5, 0.8),
+        'horn': (1, 1.4, 2.0), 'alarm': (1, 0.9, 1.4), 'keep-fall': (1, 1.6, 2.0), 'dawn': (1, 1.0, 1.5), 'built': (1, 0.7, 1.1), 'join': (1, 0.35, 0.6),
+        'lost': (1, 0.6, 0.9), 'order': (2, 0.1, 0.2), 'no': (1, 0.2, 0.35), 'hammer': (3, 0.04, 0.1),
+    }
+
+    def test_each_game_sound_is_clean_and_of_its_kind_and_a_family_picks_a_variant(self):
+        import array
+        d = tempfile.mkdtemp(prefix='gamesnd-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p, c, stop = self.private_compositor('mellagui-gs1', '--config', 'none', env={'MELLAGUI_SOUND_RAW_DIR': d, 'MELLAGUI_SOUND_FORCE': '1'})
+        c.sync()
+
+        def last():
+            return dict(kv.split('=', 1) for kv in c.cmd('sound')[0].split()[1:] if '=' in kv).get('last')
+        files = {}                                                              # name as asked for -> the file's name (the first variant has no number)
+        for fam, (n, lo, hi) in self.FAMILIES.items():
+            for v in range(1, n + 1):
+                c.cmd('settings game-sound %s%d' % (fam, v))
+                full = 'game-' + fam + (str(v) if v > 1 else '')
+                self.assertEqual(last(), full)
+                files[fam, v] = full
+        for bad in ('nonsense', 'break-stone4', 'break-stone0', 'horn2', 'break', '', 'game-horn'):
+            with self.assertRaises(RuntimeError, msg=bad):
+                c.cmd('settings game-sound ' + (bad or '-'))
+        before = None
+        for _ in range(8):                                                      # a family's name: a variant, never the one given the time before
+            c.cmd('settings game-sound break-stone')
+            self.assertTrue(last().startswith('game-break-stone'), last())
+            self.assertNotEqual(last(), before)
+            before = last()
+        snd = {}
+        for key, name in files.items():
+            path = os.path.join(d, name + '.s16')
+            fam = key[0]
+            want = self.FAMILIES[fam][1] * 44100 * 2
+            for _ in range(200):
+                if os.path.exists(path) and os.path.getsize(path) >= want:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(os.path.exists(path), name)
+            time.sleep(0.01)
+            a = array.array('h')
+            with open(path, 'rb') as f:
+                a.frombytes(f.read())
+            snd[key] = a
+        for (fam, v), a in snd.items():
+            _, lo, hi = self.FAMILIES[fam]
+            self.assertTrue(lo * 44100 <= len(a) <= hi * 44100, '%s%d is %.3f s' % (fam, v, len(a) / 44100))
+            peak = max(abs(x) for x in a)
+            self.assertTrue(3000 < peak < 20000, '%s%d peaks at %d' % (fam, v, peak))
+            self.assertLess(max(abs(x) for x in a[-20:]), 1200, fam + ' ends with a click')
+        for fam, (n, _, _) in self.FAMILIES.items():
+            self.assertEqual(len({bytes(snd[fam, v]) for v in range(1, n + 1)}), n, 'two variants of %s are the same' % fam)
+
+        def crossings(a):                                                       # zero crossings a second: how bright it is
+            return sum(1 for k in range(1, len(a)) if (a[k] < 0) != (a[k - 1] < 0)) * 44100 / len(a)
+        self.assertGreater(crossings(snd['break-glass', 1]), 1.5 * crossings(snd['break-dirt', 1]), 'glass is brighter than earth')
+        self.assertGreater(crossings(snd['clash', 1]), 3 * crossings(snd['wall-hit', 1]), 'steel on steel is brighter than a blow at a wall')
+        self.assertLess(crossings(snd['brute', 1]), crossings(snd['goblin-die', 1]), 'the brute is deeper than a goblin')
+
+        def power(a, hz):                                                       # Goertzel: how much of `hz` there is
+            k = 2 * math.cos(2 * math.pi * hz / 44100)
+            s1 = s2 = 0.0
+            for x in a:
+                s1, s2 = x + k * s1 - s2, s1
+            return (s1 * s1 + s2 * s2 - k * s1 * s2) / len(a)
+        low = snd['horn', 1][:int(0.5 * 44100)]
+        high = snd['horn', 1][int(0.75 * 44100):int(1.5 * 44100)]
+        self.assertGreater(power(low, 146.8), 5 * power(low, 196.0), 'the horn begins low ...')
+        self.assertGreater(power(high, 196.0), 5 * power(high, 146.8), '... and goes up')
+
+
 class TestSolitaire(Base):
     """client/mellagui-solitaire.c: Klondike. The rules through --selftest, the window through its dump."""
     EXE = os.path.join(ROOT, 'build', 'mellagui-solitaire')
@@ -20263,20 +20344,20 @@ class TestBlocks(Base):
         ctl.button(272, True)
         ctl.button(272, False)
         for _ in range(40):
-            if last()[0].startswith('card-draw'):
+            if last()[0].startswith('game-break-'):
                 break
             time.sleep(0.05)
-        self.assertTrue(last()[0].startswith('card-draw'), 'breaking a block: %s' % (last(),))
+        self.assertTrue(last()[0].startswith('game-break-'), 'breaking a block: %s' % (last(),))
         time.sleep(0.15)
         ctl.button(273, True)
         ctl.button(273, False)
         for _ in range(40):
-            if last()[0].startswith('card-place'):
+            if last()[0].startswith('game-place-'):
                 break
             time.sleep(0.05)
-        self.assertTrue(last()[0].startswith('card-place'), 'putting one back: %s' % (last(),))
+        self.assertTrue(last()[0].startswith('game-place-'), 'putting one back: %s' % (last(),))
         self.assertEqual(self.S()['sound'], '1')
-        self.wait(lambda s: int(s['state']['sounds']) >= 2)
+        self.wait(lambda s: int(s['state']['sounds']) >= 2 and s['state']['sfx'].startswith('place-'))
         self.proc.kill()
         self.proc.wait()
         for _ in range(60):

@@ -47,6 +47,7 @@
 #include "blocksmobs.h"
 #include "blocksview.h"
 #include "font.h"
+#include "gamesound.h"
 #include "keymap.h"
 #include "metrics.h"
 #include "protocol.h"
@@ -81,6 +82,8 @@ enum {
 #define KEEP_HP 60.0f                                       /* what the keep can take: a goblin's blow is 2 */
 #define KEEP_H 3                                            /* it is a tower of three blocks */
 #define FAST_MS 15.0
+
+#define N_SFX 33                                            /* the sounds of k_sfx */
 
 enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST };
 
@@ -122,6 +125,10 @@ struct app {
 	uint32_t settings;                                      /* mellagui_settings_v1: the compositor plays the sounds (card-sound) */
 	bool sound_on;
 	int64_t last_sound_ms;
+	int64_t sfx_ms[N_SFX];                                  /* when each sound came last */
+	int last_sfx;                                           /* the last one sent: an index of k_sfx (-1 = none) */
+	float growl_t;                                          /* seconds until a goblin may be heard again */
+	int growls;
 	int nsounds;
 	float water_acc;                                        /* time since the water was last looked at */
 	struct bl_pets pets;                                    /* Tom and Filip (the Matrix room's cat and turtle) in a yard on the ground */
@@ -152,6 +159,7 @@ struct app {
 	bool dig_on;                                            /* a block is being broken: which, and for how long */
 	int dig_x, dig_y, dig_z;
 	float dig_t;
+	float dig_tick;                                         /* the dig_t at which the next blow is heard */
 	bool have_keep;
 	int keep[3];                                            /* the lowest block of the keep */
 	float keep_hp;
@@ -578,17 +586,113 @@ static bool save_all(struct app *a, bool say_it)
 	return true;
 }
 
-/* The compositor plays them (write-only setting card-sound: draw place shuffle win no), so they follow Settings > Sound > Sound feedback and the chosen
- * output. The card game's sounds are borrowed: draw = a block broken, place = a block put, no = a block that could not be put. Never listened to as block sounds. */
+/* The game's own sounds (src/gamesound.c, by family name): how soon one may come again, and whether it is a small one that gives way when something else has
+ * only just sounded. */
+static const struct sfx {
+	const char *name;
+	int gap_ms;
+	bool soft;
+} k_sfx[] = {
+	{ "break-stone", 90, false }, { "break-wood", 90, false }, { "break-dirt", 90, false }, { "break-glass", 90, false }, { "break-leaves", 150, true },
+	{ "dig-stone", 200, true }, { "dig-wood", 200, true }, { "dig-dirt", 200, true },
+	{ "place-stone", 90, false }, { "place-wood", 90, false }, { "place-dirt", 90, false }, { "place-glass", 90, false }, { "splash", 200, false },
+	{ "hit", 200, false }, { "goblin-die", 200, false }, { "goblin-near", 2500, true }, { "brute", 2500, false }, { "hurt", 300, false }, { "die", 1000, false },
+	{ "arrow", 250, true }, { "clash", 300, true }, { "wall-hit", 450, true }, { "wall-break", 300, false },
+	{ "horn", 1000, false }, { "alarm", 6000, false }, { "keep-fall", 1000, false }, { "dawn", 1000, false }, { "built", 500, false }, { "join", 200, false },
+	{ "lost", 800, false }, { "order", 150, false }, { "no", 200, false }, { "hammer", 350, true },
+};
+_Static_assert(sizeof k_sfx / sizeof k_sfx[0] == N_SFX, "N_SFX is the number of sounds in k_sfx");
+
+static int sfx_index(const char *name)
+{
+	for (int i = 0; i < N_SFX; i++)
+		if (!strcmp(k_sfx[i].name, name))
+			return i;
+	return -1;
+}
+
+/* may this sound come now? (it is then counted as sounding) */
+static bool sfx_due(struct app *a, const char *name, int64_t now)
+{
+	int i = sfx_index(name);
+	if (i < 0 || (a->sfx_ms[i] && now - a->sfx_ms[i] < k_sfx[i].gap_ms) || (k_sfx[i].soft && a->last_sound_ms && now - a->last_sound_ms < 70))
+		return false;
+	a->sfx_ms[i] = a->last_sound_ms = now;
+	return true;
+}
+
+/* The compositor plays them (write-only setting game-sound), so they follow Settings > Sound > Sound feedback and the chosen output. */
 static void sound(struct app *a, const char *name)
 {
-	int64_t now = now_ms();
-	if (!a->sound_on || !a->settings || !a->win.c || now - a->last_sound_ms < 90)
+	if (!a->sound_on || !a->settings || !a->win.c || !sfx_due(a, name, now_ms()))
 		return;
-	a->last_sound_ms = now;
 	a->nsounds++;
-	WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = "card-sound" }, { .s = name });
+	a->last_sfx = sfx_index(name);
+	WLC_SEND(a->win.c, a->settings, LM_MELLAGUI_SETTINGS_V1_REQ_SET, { .s = "game-sound" }, { .s = name });
 	wlc_flush(a->win.c);
+}
+
+/* what a block sounds like */
+static const char *material(int b)
+{
+	switch (b) {
+	case BL_LOG: case BL_PLANKS: case BL_TORCH: case BL_GATE: case BL_TOWERPOST:
+		return "wood";
+	case BL_GRASS: case BL_DIRT: case BL_SAND: case BL_SNOW:
+		return "dirt";
+	case BL_GLASS: case BL_LAMP:
+		return "glass";
+	case BL_LEAVES:
+		return "leaves";
+	default:
+		return "stone";
+	}
+}
+
+/* "break", "dig" or "place" for a block of its material (there is no dig sound for glass and leaves, no place sound for leaves) */
+static const char *block_sfx(const char *kind, int b, char buf[24])
+{
+	const char *m = material(b);
+	if (kind[0] == 'd' && !strcmp(m, "glass"))
+		m = "stone";
+	if (kind[0] != 'b' && !strcmp(m, "leaves"))
+		m = "dirt";
+	if (kind[0] == 'p' && bl_water(b))
+		return "splash";
+	snprintf(buf, 24, "%s-%s", kind, m);
+	return buf;
+}
+
+static void block_sound(struct app *a, const char *kind, int b)
+{
+	char buf[24];
+	sound(a, block_sfx(kind, b, buf));
+}
+
+/* is (x, z) near enough to be heard? (the ears are the player, or the point the command camera looks at) */
+static bool heard(const struct app *a, float x, float z, float range)
+{
+	float lx = a->cmd ? a->cam_f[0] : a->pl.x, lz = a->cmd ? a->cam_f[2] : a->pl.z;
+	return hypotf(x - lx, z - lz) <= range;
+}
+
+#define HEAR 32.0f
+
+/* now and then a goblin that is about makes itself heard */
+static void goblin_voices(struct app *a, float dt)
+{
+	a->growl_t -= dt;
+	if (a->growl_t > 0.0f)
+		return;
+	a->growl_t = 1.0f;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *m = &a->mobs.mob[i];
+		if (m->alive && m->kind == BL_MOB_GOBLIN && heard(a, m->x, m->z, 18.0f)) {
+			sound(a, m->brute ? "brute" : "goblin-near");
+			a->growl_t = 3.0f + (float)(++a->growls * 7 % 11) * 0.4f;       /* 3 .. 7 s, not in step */
+			break;
+		}
+	}
 }
 
 /* The hour of the model's day (6 sunrise, 18 sunset: what the renderer's sun does) for a moment of the real day, so that the real sunrise is the model's
@@ -893,7 +997,7 @@ static bool train_worker(struct app *a)
 	}
 	if (a->survival)
 		a->inv[BL_PLANKS] -= WORKER_COST;
-	sound(a, "place");
+	sound(a, "join");
 	say(a, "A worker joins you (%d)", nworkers(a));
 	return true;
 }
@@ -969,7 +1073,7 @@ static bool train_soldier(struct app *a)
 		a->inv[BL_COBBLE] -= SOLDIER_COBBLE;
 		a->inv[BL_PLANKS] -= SOLDIER_PLANKS;
 	}
-	sound(a, "place");
+	sound(a, "join");
 	say(a, "A soldier joins you (%d)", nsoldiers(a));
 	return true;
 }
@@ -1013,6 +1117,8 @@ static void apply_breaks(struct app *a, const struct bl_mobs_result *R)
 		int b = bl_get(a->world, R->brk[k].x, R->brk[k].y, R->brk[k].z);
 		if (!bl_breakable(b) || !bl_set(a->world, R->brk[k].x, R->brk[k].y, R->brk[k].z, BL_AIR))
 			continue;
+		if (heard(a, (float)R->brk[k].x, (float)R->brk[k].z, HEAR))
+			block_sound(a, "break", b);
 		int d = bl_drop(b);
 		if (d != BL_AIR)
 			inv_add(a, d, 1);
@@ -1024,8 +1130,9 @@ static void apply_build(struct app *a, const struct bl_mobs_result *R, float dt)
 {
 	a->siege_msg_t = fmaxf(0.0f, a->siege_msg_t - dt);
 	for (int k = 0; k < R->nplace; k++)
-		if (bl_cell_missing(a->world, &R->place[k]))
-			bl_set(a->world, R->place[k].x, R->place[k].y, R->place[k].z, R->place[k].block);
+		if (bl_cell_missing(a->world, &R->place[k]) && bl_set(a->world, R->place[k].x, R->place[k].y, R->place[k].z, R->place[k].block) &&
+		    heard(a, (float)R->place[k].x, (float)R->place[k].z, HEAR))
+			sound(a, "hammer");
 	int smashed = 0;
 	for (int k = 0; k < R->nsmash; k++) {
 		const struct bl_break *c = &R->smash[k];
@@ -1034,17 +1141,19 @@ static void apply_build(struct app *a, const struct bl_mobs_result *R, float dt)
 	}
 	if (smashed) {
 		say(a, "The goblins have broken through a wall!");
-		sound(a, "no");
+		sound(a, "wall-break");
 		a->siege_msg_t = 8.0f;
 	} else if (R->siege_hits > 0 && a->siege_msg_t <= 0.0f) {
 		say(a, "The goblins are hammering at your walls");
 		a->siege_msg_t = 12.0f;
 	}
+	if (R->siege_hits > 0 || R->keep_hits > 0)
+		sound(a, "wall-hit");
 	for (int k = 0; k < R->nbuilt; k++) {
 		static const char *const k_done[BL_PLAN_COUNT] = { "The barracks is ready: V trains a soldier", "The watchtower is ready: right-click it with a soldier chosen", "A wall is finished", "A gate is finished" };
 		if (R->built[k] >= 0 && R->built[k] < BL_PLAN_COUNT)
 			say(a, "%s", k_done[R->built[k]]);
-		sound(a, "win");
+		sound(a, "built");
 	}
 }
 
@@ -1248,7 +1357,7 @@ static bool build_place(struct app *a)
 		if (m->alive && m->kind == BL_MOB_WORKER && (chosen ? m->selected : m->order == BL_ORDER_IDLE))
 			sent += bl_mobs_order_build(&a->mobs, a->world, i, si);
 	}
-	sound(a, "place");
+	sound(a, "order");
 	if (sent)
 		say(a, "%s: %d worker%s to build it", plan_title(a->plan), sent, sent == 1 ? "" : "s");
 	else
@@ -1369,7 +1478,7 @@ static void cmd_order(struct app *a)
 		}
 		if (si >= 0 && workers) {
 			say(a, sent ? "%d worker%s: build the %s" : "They cannot reach it", sent, sent == 1 ? "" : "s", bl_plan_name(a->mobs.site[si].plan));
-			sound(a, sent ? "place" : "no");
+			sound(a, sent ? "order" : "no");
 			return;
 		}
 	}
@@ -1412,7 +1521,7 @@ static void cmd_order(struct app *a)
 		say(a, "They cannot reach that");
 	else
 		say(a, "%d unit%s: %s there", ok, ok == 1 ? "" : "s", soldiers == ok ? "guard" : "go");
-	sound(a, ok ? "place" : "no");
+	sound(a, ok ? "order" : "no");
 }
 
 static void enter_cmd(struct app *a)
@@ -1655,10 +1764,10 @@ static bool sword_swing(struct app *a, int64_t now)
 	a->hit_t = 0.18f;
 	if (dead) {
 		a->kills++;
-		sound(a, "win");
+		sound(a, "goblin-die");
 		say(a, "Goblin down (%d)", a->kills);
 	} else {
-		sound(a, "draw");
+		sound(a, "hit");
 	}
 	return true;
 }
@@ -1668,8 +1777,9 @@ static void do_break(struct app *a, int64_t now)
 	if (sword_swing(a, now))
 		return;
 	a->arm_swing = 1.0f;
+	int b = a->aimed ? bl_get(a->world, a->aim.x, a->aim.y, a->aim.z) : BL_AIR;
 	if (a->aimed && bl_break(a->world, &a->aim)) {
-		sound(a, "draw");
+		block_sound(a, "break", b);
 		aim_update(a);
 	}
 }
@@ -1699,8 +1809,13 @@ static void dig_step(struct app *a, int64_t now, float dt)
 		a->dig_y = a->aim.y;
 		a->dig_z = a->aim.z;
 		a->dig_t = 0.0f;
+		a->dig_tick = 0.0f;
 	}
 	a->dig_t += dt;
+	if (a->dig_t >= a->dig_tick && a->dig_t < bl_hardness(b)) {     /* a blow at it every quarter of a second */
+		block_sound(a, "dig", b);
+		a->dig_tick += 0.28f;
+	}
 	if (a->arm_swing <= 0.0f)                                   /* the arm goes on swinging while a block is being broken */
 		a->arm_swing = 1.0f;
 	if (a->dig_t >= bl_hardness(b)) {
@@ -1708,7 +1823,7 @@ static void dig_step(struct app *a, int64_t now, float dt)
 			int d = bl_drop(b);
 			if (d != BL_AIR)
 				inv_add(a, d, 1);
-			sound(a, "draw");
+			block_sound(a, "break", b);
 			aim_update(a);
 		}
 		a->dig_on = false;
@@ -1734,7 +1849,7 @@ static void do_place(struct app *a)
 		a->arm_swing = 1.0f;
 		if (a->survival)
 			a->inv[hand_block(a)]--;
-		sound(a, "place");
+		block_sound(a, "place", hand_block(a));
 		aim_update(a);
 	} else {
 		sound(a, "no");
@@ -1776,6 +1891,7 @@ static void keep_fall(struct app *a)
 	a->have_keep = false;
 	a->keep_hp = 0.0f;
 	keep_sync(a);
+	sound(a, "keep-fall");
 	pause_game(a, P_LOST);
 	say(a, "The keep has fallen");
 }
@@ -1792,21 +1908,30 @@ static void mobs_advance(struct app *a, float dt)
 	apply_build(a, &R, dt);
 	if (R.workers_lost > 0) {
 		say(a, R.workers_lost == 1 ? "A goblin killed a worker!" : "Goblins killed workers!");
-		sound(a, "no");
+		sound(a, "lost");
 	}
 	if (R.soldiers_lost > 0) {
 		say(a, R.soldiers_lost == 1 ? "A goblin killed a soldier!" : "Goblins killed soldiers!");
-		sound(a, "no");
+		sound(a, "lost");
 	}
 	if (R.slain > 0) {
 		a->kills += R.slain;
-		sound(a, "win");
+		sound(a, "goblin-die");
+	}
+	for (int i = 0; (R.sword_hits > 0 || R.shots > 0) && i < BL_MOBS_MAX; i++) {         /* your soldiers fighting, if near enough to be heard */
+		const struct bl_mob *m = &a->mobs.mob[i];
+		if (!m->alive || m->kind != BL_MOB_SOLDIER || !heard(a, m->x, m->z, m->posted ? 48.0f : HEAR))
+			continue;
+		if (R.shots > 0 && m->posted)
+			sound(a, "arrow");
+		else if (R.sword_hits > 0 && !m->posted && m->swing > 0.6f)
+			sound(a, "clash");
 	}
 	if (R.keep_damage > 0.0f && a->survival && a->have_keep) {
 		a->keep_hp -= R.keep_damage;
 		if (a->keep_msg_t <= 0.0f) {
 			say(a, "The keep is under attack!");
-			sound(a, "no");
+			sound(a, "alarm");
 			a->keep_msg_t = 8.0f;
 		}
 		if (a->keep_hp <= 0.0f)
@@ -1816,6 +1941,8 @@ static void mobs_advance(struct app *a, float dt)
 		a->brute_warned = true;
 		say(a, "A brute! Seven blows of the sword, and it hits for five");
 	}
+	if (R.born_brutes > 0)
+		sound(a, "brute");
 	if (R.born && !a->warned && before == 0) {
 		a->warned = true;
 		say(a, "A goblin! The left button is the sword");
@@ -1832,7 +1959,7 @@ static void mobs_advance(struct app *a, float dt)
 			a->pl.vy = 4.5f;
 			a->pl.on_ground = false;
 		}
-		sound(a, "no");
+		sound(a, a->hp > 0.0f ? "hurt" : "die");
 		if (a->hp <= 0.0f) {
 			a->hp = 0.0f;
 			pause_game(a, P_DEAD);
@@ -1843,6 +1970,8 @@ static void mobs_advance(struct app *a, float dt)
 		if (a->regen_t > 6.0f)
 			a->hp = fminf(MAX_HP, a->hp + dt / 3.0f);       /* a hit point every three seconds */
 	}
+	if (a->prompt != P_DEAD && a->prompt != P_LOST)
+		goblin_voices(a, dt);
 }
 
 static void respawn(struct app *a)
@@ -1872,7 +2001,7 @@ static void survival_tick(struct app *a, float dt)
 				say(a, "Night %d: a wave of %d goblins, %d of them brute%s, comes for the keep!", a->nights + 1, n, brutes, brutes == 1 ? "" : "s");
 			else
 				say(a, "Night %d: a wave of %d goblins comes for the keep!", a->nights + 1, n);
-			sound(a, "no");
+			sound(a, "horn");
 		}
 		a->in_night = true;
 	} else if (day > 0.6f) {
@@ -1883,10 +2012,10 @@ static void survival_tick(struct app *a, float dt)
 				inv_add(a, BL_PLANKS, planks);
 				inv_add(a, BL_COBBLE, cobble);
 				say(a, "Night %d survived: %d planks and %d cobble were left at the keep", a->nights, planks, cobble);
-				sound(a, "win");
 			} else {
 				say(a, "Night %d survived", a->nights);
 			}
+			sound(a, "dawn");
 			a->mobs.wave_size = 0;
 		}
 		if (a->mobs.wave_on)
@@ -2255,6 +2384,8 @@ static const char *const HP_WELCOME[] = {
 	"- The picture is drawn at a smaller size and stretched, so it stays quick; it takes more pixels by itself when the machine has the time.",
 	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In survival the number under a block is how many you have.",
 	"- Ten hearts over the hotbar are your hit points. In survival the keep's bar is at the top.",
+	"# Sounds",
+	"Blocks sound of what they are made of; the sword, the goblins, your soldiers, the builders, the keep's bell, the horn of a wave and the dawn have their own sounds. They follow Settings > Sound > Sound feedback and the chosen output; --no-sound starts without them.",
 	"# To start",
 	"|Click|Click in the window: the pointer is locked to it and the game goes on. Esc lets the pointer go and pauses.",
 	"|F1|These pages.",
@@ -2584,11 +2715,11 @@ static void write_dump(struct app *a)
 	const struct bl_world *w = a->world;
 	int under = bl_get(w, (int)floorf(a->pl.x), (int)floorf(a->pl.y - 0.1f), (int)floorf(a->pl.z));
 	fprintf(f, "state seed=%u kind=%d size=%dx%dx%d x=%.3f y=%.3f z=%.3f yaw=%.4f pitch=%.4f ground=%d water=%d fly=%d sneak=%d vy=%.3f playing=%d locked=%d lockok=%d "
-	           "prompt=%d slot=%d hand=%s rev=%u time=%.3f clock=%d aimed=%d rw=%d rh=%d fps=%d budget=%.0f debug=%d under=%s saved=%d nosave=%d wpend=%zu light=%d sound=%d sounds=%d\n",
+	           "prompt=%d slot=%d hand=%s rev=%u time=%.3f clock=%d aimed=%d rw=%d rh=%d fps=%d budget=%.0f debug=%d under=%s saved=%d nosave=%d wpend=%zu light=%d sound=%d sounds=%d sfx=%s\n",
 	        w->seed, w->kind, w->w, w->d, w->h, a->pl.x, a->pl.y, a->pl.z, a->pl.yaw, a->pl.pitch, a->pl.on_ground, a->pl.in_water, a->pl.flying, a->pl.sneaking,
 	        a->pl.vy, a->playing, a->win.locked, a->lock_ok, (int)a->prompt, a->slot + 1, bl_block_name(hand_block(a)), w->rev, a->time_h, a->clockm, a->aimed,
 	        a->rw, a->rh, a->fps, a->budget, a->debug, bl_block_name(under), w->rev == a->saved_rev, a->nosave, bl_water_pending(w),
-	        bl_light(w, (int)floorf(a->pl.x), (int)floorf(a->pl.y + 0.5f), (int)floorf(a->pl.z)), a->sound_on, a->nsounds);
+	        bl_light(w, (int)floorf(a->pl.x), (int)floorf(a->pl.y + 0.5f), (int)floorf(a->pl.z)), a->sound_on, a->nsounds, a->nsounds ? k_sfx[a->last_sfx].name : "none");
 	if (a->aimed)
 		fprintf(f, "aim x=%d y=%d z=%d face=%d px=%d py=%d pz=%d t=%.3f block=%s\n", a->aim.x, a->aim.y, a->aim.z, a->aim.face, a->aim.px, a->aim.py, a->aim.pz,
 		        a->aim.t, bl_block_name(bl_get(w, a->aim.x, a->aim.y, a->aim.z)));
@@ -3478,6 +3609,37 @@ static int selftest(void)
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
 	if (system(cmd) != 0)
 		fprintf(stderr, "(could not remove %s)\n", dir);
+
+	/* the sounds: every one the game asks for is one the compositor knows (gamesound.h) and the other way round; the materials; how often they may come */
+	int variants = 0;
+	for (int i = 0; i < N_SFX; i++) {
+		int first = lm_gamesound_pick(k_sfx[i].name, (uint32_t)i);
+		CHECK(first >= 0 && sfx_index(k_sfx[i].name) == i, "the sound \"%s\" is there, once", k_sfx[i].name);
+	}
+	for (int i = 0; i < lm_gamesound_count(); i++) {
+		const char *n = lm_gamesound_name(i) + 5;                        /* (past "game-") */
+		size_t len = strlen(n);
+		if (len && n[len - 1] >= '2' && n[len - 1] <= '9')
+			continue;
+		variants++;
+		CHECK(sfx_index(n) >= 0, "the game knows the sound \"%s\"", n);
+	}
+	CHECK(variants == N_SFX, "%d sounds, %d in the game", variants, N_SFX);
+	static const char *const k_kind[] = { "break", "dig", "place" };
+	for (int b = 1; b < BL_COUNT; b++)
+		for (int k = 0; k < 3; k++) {
+			char buf[24];
+			CHECK(sfx_index(block_sfx(k_kind[k], b, buf)) >= 0, "%s of %s has a sound (%s)", k_kind[k], bl_block_name(b), block_sfx(k_kind[k], b, buf));
+		}
+	char mb[24];
+	CHECK(!strcmp(block_sfx("break", BL_LOG, mb), "break-wood"), "a log breaks like wood");
+	CHECK(!strcmp(block_sfx("place", BL_WATER, mb), "splash") && !strcmp(block_sfx("dig", BL_GRASS, mb), "dig-dirt"), "water splashes, grass is dug like earth");
+	static struct app so;
+	memset(&so, 0, sizeof so);
+	CHECK(sfx_due(&so, "dig-stone", 1000) && !sfx_due(&so, "dig-stone", 1100) && sfx_due(&so, "dig-stone", 1250), "a dig sound comes at most every 0.2 s");
+	CHECK(sfx_due(&so, "break-stone", 1260), "a block that breaks is heard at once after the last blow at it");
+	CHECK(!sfx_due(&so, "hammer", 1290) && sfx_due(&so, "hammer", 1400), "a small sound gives way to one that has only just begun");
+	CHECK(sfx_due(&so, "horn", 1401) && !sfx_due(&so, "horn", 2000) && !sfx_due(&so, "nothing", 3000), "the horn does not give way, and there is no sound called nothing");
 
 	/* the real clock: the real sunrise is the model's 6, the real sunset its 18, noon between, the night stretched evenly (sunrise 08:00, sunset 16:00) */
 	CHECK(fabsf(solar_hours(480, 480, 960) - 6.0f) < 0.01f && fabsf(solar_hours(720, 480, 960) - 12.0f) < 0.01f && fabsf(solar_hours(960, 480, 960) - 18.0f) < 0.01f,

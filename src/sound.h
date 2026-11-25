@@ -30,8 +30,10 @@ enum lm_sound {
     LM_SOUND_CARD_SHUFFLE2,
     LM_SOUND_CARD_WIN,      /* the game was won: a bright plucked run up */
     LM_SOUND_CARD_NO,       /* a card does not go there: two low plucked notes down */
-    LM_SOUND_COUNT
+    LM_SOUND_COUNT          /* from here on: the block game's sounds, LM_SOUND_COUNT + an index of gamesound.h */
 };
+
+int lm_sound_total(void);                       /* every id there is */
 
 /* The samples of `s` (S16_LE mono 44.1 kHz) into buf, at most cap; returns how many. What lm_sound_play hands to the player; also for the tests. */
 size_t lm_sound_render(enum lm_sound s, int16_t *buf, size_t cap);

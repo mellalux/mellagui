@@ -156,6 +156,7 @@ struct bl_mobs_result {
 	int soldiers_lost;              /* soldiers the goblins killed */
 	int born_brutes;                /* brutes that appeared (they are in `born`, too) */
 	int slain;                      /* goblins the soldiers killed */
+	int sword_hits;                 /* blows the soldiers landed */
 	int nbreak;                     /* blocks the workers have finished: the caller takes them away (bl_break) and keeps what they leave */
 	struct bl_break { int x, y, z; } brk[64];
 	int nplace;                     /* blocks the workers have put: the caller sets them (bl_set), if the cell is still empty */

@@ -20,6 +20,7 @@
 
 #include "audio.h"
 #include "chime.h"
+#include "gamesound.h"
 #include "log.h"
 #include "worker.h"
 #include <pthread.h>
@@ -92,9 +93,14 @@ static const struct {
     [LM_SOUND_CARD_NO] = { "card-no", k_card_no, true },
 };
 
+int lm_sound_total(void) { return LM_SOUND_COUNT + lm_gamesound_count(); }
+
 const char *lm_sound_name(enum lm_sound s)
 {
-    return (unsigned)s < LM_SOUND_COUNT ? k_sounds[s].name : "?";
+    if ((unsigned)s < LM_SOUND_COUNT)
+        return k_sounds[s].name;
+    const char *n = lm_gamesound_name((int)s - LM_SOUND_COUNT);
+    return n ? n : "?";
 }
 
 /* Sine with a 5 ms linear fade in/out (no clicks), moderate volume. Returns the number of samples. */
@@ -286,7 +292,7 @@ static size_t gen_shuffle(int variant, int16_t *buf, size_t cap)
 size_t lm_sound_render(enum lm_sound s, int16_t *buf, size_t cap)
 {
     if ((unsigned)s >= LM_SOUND_COUNT)
-        return 0;
+        return lm_gamesound_render((int)s - LM_SOUND_COUNT, buf, cap);
     if (k_sounds[s].gen)
         return k_sounds[s].gen(buf, cap);
     return synth(k_sounds[s].notes, buf, cap, k_sounds[s].pluck);
@@ -482,7 +488,7 @@ static void play_now(enum lm_sound s, const char *g_device)
     const char *rawdir = getenv("MELLAGUI_SOUND_RAW_DIR");
     if (rawdir && *rawdir) {                            /* tests: the samples (S16_LE, 44.1 kHz, mono, without the lead-in) go to <dir>/<name>.s16 instead of a player */
         char path[512];
-        snprintf(path, sizeof(path), "%s/%s.s16", rawdir, k_sounds[s].name);
+        snprintf(path, sizeof(path), "%s/%s.s16", rawdir, lm_sound_name(s));
         FILE *f = fopen(path, "wb");
         if (f) {
             fwrite(buf + pad, sizeof(int16_t), n - pad, f);
@@ -527,7 +533,7 @@ static void play_now(enum lm_sound s, const char *g_device)
         _exit(127);
     }
     close(fd);
-    lm_debug("sound %s (player pid %d)", k_sounds[s].name, (int)pid);
+    lm_debug("sound %s (player pid %d)", lm_sound_name(s), (int)pid);
 }
 
 struct play_job { enum lm_sound s; char device[64]; };
@@ -541,7 +547,7 @@ static void play_run(void *data)
 /* Never waits: the beep is made and handed to a player by the worker thread (worker.h), after whatever was queued before it (a volume change). */
 void lm_sound_play(enum lm_sound s)
 {
-    if ((unsigned)s >= LM_SOUND_COUNT)
+    if ((int)s < 0 || (int)s >= lm_sound_total())
         return;
     struct play_job *j = calloc(1, sizeof(*j));
     if (!j)

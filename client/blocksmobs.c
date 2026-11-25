@@ -844,6 +844,7 @@ static float soldier_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 			struct bl_mob *o = &M->mob[gi];
 			b->attack_cd = BL_SOLDIER_COOLDOWN;
 			b->swing = 1.0f;
+			R->sword_hits++;
 			o->hp -= BL_SOLDIER_DAMAGE;
 			o->hurt = 0.35f;
 			float inv = gd > 0.01f ? 1.0f / gd : 0.0f;

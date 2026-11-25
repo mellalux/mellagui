@@ -122,7 +122,7 @@ static void test_world(void)
 	}
 	CHECK(bad == 0, "%d cells hold a number that is no block", bad);
 	for (int k = BL_GRASS; k < BL_COUNT; k++)
-		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && k != BL_BARRACKS && k != BL_GATE && k != BL_TOWERPOST && !(k >= BL_FLOW1 && k <= BL_FLOW7))
+		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && k != BL_BARRACKS && k != BL_GATE && k != BL_TOWERPOST && k != BL_REDKEEP && !(k >= BL_FLOW1 && k <= BL_FLOW7))
 			CHECK(count[k] > 0, "the world has no %s", bl_block_name(k));
 	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0 && count[BL_KEEP] == 0 && count[BL_BARRACKS] == 0 && count[BL_GATE] == 0 && count[BL_TOWERPOST] == 0, "glass / planks / torches / lamps are only for the player to put, the keep for the game");
 	long flowing = 0;
@@ -3735,6 +3735,115 @@ static void test_paths(void)
 	bl_world_free(w);
 }
 
+/* ---- the rival clan's guards -------------------------------------------------------------------------------------------- */
+
+static void guard_steps(struct bl_mobs *M, const struct bl_world *w, const float pl[3], bool alive, float secs, struct bl_mobs_result *sum)
+{
+	memset(sum, 0, sizeof *sum);
+	for (int i = 0; i < (int)(secs * 30.0f); i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(M, w, pl, alive, 12.0f, 1.0f / 30.0f, &R);
+		sum->damage += R.damage;
+		sum->hits += R.hits;
+		sum->guard_hits += R.guard_hits;
+		sum->guards_slain += R.guards_slain;
+		sum->soldiers_lost += R.soldiers_lost;
+		sum->workers_lost += R.workers_lost;
+		sum->slain += R.slain;
+		sum->rkeep_damage += R.rkeep_damage;
+		sum->shots += R.shots;
+	}
+}
+
+static void test_rival(void)
+{
+	static struct bl_mobs M;
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	const float away[3] = { 5.5f, 20.0f, 5.5f };
+	struct bl_mobs_result S;
+	bl_mobs_init(&M, 4);
+	M.enabled = false;
+	int n = 0;
+	for (int i = 0; i < 12; i++)
+		n += bl_mobs_add(&M, w, BL_MOB_GUARD, 20.5f + (float)i * 2.0f, 20.0f, 100.5f);
+	CHECK(n == BL_GUARD_MAX && bl_mob_is_foe(BL_MOB_GUARD) && !bl_mob_is_unit(BL_MOB_GUARD), "eight guards at most; they are foes, not the player's own (%d)", n);
+	CHECK(bl_mobs_hit_cell(&M, 20, 21, 100), "no block is put into one");
+	float o[3] = { 20.5f, 21.0f, 97.5f }, dir[3] = { 0.0f, 0.0f, 1.0f }, t = 0.0f;
+	CHECK(bl_mobs_pick(&M, o, dir, 4.0f, &t) == 0 && bl_units_pick(&M, o, dir, 4.0f, &t) < 0, "the sword finds a guard, the command view does not choose him");
+
+	/* he goes for the player who comes near and hits him; one far off he leaves alone; then back to his post */
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_GUARD, 60.5f, 20.0f, 60.5f);
+	float pl[3] = { 60.5f, 20.0f, 80.5f };
+	guard_steps(&M, w, pl, true, 3.0f, &S);
+	CHECK(S.hits == 0 && fabsf(M.mob[0].z - 60.5f) < 0.5f, "a player 20 blocks off is not seen");
+	pl[2] = 69.5f;
+	guard_steps(&M, w, pl, true, 8.0f, &S);
+	CHECK(S.guard_hits >= 3 && S.damage == BL_GUARD_HIT * (float)S.guard_hits && S.hits == S.guard_hits, "9 blocks off he comes and strikes, BL_GUARD_HIT a blow (%d blows, %.0f)", S.guard_hits, S.damage);
+	guard_steps(&M, w, away, false, 8.0f, &S);
+	CHECK(hypotf(M.mob[0].x - 60.5f, M.mob[0].z - 60.5f) < 1.5f, "and goes back to his post (%.1f %.1f)", M.mob[0].x, M.mob[0].z);
+
+	/* against the player's own: soldier and guard fight; the dead are counted on the right side */
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_GUARD, 60.5f, 20.0f, 60.5f);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 60.5f, 20.0f, 66.5f);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 62.5f, 20.0f, 66.5f);
+	guard_steps(&M, w, away, false, 12.0f, &S);
+	CHECK(S.guards_slain == 1 && S.slain == 0 && bl_mobs_count_kind(&M, BL_MOB_GUARD) == 0 && M.kills == 0, "two soldiers bring a guard down: not a goblin kill (%d)", S.guards_slain);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_GUARD, 60.5f, 20.0f, 60.5f);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 60.5f, 20.0f, 66.5f);
+	guard_steps(&M, w, away, false, 12.0f, &S);
+	CHECK(S.workers_lost == 1, "a guard kills a worker");
+	bl_mobs_clear(&M);
+	M.enabled = true;
+	M.cap = 0;
+	bl_mobs_add(&M, w, BL_MOB_GUARD, 60.5f, 20.0f, 60.5f);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 60.5f, 20.0f, 66.5f);
+	for (int i = 0; i < 30 * 20; i++)
+		bl_mobs_step(&M, w, away, false, 17.9f, 1.0f / 30.0f, NULL);
+	CHECK(bl_mobs_count(&M) == 1 && M.kills == 0, "a goblin and a guard fight to the death, and it is no kill of the player's (%d left)", bl_mobs_count(&M));
+	M.enabled = false;
+
+	/* the keep of the clan: a soldier sent there strikes it, when no enemy is near */
+	bl_mobs_clear(&M);
+	for (int y = 20; y < 23; y++)
+		bl_set(w, 90, y, 90, BL_REDKEEP);
+	bl_mobs_set_rival(&M, true, 90.5f, 20.0f, 90.5f);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 90.5f, 20.0f, 20.5f);
+	guard_steps(&M, w, away, false, 2.0f, &S);
+	CHECK(S.rkeep_damage == 0.0f, "not before he is sent");
+	bl_mobs_order_move(&M, 0, 90.5f, 89.5f);
+	guard_steps(&M, w, away, false, 40.0f, &S);
+	CHECK(S.rkeep_damage >= 40.0f && fmodf(S.rkeep_damage, BL_SOLDIER_KEEP_HIT) == 0.0f, "sent 70 blocks, he gets there and strikes it (%.0f)", S.rkeep_damage);
+	bl_mobs_set_rival(&M, false, 90.5f, 20.0f, 90.5f);
+	guard_steps(&M, w, away, false, 5.0f, &S);
+	CHECK(S.rkeep_damage == 0.0f, "no blows when the clan is off");
+	CHECK(!bl_breakable(BL_REDKEEP) && bl_solid(BL_REDKEEP) && !strcmp(bl_block_name(BL_REDKEEP), "redkeep") && bl_siege_hp(BL_REDKEEP) == 0, "their keep is a block no hand takes away");
+
+	/* an archer of theirs on a watchtower shoots the player and his soldiers */
+	bl_mobs_clear(&M);
+	bl_set(w, 40, 24, 40, BL_TOWERPOST);
+	CHECK(bl_mobs_add_archer(&M, w, 40, 24, 40) && !bl_mobs_add_archer(&M, w, 41, 24, 40), "an archer stands on a watchpost, nowhere else");
+	float near_pl[3] = { 48.5f, 20.0f, 40.5f };
+	guard_steps(&M, w, near_pl, true, 5.0f, &S);
+	CHECK(S.shots >= 3 && S.guard_hits == S.shots && S.damage == BL_BOW_DAMAGE * (float)S.shots, "and shoots the player (%d shots, %.0f)", S.shots, S.damage);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 45.5f, 20.0f, 40.5f);
+	guard_steps(&M, w, away, false, 6.0f, &S);
+	CHECK(S.workers_lost == 1, "or a worker");
+
+	/* a gate stops a guard as it stops a goblin */
+	bl_mobs_clear(&M);
+	for (int x = 0; x < 128; x++)
+		for (int y = 20; y < 23; y++)
+			bl_set(w, x, y, 62, x == 60 && y < 22 ? BL_GATE : BL_STONE);
+	bl_mobs_add(&M, w, BL_MOB_GUARD, 60.5f, 20.0f, 58.5f);
+	float beyond[3] = { 60.5f, 20.0f, 66.5f };
+	guard_steps(&M, w, beyond, true, 8.0f, &S);
+	CHECK(S.hits == 0 && M.mob[0].z < 62.0f, "he does not pass the player's gate (z %.1f)", M.mob[0].z);
+	bl_world_free(w);
+}
+
 static void test_workers(void)
 {
 	const float far_pl[3] = { 64.5f, 20.0f, 110.0f };
@@ -4368,6 +4477,7 @@ int main(int argc, char **argv)
 	test_paths();
 	test_workers();
 	test_raids();
+	test_rival();
 	test_soldiers();
 	test_brutes();
 	printf("building\n");

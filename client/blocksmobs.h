@@ -28,7 +28,7 @@
 #include "blocksbuild.h"
 #include "blockspath.h"
 
-#define BL_MOBS_MAX 40                  /* goblins, workers and soldiers together */
+#define BL_MOBS_MAX 56                  /* goblins, workers, soldiers and the rival clan's guards together */
 #define BL_GOBLIN_HW 0.30f              /* half the width of its box, and its height */
 #define BL_GOBLIN_H 1.70f
 #define BL_GOBLIN_HP 10.0f
@@ -63,6 +63,17 @@
 #define BL_SOLDIER_SEE 12.0f            /* how far a soldier sees a goblin */
 #define BL_SOLDIER_LEASH 18.0f          /* and how far from its post it goes after one */
 
+/* The rival clan, the Red Banner: its guards hold a camp round its keep. They fight the player, his people and the goblins that come within sight of their post. */
+#define BL_GUARD_MAX 8
+#define BL_GUARD_HP 18.0f               /* (a soldier has 14: they are the better fighters, and they are at home) */
+#define BL_GUARD_HIT 3.0f               /* hit points a blow of a guard takes (from the player, his people or a goblin) */
+#define BL_GUARD_COOLDOWN 0.9f
+#define BL_GUARD_SPEED 2.8f
+#define BL_GUARD_SEE 14.0f              /* how far a guard sees an enemy ... */
+#define BL_GUARD_LEASH 20.0f            /* ... and how far from its post it goes after one */
+#define BL_RIVAL_AT_KEEP 10.0f          /* a soldier of the player whose post is this near the rival keep attacks it when no enemy is about */
+#define BL_SOLDIER_KEEP_HIT 4.0f        /* what a blow of his takes from it */
+
 #define BL_BUILD_TIME 0.5f              /* seconds a worker takes to put one block of a building */
 #define BL_BOW_RANGE 20.0f              /* a soldier on a watchtower shoots the goblins this near (horizontally) that it can see */
 #define BL_BOW_DAMAGE 3.0f              /* four arrows kill a goblin */
@@ -72,17 +83,22 @@
 #define BL_DAMAGED_MAX 24               /* blocks the goblins have started on */
 #define BL_PATH_BUDGET 5000             /* places that all the searches for a way may look at in one call of bl_mobs_step */
 
-enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER, BL_MOB_SOLDIER };
+enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER, BL_MOB_SOLDIER, BL_MOB_GUARD };
 enum bl_order { BL_ORDER_IDLE = 0, BL_ORDER_MOVE, BL_ORDER_GATHER, BL_ORDER_BUILD, BL_ORDER_TOWER };
 
 static inline float bl_mob_h(int kind)                         /* the height of a kind's box */
 {
-	return kind == BL_MOB_WORKER ? BL_WORKER_H : kind == BL_MOB_SOLDIER ? BL_SOLDIER_H : BL_GOBLIN_H;
+	return kind == BL_MOB_WORKER ? BL_WORKER_H : kind == BL_MOB_SOLDIER || kind == BL_MOB_GUARD ? BL_SOLDIER_H : BL_GOBLIN_H;
 }
 
 static inline bool bl_mob_is_unit(int kind)                    /* the player's: a worker or a soldier */
 {
 	return kind == BL_MOB_WORKER || kind == BL_MOB_SOLDIER;
+}
+
+static inline bool bl_mob_is_foe(int kind)                     /* an enemy of the player: a goblin or a guard of the rival clan (the sword hits it; a gate stops it) */
+{
+	return kind == BL_MOB_GOBLIN || kind == BL_MOB_GUARD;
 }
 
 struct bl_mob {
@@ -150,6 +166,8 @@ struct bl_mobs {
 	int wave_cap;                   /* how many may be there at a time */
 	int wave_size;                  /* how many the wave was made of */
 	int wave_brutes;                /* the last this many goblins of the wave are brutes */
+	bool rival_on;                  /* the rival clan's keep stands: the player's soldiers that are sent to it attack it */
+	float rkeep[3];                 /* the middle of the bottom of it */
 	int path_budget;                /* places that may still be looked at in this call (BL_PATH_BUDGET) */
 	int paths;                      /* ways that have been looked for since the start */
 	struct bl_site site[BL_SITES_MAX];      /* what is being built */
@@ -177,6 +195,9 @@ struct bl_mobs_result {
 	int born_brutes;                /* brutes that appeared (they are in `born`, too) */
 	int slain;                      /* goblins the soldiers killed */
 	int sword_hits;                 /* blows the soldiers landed */
+	float rkeep_damage;             /* hit points the player's soldiers took from the rival keep */
+	int guards_slain;               /* guards the player's soldiers and archers killed */
+	int guard_hits;                 /* blows of the guards (and their archer) at the player; they are in `hits` and `damage`, too */
 	int nbreak;                     /* blocks the workers have finished: the caller takes them away (bl_break) and keeps what they leave */
 	struct bl_break { int x, y, z; } brk[64];
 	int nplace;                     /* blocks the workers have put: the caller sets them (bl_set), if the cell is still empty */
@@ -200,6 +221,9 @@ void bl_mobs_start_wave(struct bl_mobs *m, int n, int cap, int brutes);
 int bl_mobs_count_brutes(const struct bl_mobs *m);
 void bl_mobs_end_wave(struct bl_mobs *m);
 int bl_mobs_wave_remaining(const struct bl_mobs *m);        /* goblins still to come + goblins alive */
+void bl_mobs_set_rival(struct bl_mobs *m, bool on, float x, float y, float z);   /* where the rival keep is, or that there is none */
+/* a guard of the rival clan up on a watchtower of theirs (its post at x, y, z), shooting; false when there is no room */
+bool bl_mobs_add_archer(struct bl_mobs *m, const struct bl_world *w, int x, int y, int z);
 void bl_mobs_clear_kind(struct bl_mobs *m, int kind);       /* only that kind (the player died: the goblins go, the workers stay) */
 
 /* One step of every mob. `player` = the feet of the player; `pl_alive` false = nobody to hunt. `time_h` is the hour of the day (blocksview.h): goblins appear
@@ -208,7 +232,8 @@ void bl_mobs_clear_kind(struct bl_mobs *m, int kind);       /* only that kind (t
  * day. A goblin is dropped when it is far from the player, the keep and every unit. */
 void bl_mobs_step(struct bl_mobs *m, const struct bl_world *w, const float player[3], bool pl_alive, float time_h, float dt, struct bl_mobs_result *out);
 
-/* the goblin the ray hits first within `reach` (-1 = none, *t = the distance); a box a little bigger than the body, so that a blow does not miss by a hair. Workers are not hit. */
+/* the enemy (a goblin or a rival guard) the ray hits first within `reach` (-1 = none, *t = the distance); a box a little bigger than the body, so that a blow
+ * does not miss by a hair. The player's own are not hit. */
 int bl_mobs_pick(const struct bl_mobs *m, const float o[3], const float dir[3], float reach, float *t);
 /* a blow: `damage` hit points, knocked back along the horizontal direction (dx, dz) (any length); true when it died */
 bool bl_mobs_hurt(struct bl_mobs *m, int i, float damage, float dx, float dz);

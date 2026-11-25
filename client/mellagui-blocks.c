@@ -74,7 +74,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_O = 24, K_Y = 21, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111, K_H = 35,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_O = 24, K_Y = 21, K_K = 37, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111, K_H = 35,
 };
 
 #define SLOTS 9
@@ -92,9 +92,15 @@ enum {
 #define KEEP_H 3                                            /* it is a tower of three blocks */
 #define FAST_MS 15.0
 
+#define RIVAL_HP 200.0f                                     /* what the Red Banner's keep can take: a blow of the sword takes 3, of a soldier 4 */
+#define RIVAL_SWORD 3.0f
+#define RIVAL_GUARDS 6                                      /* the guards of their camp besides the archer; one more comes every RIVAL_REINFORCE seconds while there are fewer */
+#define RIVAL_REINFORCE 45.0f
+#define RIVAL_NAME "Red Banner"
+
 #define N_SFX 33                                            /* the sounds of k_sfx */
 
-enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE };
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE, P_CLAN, P_WON };
 
 struct app {
 	struct wlhelp help;                                     /* the pages of F1 */
@@ -114,6 +120,15 @@ struct app {
 	struct wlpicker pk;
 	struct wlclip clip;
 	struct wlrail_anim ran;                                 /* the springs of the rail */
+	int rival;                                              /* the rival clan: 0 it has never come to this world, 1 its camp stands, 2 it has been beaten */
+	bool rival_on;                                          /* ... and it is switched on (its guards are about, its keep can be attacked) */
+	bool cli_rival, cli_no_rival;                           /* --rival (it comes at once), --no-rival (a new world gets none) */
+	int rkeep[3];                                           /* the lowest block of its keep */
+	float rhp;                                              /* what the keep can still take */
+	int rguards;                                            /* how many guards there are while it is switched off, or as the file said */
+	bool rarcher;                                           /* ... and whether one is on the tower */
+	float rguard_t;                                         /* seconds until the next one comes */
+	float rhit_t;                                           /* seconds the keep's bar shows after a blow at it */
 	int rail_hover;
 	uint32_t saved_rev;
 	int64_t last_save_ms;
@@ -434,6 +449,20 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 		if (!strcmp(k, "world")) {
 			v[strcspn(v, "\r\n")] = 0;
 			snprintf(a->last_world, sizeof a->last_world, "%s", v);
+		} else if (with_player && !strcmp(k, "rival")) {
+			int state, on, x, y, z, guards, archer;
+			float hp;
+			if (sscanf(v, "%d %d %d %d %d %f %d %d", &state, &on, &x, &y, &z, &hp, &guards, &archer) == 8 && state >= 1 && state <= 2 && x > 0 && y > 0 && z > 0 &&
+			    x < BL_MAX_SIZE && z < BL_MAX_SIZE && y < BL_MAX_H && hp >= 0.0f && hp <= RIVAL_HP && guards >= 0 && guards <= BL_GUARD_MAX) {
+				a->rival = state;
+				a->rival_on = on != 0 && state == 1;
+				a->rkeep[0] = x;
+				a->rkeep[1] = y;
+				a->rkeep[2] = z;
+				a->rhp = hp;
+				a->rguards = guards;
+				a->rarcher = archer != 0;
+			}
 		} else if (!strcmp(k, "fov") && d >= 40 && d <= 120)
 			a->fov = (float)(d * M_PI / 180.0);
 		else if (!strcmp(k, "sensitivity") && d >= 0.0005 && d <= 0.02)
@@ -540,6 +569,15 @@ static void conf_load(struct app *a, bool with_player)
 	fclose(f);
 }
 
+/* the Red Banner's guards: those on the tower (`posted`) or those on the ground */
+static int rival_count(const struct app *a, bool posted)
+{
+	int n = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		n += a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_GUARD && a->mobs.mob[i].posted == posted;
+	return n;
+}
+
 /* everything about the game as it is now, as lines conf_read understands */
 static void conf_write(const struct app *a, FILE *f)
 {
@@ -576,6 +614,15 @@ static void conf_write(const struct app *a, FILE *f)
 			for (int k = 0; k < st->n; k++)
 				fprintf(f, "%s%d:%d:%d:%d", k ? "," : "", st->c[k].x, st->c[k].y, st->c[k].z, st->c[k].block);
 		}
+	if (a->rival) {
+		int guards = a->rguards;
+		bool archer = a->rarcher;
+		if (a->rival_on) {
+			guards = rival_count(a, false);
+			archer = rival_count(a, true) > 0;
+		}
+		fprintf(f, "\nrival = %d %d %d %d %d %.1f %d %d", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, guards, archer);
+	}
 	fprintf(f, "\ninv = ");
 	{
 		bool first = true;
@@ -1191,6 +1238,263 @@ static void sites_restore(struct app *a)
 	}
 }
 
+/* ================================================================ the rival clan ================================================================ */
+
+static void pause_game(struct app *a, enum prompt p);
+
+/* the height of the ground at (x, z): the top block that is not part of a tree */
+static int ground_at(const struct bl_world *w, int x, int z)
+{
+	for (int y = w->h - 2; y > 0; y--) {
+		int b = bl_get(w, x, y, z);
+		if (b != BL_AIR && b != BL_LOG && b != BL_LEAVES && !bl_water(b) && b != BL_TORCH)
+			return y;
+	}
+	return 0;
+}
+
+#define CAMP_R 8                                                /* the camp is levelled this far from its keep; its wall runs CAMP_WALL from it */
+#define CAMP_WALL 6
+
+/* A place for their camp, 80 to 120 blocks (less in a small world) from the player's keep (else from him): as level and dry as there is, with nothing a hand has
+ * made near it and nobody of the player's within 50. out = x, the height of the ground, z. */
+static bool rival_site(const struct app *a, int out[3])
+{
+	const struct bl_world *w = a->world;
+	float hx = a->have_keep ? (float)a->keep[0] : a->pl.x, hz = a->have_keep ? (float)a->keep[2] : a->pl.z;
+	int size = w->w < w->d ? w->w : w->d;
+	float dmin = fminf(80.0f, (float)size * 0.35f), best = 1e9f, apart = fminf(50.0f, dmin * 0.7f);
+	for (float r = dmin; r <= dmin + 40.0f; r += 8.0f)
+		for (int k = 0; k < 32; k++) {
+			float ang = (float)k * 6.2831853f / 32.0f;
+			int x = (int)floorf(hx + sinf(ang) * r), z = (int)floorf(hz + cosf(ang) * r);
+			if (x < CAMP_R + 3 || z < CAMP_R + 3 || x >= w->w - CAMP_R - 3 || z >= w->d - CAMP_R - 3)
+				continue;
+			bool ok = hypotf((float)x - a->pl.x, (float)z - a->pl.z) >= apart;
+			for (int i = 0; ok && i < BL_MOBS_MAX; i++)
+				ok = !(a->mobs.mob[i].alive && bl_mob_is_unit(a->mobs.mob[i].kind) && hypotf((float)x - a->mobs.mob[i].x, (float)z - a->mobs.mob[i].z) < apart);
+			int lo = 1000, hi = -1000, wet = 0, sum = 0, n = 0;
+			for (int dz = -CAMP_R; ok && dz <= CAMP_R; dz++)
+				for (int dx = -CAMP_R; ok && dx <= CAMP_R; dx++) {
+					int g = ground_at(w, x + dx, z + dz);
+					wet += bl_water(bl_get(w, x + dx, g + 1, z + dz));
+					lo = g < lo ? g : lo;
+					hi = g > hi ? g : hi;
+					sum += g;
+					n++;
+					for (int y = g - 3; y <= g + 5 && ok; y++) {
+						int b = bl_get(w, x + dx, y, z + dz);
+						ok = !(bl_siege_hp(b) > 0 || b == BL_KEEP || b == BL_REDKEEP);
+					}
+				}
+			if (!ok || wet > n / 4)
+				continue;
+			float score = (float)(hi - lo) * 4.0f + (float)wet * 3.0f + (r - dmin) * 0.1f;
+			if (score < best) {
+				int level = (sum + n / 2) / n;
+				if (w->kind == 0 && level < w->h * 22 / 64)             /* (never under the sea) */
+					level = w->h * 22 / 64;
+				if (level < 3 || level + 12 >= w->h)
+					continue;
+				best = score;
+				out[0] = x;
+				out[1] = level;
+				out[2] = z;
+			}
+		}
+	return best < 1e9f;
+}
+
+/* The camp itself: the ground levelled, a wall with a gateway on two sides, the keep in the middle and a watchtower in a corner. */
+static void rival_build(struct app *a, int x, int level, int z)
+{
+	struct bl_world *w = a->world;
+	for (int dz = -CAMP_R; dz <= CAMP_R; dz++)
+		for (int dx = -CAMP_R; dx <= CAMP_R; dx++) {
+			for (int y = w->h - 2; y > level; y--)
+				if (bl_get(w, x + dx, y, z + dz) != BL_AIR)
+					bl_set(w, x + dx, y, z + dz, BL_AIR);
+			for (int y = level - 1; y > 1; y--) {
+				int b = bl_get(w, x + dx, y, z + dz);
+				if (b != BL_AIR && !bl_water(b) && b != BL_LEAVES && b != BL_LOG)
+					break;
+				bl_set(w, x + dx, y, z + dz, BL_DIRT);
+			}
+			bl_set(w, x + dx, level, z + dz, BL_GRASS);
+		}
+	float to_x = (a->have_keep ? (float)a->keep[0] : a->pl.x) - (float)x, to_z = (a->have_keep ? (float)a->keep[2] : a->pl.z) - (float)z;
+	bool gate_x = fabsf(to_x) > fabsf(to_z);                    /* the gateways face the player, and away from him */
+	for (int d = -CAMP_WALL; d <= CAMP_WALL; d++)
+		for (int y = 1; y <= 2; y++) {
+			bool open = d >= -1 && d <= 1;
+			if (!(open && !gate_x)) {
+				bl_set(w, x + d, level + y, z - CAMP_WALL, BL_COBBLE);
+				bl_set(w, x + d, level + y, z + CAMP_WALL, BL_COBBLE);
+			}
+			if (!(open && gate_x)) {
+				bl_set(w, x - CAMP_WALL, level + y, z + d, BL_COBBLE);
+				bl_set(w, x + CAMP_WALL, level + y, z + d, BL_COBBLE);
+			}
+		}
+	struct bl_site tower;
+	const char *why = NULL;
+	bl_plan_lay(w, BL_PLAN_TOWER, 0, x - 3, level + 1, z - 3, NULL, 0, &tower, &why);
+	for (int i = 0; i < tower.n; i++)
+		bl_set(w, tower.c[i].x, tower.c[i].y, tower.c[i].z, tower.c[i].block);
+	for (int i = 0; i < KEEP_H; i++)
+		bl_set(w, x, level + 1 + i, z, BL_REDKEEP);
+	a->rkeep[0] = x;
+	a->rkeep[1] = level + 1;
+	a->rkeep[2] = z;
+}
+
+/* a guard comes out at a free post of the camp; false when there is none */
+static bool rival_guard(struct app *a)
+{
+	static const int k_post[BL_GUARD_MAX][2] = { { 3, 0 }, { -3, 0 }, { 0, 3 }, { 0, -3 }, { 3, 3 }, { -3, 3 }, { 3, -3 }, { 2, 1 } };
+	for (int i = 0; i < BL_GUARD_MAX; i++) {
+		float x = (float)(a->rkeep[0] + k_post[i][0]) + 0.5f, y = (float)a->rkeep[1], z = (float)(a->rkeep[2] + k_post[i][1]) + 0.5f;
+		bool taken = false;
+		for (int k = 0; k < BL_MOBS_MAX && !taken; k++) {
+			const struct bl_mob *m = &a->mobs.mob[k];
+			taken = m->alive && m->kind == BL_MOB_GUARD && !m->posted && hypotf(m->tx - x, m->tz - z) < 0.5f;
+		}
+		if (!taken && bl_mobs_add(&a->mobs, a->world, BL_MOB_GUARD, x, y, z))
+			return true;
+	}
+	return false;
+}
+
+/* their men at their places: `guards` on the ground and, when `archer` and the tower stands, one on it */
+static void rival_man(struct app *a, int guards, bool archer)
+{
+	bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
+	for (int i = 0; i < guards; i++)
+		if (!rival_guard(a))
+			break;
+	for (int y = a->rkeep[1]; archer && y < a->rkeep[1] + 9; y++)
+		if (bl_mobs_add_archer(&a->mobs, a->world, a->rkeep[0] - 3, y, a->rkeep[2] - 3))
+			break;
+}
+
+static void rival_sync(struct app *a)
+{
+	bl_mobs_set_rival(&a->mobs, a->rival == 1 && a->rival_on, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[1], (float)a->rkeep[2] + 0.5f);
+}
+
+/* which way their keep is from the player, as he faces, and how far */
+static const char *rival_bearing(const struct app *a, float *dist)
+{
+	float x = a->pl.x, z = a->pl.z, yaw = a->pl.yaw;
+	float dx = (float)a->rkeep[0] + 0.5f - x, dz = (float)a->rkeep[2] + 0.5f - z, d = atan2f(dx, dz) - yaw;
+	while (d > (float)M_PI)
+		d -= 2.0f * (float)M_PI;
+	while (d < -(float)M_PI)
+		d += 2.0f * (float)M_PI;
+	*dist = hypotf(dx, dz);
+	return fabsf(d) < 0.6f ? "ahead" : fabsf(d) > 2.5f ? "behind" : d > 0.0f ? "to the right" : "to the left";
+}
+
+/* The Red Banner comes to this world: its camp is made and manned. */
+static bool rival_start(struct app *a)
+{
+	int at[3] = { 0, 0, 0 };
+	if (!rival_site(a, at)) {
+		say(a, "There is no room for the camp of the %s", RIVAL_NAME);
+		return false;
+	}
+	rival_build(a, at[0], at[1], at[2]);
+	a->rival = 1;
+	a->rival_on = true;
+	a->rhp = RIVAL_HP;
+	a->rguard_t = RIVAL_REINFORCE;
+	a->rhit_t = 0.0f;
+	rival_man(a, RIVAL_GUARDS, true);
+	a->rguards = RIVAL_GUARDS;
+	a->rarcher = true;
+	rival_sync(a);
+	float dist;
+	const char *way = rival_bearing(a, &dist);
+	say(a, "The %s has made camp %.0f blocks away, %s", RIVAL_NAME, dist, way);
+	sound(a, "horn");
+	return true;
+}
+
+/* K with a camp that stands: their men stand down (and are gone) or come back */
+static void rival_switch(struct app *a)
+{
+	if (a->rival != 1)
+		return;
+	if (a->rival_on) {
+		a->rguards = rival_count(a, false);
+		a->rarcher = rival_count(a, true) > 0;
+		a->rival_on = false;
+		bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
+		say(a, "The %s stands down (K brings it back)", RIVAL_NAME);
+	} else {
+		a->rival_on = true;
+		rival_man(a, a->rguards, a->rarcher);
+		say(a, "The %s is back at its camp", RIVAL_NAME);
+	}
+	rival_sync(a);
+}
+
+/* their keep has no hit points left: it is gone, their men with it, and the game is won */
+static void rival_fall(struct app *a)
+{
+	for (int i = 0; i < KEEP_H; i++)
+		bl_set(a->world, a->rkeep[0], a->rkeep[1] + i, a->rkeep[2], BL_AIR);
+	bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
+	a->rival = 2;
+	a->rival_on = false;
+	a->rhp = 0.0f;
+	rival_sync(a);
+	sound(a, "dawn");
+	pause_game(a, P_WON);
+	say(a, "The %s has fallen", RIVAL_NAME);
+}
+
+static void rival_hit(struct app *a, float damage)
+{
+	if (a->rival != 1 || !a->rival_on)
+		return;
+	a->rhp -= damage;
+	a->rhit_t = 6.0f;
+	sound(a, "wall-hit");
+	if (a->rhp <= 0.0f)
+		rival_fall(a);
+}
+
+/* the player's sword on their keep */
+static void rival_strike(struct app *a, int64_t now)
+{
+	if (a->rival != 1 || !a->rival_on) {
+		say(a, "The %s has stood down: K brings it back", RIVAL_NAME);
+		return;
+	}
+	if (now < a->next_sword)
+		return;
+	a->next_sword = now + SWORD_MS;
+	a->arm_swing = 1.0f;
+	a->hit_t = 0.18f;
+	rival_hit(a, RIVAL_SWORD);
+}
+
+/* while the camp stands, men come to it again, one at a time */
+static void rival_step(struct app *a, float dt)
+{
+	a->rhit_t = fmaxf(0.0f, a->rhit_t - dt);
+	if (a->rival != 1 || !a->rival_on || rival_count(a, false) >= RIVAL_GUARDS) {
+		a->rguard_t = RIVAL_REINFORCE;
+		return;
+	}
+	a->rguard_t -= dt;
+	if (a->rguard_t <= 0.0f) {
+		rival_guard(a);
+		a->rguard_t = RIVAL_REINFORCE;
+	}
+}
+
 /* what the workers have finished: the blocks go, what they leave goes into the pockets */
 static void apply_breaks(struct app *a, const struct bl_mobs_result *R)
 {
@@ -1718,6 +2022,11 @@ static void new_world(struct app *a)
 	char name[300];
 	world_name(a->path, name, sizeof name);
 	say(a, "A new world: %s (seed %u)", name, a->world->seed);
+	a->rival = 0;
+	a->rival_on = false;
+	rival_sync(a);
+	if (a->survival && !a->cli_no_rival && rival_start(a))
+		save_all(a, false);
 }
 
 /* what belongs to one world, as it is before the world's own lines are read */
@@ -1732,6 +2041,12 @@ static void state_reset(struct app *a)
 	a->keep_hp = KEEP_HP;
 	a->keep_msg_t = 0.0f;
 	a->nights = a->kills = 0;
+	a->rival = 0;
+	a->rival_on = false;
+	a->rhp = a->rhit_t = 0.0f;
+	a->rguards = 0;
+	a->rarcher = false;
+	a->rguard_t = RIVAL_REINFORCE;
 	a->in_night = a->brute_warned = a->wave_msg_done = false;
 	a->cmd = a->drag_sel = false;
 	a->order_mode = 0;
@@ -1796,8 +2111,14 @@ static void world_begin(struct app *a, bool from_file, int mode, int workers, in
 				bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]);
 		}
 	}
-	if (from_file)
+	if (from_file) {
 		sites_restore(a);
+		if (a->rival == 1 && a->rival_on)
+			rival_man(a, a->rguards, a->rarcher);
+	} else if (a->survival && !a->cli_no_rival) {
+		rival_start(a);                                         /* a new world has them from the start */
+	}
+	rival_sync(a);
 }
 
 /* Reads a world's file and makes it the one that is played; false = it cannot be read (the world that is open stays, *err says why). A world.bl in the worlds'
@@ -2063,14 +2384,13 @@ static void aim_update(struct app *a)
 /* the sword: a goblin the player aims at, nearer than the block he aims at, takes the blow (and nothing is broken behind it) */
 static bool sword_swing(struct app *a, int64_t now)
 {
-	if (!a->mobs_on)
-		return false;
 	float eye[3], look[3], t = 0.0f;
 	bl_player_eye(&a->pl, eye);
 	bl_player_look(&a->pl, look);
 	int id = bl_mobs_pick(&a->mobs, eye, look, BL_SWORD_REACH, &t);
-	if (id < 0)
+	if (id < 0 || (a->mobs.mob[id].kind == BL_MOB_GOBLIN && !a->mobs_on))
 		return false;
+	bool guard = a->mobs.mob[id].kind == BL_MOB_GUARD;
 	if (a->aimed && a->aim.t < t)                           /* a block is in the way (leaves are none: goblins stand among them) */
 		for (float s = 0.0f; s < t; s += 0.1f)
 			if (bl_solid_unit(bl_get(a->world, (int)floorf(eye[0] + look[0] * s), (int)floorf(eye[1] + look[1] * s), (int)floorf(eye[2] + look[2] * s))))
@@ -2081,7 +2401,10 @@ static bool sword_swing(struct app *a, int64_t now)
 	a->arm_swing = 1.0f;
 	bool dead = bl_mobs_hurt(&a->mobs, id, BL_SWORD_DAMAGE, look[0], look[2]);
 	a->hit_t = 0.18f;
-	if (dead) {
+	if (dead && guard) {
+		sound(a, "goblin-die");
+		say(a, "A guard of the %s is down", RIVAL_NAME);
+	} else if (dead) {
 		a->kills++;
 		sound(a, "goblin-die");
 		say(a, "Goblin down (%d)", a->kills);
@@ -2097,6 +2420,10 @@ static void do_break(struct app *a, int64_t now)
 		return;
 	a->arm_swing = 1.0f;
 	int b = a->aimed ? bl_get(a->world, a->aim.x, a->aim.y, a->aim.z) : BL_AIR;
+	if (b == BL_REDKEEP) {
+		rival_strike(a, now);
+		return;
+	}
 	if (a->aimed && bl_break(a->world, &a->aim)) {
 		block_sound(a, "break", b);
 		aim_update(a);
@@ -2119,6 +2446,11 @@ static void dig_step(struct app *a, int64_t now, float dt)
 		return;
 	}
 	int b = bl_get(a->world, a->aim.x, a->aim.y, a->aim.z);
+	if (b == BL_REDKEEP) {                                      /* their keep: struck, not dug */
+		a->dig_on = false;
+		rival_strike(a, now);
+		return;
+	}
 	if (!bl_breakable(b)) {
 		if (b == BL_KEEP && !a->dig_on) {
 			a->dig_on = true;                                       /* (said once while the button is held) */
@@ -2230,12 +2562,19 @@ static void mobs_advance(struct app *a, float dt)
 	if (R.nbreak > 0)
 		apply_breaks(a, &R);
 	apply_build(a, &R, dt);
+	rival_step(a, dt);
+	if (R.guards_slain > 0) {
+		say(a, "Your soldiers brought down a guard of the %s", RIVAL_NAME);
+		sound(a, "goblin-die");
+	}
+	if (R.rkeep_damage > 0.0f)
+		rival_hit(a, R.rkeep_damage);
 	if (R.workers_lost > 0) {
-		say(a, R.workers_lost == 1 ? "A goblin killed a worker!" : "Goblins killed workers!");
+		say(a, R.workers_lost == 1 ? "A worker has been killed!" : "Workers have been killed!");
 		sound(a, "lost");
 	}
 	if (R.soldiers_lost > 0) {
-		say(a, R.soldiers_lost == 1 ? "A goblin killed a soldier!" : "Goblins killed soldiers!");
+		say(a, R.soldiers_lost == 1 ? "A soldier has been killed!" : "Soldiers have been killed!");
 		sound(a, "lost");
 	}
 	if (R.slain > 0) {
@@ -2287,14 +2626,14 @@ static void mobs_advance(struct app *a, float dt)
 		if (a->hp <= 0.0f) {
 			a->hp = 0.0f;
 			pause_game(a, P_DEAD);
-			say(a, "A goblin got you");
+			say(a, R.guard_hits ? "The Red Banner got you" : "A goblin got you");
 		}
 	} else if (a->hp < MAX_HP) {
 		a->regen_t += dt;
 		if (a->regen_t > 6.0f)
 			a->hp = fminf(MAX_HP, a->hp + dt / 3.0f);       /* a hit point every three seconds */
 	}
-	if (a->prompt != P_DEAD && a->prompt != P_LOST)
+	if (a->prompt != P_DEAD && a->prompt != P_LOST && a->prompt != P_WON)
 		goblin_voices(a, dt);
 }
 
@@ -2613,6 +2952,30 @@ static void paint_stock(struct app *a)
 	}
 }
 
+/* the Red Banner: how far its camp is and which way, at the top right, and under it what its keep can still take once one is near or it has been struck */
+static void paint_rival(struct app *a)
+{
+	struct wlwin *w = &a->win;
+	if (a->rival != 1 || !a->rival_on)
+		return;
+	float dist;
+	const char *way = rival_bearing(a, &dist);
+	char l[120];
+	if (a->cmd)                                                 /* (from above the camp is in the picture, or End looks at it) */
+		snprintf(l, sizeof l, "%s %.0f", RIVAL_NAME, a->rhp);
+	else
+		snprintf(l, sizeof l, "%s %.0f, %s", RIVAL_NAME, dist, way);
+	shadow_text(w, w->bw - lm_font_text_width(l) - 8, 40, l, 0xff8a7au);
+	if (dist < 45.0f || a->rhit_t > 0.0f || a->cmd) {
+		int bw = 150, x = w->bw - bw - 8, y = 40 + LM_FONT_H + 6;
+		float f = a->rhp / RIVAL_HP;
+		wlwin_round_fill(w, x - 3, y - 3, bw + 6, 16, 8, lm_theme.bar);
+		wlwin_round_fill(w, x, y, bw, 10, 5, lm_theme.background);
+		if (f > 0.0f)
+			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 10, 5, 0xd02828u);
+	}
+}
+
 /* what a worker is doing, in a word */
 static const char *order_text(const struct app *a, const struct bl_mob *m, char *buf, size_t n)
 {
@@ -2665,6 +3028,18 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 			wlwin_fill(w, x1 - 2, y0, 2, y1 - y0, 0xffffffu);
 		}
 	}
+	if (a->rival == 1 && a->rival_on) {                                      /* their guards and their keep */
+		float sx, sy;
+		for (int i = 0; i < BL_MOBS_MAX; i++) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			if (m->alive && m->kind == BL_MOB_GUARD && cmd_project(a, cam, m->x, m->y + BL_SOLDIER_H + 0.35f, m->z, &sx, &sy)) {
+				wlwin_fill(w, (int)sx - 5, (int)sy - 5, 10, 10, 0xd02828u);
+				wlwin_fill(w, (int)sx - 3, (int)sy - 3, 6, 6, 0x18080au);
+			}
+		}
+		if (cmd_project(a, cam, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[1] + 4.0f, (float)a->rkeep[2] + 0.5f, &sx, &sy))
+			shadow_text(w, (int)sx - lm_font_text_width(RIVAL_NAME) / 2, (int)sy - LM_FONT_H, RIVAL_NAME, 0xff8a7au);
+	}
 	{                                                                        /* where he stands */
 		float sx, sy;
 		if (cmd_project(a, cam, a->pl.x, a->pl.y + (a->body ? 2.2f : 1.0f), a->pl.z, &sx, &sy)) {
@@ -2681,7 +3056,7 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 	shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), "Build: 3 to 6 or the bar below, R turns it, Delete takes a plan away", 0xffffffu);
 	snprintf(l, sizeof l, "B: a worker (%d planks)   V: a soldier (a barracks, %d cobble, %d planks)", WORKER_COST, SOLDIER_COBBLE, SOLDIER_PLANKS);
 	shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), l, 0xffffffu);
-	shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
+	shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), a->rival == 1 && a->rival_on ? "WASD move   arrows turn   wheel zoom   Home back   End: their camp   Tab or Esc: back to him" : "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
 	snprintf(l, sizeof l, "Workers %d, soldiers %d, chosen %d, being built %d", nworkers(a), nsoldiers(a), cmd_selected(a), bl_mobs_count_sites(&a->mobs));
 	shadow_text(w, 8, y0 + 5 * (LM_FONT_H + 2), l, 0xc8e8ffu);
 	for (int i = 0; i < BL_PLAN_COUNT; i++) {                                /* the plans */
@@ -2907,6 +3282,18 @@ static const char *const HP_BUILDINGS[] = {
 	"Everybody walks round what is in the way when there is a way: your people through gates. A goblin that is after you, your people or the keep and has no way there, or only a very long one, goes straight on and hammers at a made block in its path - cobble, planks, brick, glass, a gate - until it breaks: so a wall has to be closed all round to hold them. A wall holds one goblin for some twenty seconds, a gate for fifteen, a brute is quicker. Stone and earth of the land itself they leave alone. Broken blocks are not repaired by themselves: plan the wall again over the gap.",
 };
 
+static const char *const HP_RIVAL[] = {
+	"# The Red Banner",
+	"A rival clan. A new survival world has it from the start; in a world you have already, press K (or the flag at the left): it asks, then makes camp 80 to 120 blocks away and levels the ground there. K again sends its men away, and once more brings them back.",
+	"# Their camp",
+	"A wall with a gateway on two sides, their keep with the red banner in the middle, a watchtower with an archer, and six tough guards in black with red helmets (each more than a match for one soldier). A guard fights you, your people and the goblins that come near his post; he does not follow far. While the camp stands, a lost guard is replaced 45 seconds later.",
+	"# Winning",
+	"Their keep takes 200 hit points. Strike it with the left button (3 a blow), or send soldiers: right-click their keep in the command view and they attack it when no enemy is about. When it falls, you have won.",
+	"# Finding them",
+	"The top right says how far their camp is and which way. In the command view End looks at it, and their guards are marked red.",
+	"|K|Bring the Red Banner, send it away, bring it back.",
+};
+
 static const char *const HP_KEYS[] = {
 	"# Moving",
 	"|W A S D|Walk",
@@ -2948,6 +3335,7 @@ static const struct wlhelp_page BLOCKS_HELP[] = {
 	{ "Soldiers, waves", HP_SOLDIERS, WLHELP_N(HP_SOLDIERS) },
 	{ "The command view", HP_COMMAND, WLHELP_N(HP_COMMAND) },
 	{ "Buildings", HP_BUILDINGS, WLHELP_N(HP_BUILDINGS) },
+	{ "The Red Banner", HP_RIVAL, WLHELP_N(HP_RIVAL) },
 	{ "All the keys", HP_KEYS, WLHELP_N(HP_KEYS) },
 };
 #define BLOCKS_HELP_N WLHELP_N(BLOCKS_HELP)
@@ -2986,13 +3374,13 @@ static void file_layout(const struct app *a, struct wlcard *c, int *fx, int *fy,
 
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
-	*nb = a->prompt == P_PAUSE ? 4 : (a->prompt == P_NEW || a->prompt == P_REPLACE || file_card(a)) ? 2 : 1;
+	*nb = a->prompt == P_PAUSE ? 4 : (a->prompt == P_NEW || a->prompt == P_REPLACE || a->prompt == P_CLAN || file_card(a)) ? 2 : 1;
 	if (file_card(a)) {
 		int fx, fy, fw, ly, rows;
 		file_layout(a, c, &fx, &fy, &fw, &ly, &rows);
 		return;
 	}
-	int ch = a->prompt == P_HELP ? 580 : a->prompt == P_PAUSE ? 222 : (a->prompt == P_DEAD || a->prompt == P_LOST || a->prompt == P_NEW) ? 150 : 130;
+	int ch = a->prompt == P_HELP ? 580 : a->prompt == P_PAUSE ? 222 : (a->prompt == P_DEAD || a->prompt == P_LOST || a->prompt == P_NEW || a->prompt == P_WON) ? 150 : a->prompt == P_CLAN ? 172 : 130;
 	int cw = a->prompt == P_HELP ? 940 : a->prompt == P_PAUSE ? 540 : 470;
 	if (a->prompt == P_PALETTE) {
 		int cell = pal_cell(a);
@@ -3033,7 +3421,7 @@ static void paint_card(struct app *a)
 	int nb;
 	card_rect(a, &c, &nb);
 	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Help" : a->prompt == P_PALETTE ? "Blocks" :
-	                    a->prompt == P_OPEN ? "Open a world" : a->prompt == P_SAVEAS ? "Save the world as" : a->prompt == P_REPLACE ? "Replace the world" : a->first ? "Blocks" : "Paused";
+	                    a->prompt == P_CLAN ? "The Red Banner" : a->prompt == P_WON ? "Victory" : a->prompt == P_OPEN ? "Open a world" : a->prompt == P_SAVEAS ? "Save the world as" : a->prompt == P_REPLACE ? "Replace the world" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
 	char name[300];
 	world_name(a->path, name, sizeof name);
@@ -3069,7 +3457,7 @@ static void paint_card(struct app *a)
 		labels[0] = "Respawn";
 		cols[0] = lm_theme.btn_green;
 		char l[120];
-		wlwin_text(w, tx, ty, "A goblin got you. Your world is as you left it.", 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty, "You were cut down. Your world is as you left it.", 1, lm_theme.text, tw);
 		snprintf(l, sizeof l, "Goblins killed: %d", a->kills);
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
 	} else if (a->prompt == P_PALETTE) {
@@ -3107,6 +3495,20 @@ static void paint_card(struct app *a)
 		labels[1] = "New world";
 		cols[1] = lm_theme.btn_amber;
 		cols[0] = lm_theme.btn_slate;
+	} else if (a->prompt == P_CLAN) {
+		wlwin_text(w, tx, ty, "A rival clan makes camp 80 to 120 blocks away.", 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, "The ground is levelled there. Guards hold the camp.", 1, lm_theme.text_dim, tw);
+		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Bring down its keep and you have won.", 1, lm_theme.text_dim, tw);
+		labels[1] = "Make camp";
+		cols[0] = lm_theme.btn_slate;
+		cols[1] = lm_theme.btn_red;
+	} else if (a->prompt == P_WON) {
+		char l[120];
+		wlwin_text(w, tx, ty, "Their keep is down. The Red Banner is beaten.", 1, lm_theme.text, tw);
+		snprintf(l, sizeof l, "Nights survived: %d     Goblins killed: %d", a->nights, a->kills);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
+		labels[0] = "Play on";
+		cols[0] = lm_theme.btn_green;
 	} else if (a->prompt == P_REPLACE) {
 		char l[400], other[300];
 		world_name(a->target, other, sizeof other);
@@ -3255,6 +3657,22 @@ static void write_dump(struct app *a)
 			fprintf(f, "\n");
 		}
 	}
+	{
+		float dist = 0.0f;
+		rival_bearing(a, &dist);
+		fprintf(f, "rival state=%d on=%d keep=%d,%d,%d hp=%.1f guards=%d archer=%d dist=%.1f\n", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, rival_count(a, false),
+		        rival_count(a, true), a->rival ? dist : -1.0f);
+		struct bl_camera cam;
+		cmd_camera(a, &cam);
+		for (int i = 0; i < BL_MOBS_MAX; i++) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			float sx = -1, sy = -1;
+			if (!m->alive || m->kind != BL_MOB_GUARD)
+				continue;
+			cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy);
+			fprintf(f, "guard %d x=%.3f y=%.3f z=%.3f hp=%.1f posted=%d sx=%.1f sy=%.1f\n", i, m->x, m->y, m->z, m->hp, m->posted, sx, sy);
+		}
+	}
 	fprintf(f, "inv");
 	for (int b = 1; b < BL_COUNT; b++)
 		if (a->inv[b] > 0)
@@ -3322,7 +3740,7 @@ static void hero_pose(struct app *a, const struct bl_camera *cam)
 	h->sneak = a->pl.sneaking && !a->pl.flying;
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		const struct bl_mob *m = &a->mobs.mob[i];
-		if (m->alive && m->kind == BL_MOB_GOBLIN && hypotf(m->x - a->pl.x, m->z - a->pl.z) < SWORD_SHOWN && fabsf(m->y - a->pl.y) < 4.0f)
+		if (m->alive && bl_mob_is_foe(m->kind) && hypotf(m->x - a->pl.x, m->z - a->pl.z) < SWORD_SHOWN && fabsf(m->y - a->pl.y) < 4.0f)
 			h->sword = true;
 	}
 	h->held = a->survival && a->inv[hand_block(a)] < 1 ? 0 : hand_block(a);
@@ -3337,7 +3755,7 @@ static void hero_pose(struct app *a, const struct bl_camera *cam)
 /* ================================================================ the rail ================================================================ */
 
 /* the buttons at the left, as in MellaGUI's other programs; the item's number is its place */
-enum { RB_NEW, RB_OPEN, RB_SAVE, RB_SAVEAS, RB_PLAY, RB_CMD, RB_BLOCKS, RB_SOUND, RB_HELP, RB_N };
+enum { RB_NEW, RB_OPEN, RB_SAVE, RB_SAVEAS, RB_PLAY, RB_CMD, RB_BLOCKS, RB_SOUND, RB_CLAN, RB_HELP, RB_N };
 
 static void ic_play(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 {
@@ -3380,6 +3798,14 @@ static void ic_mute(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 	wlrail_line(w, cx + 8, cy - 3, cx + 3, cy + 3, 2, c);
 }
 
+static void ic_flag(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+	(void)bg;
+	wlwin_fill(w, cx - 6, cy - 8, 2, 16, c);
+	wlwin_fill(w, cx - 4, cy - 8, 11, 8, c);
+	wlwin_fill(w, cx + 5, cy - 5, 2, 2, bg);
+}
+
 static void rail_build(const struct app *a, struct wlrail *L)
 {
 	memset(L, 0, sizeof *L);
@@ -3396,6 +3822,8 @@ static void rail_build(const struct app *a, struct wlrail *L)
 		[RB_CMD] = { .tip = "Command view  Tab", .icon = wlrail_ic_eye, .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .lit = a->cmd },
 		[RB_BLOCKS] = { .tip = "Blocks  E", .icon = ic_cube, .base = lm_theme.btn_rust, .lite = lm_theme.btn_rust_lit },
 		[RB_SOUND] = { .tip = a->sound_on ? "Sound is on" : "Sound is off", .icon = a->sound_on ? ic_speaker : ic_mute, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit },
+		[RB_CLAN] = { .tip = a->rival != 1 ? "The Red Banner: bring a rival clan  K" : a->rival_on ? "The Red Banner is on  K" : "The Red Banner is off  K", .icon = ic_flag,
+		              .base = lm_theme.btn_maroon, .lite = lm_theme.btn_maroon_lit, .lit = a->rival == 1 && a->rival_on },
 		[RB_HELP] = { .tip = "Help  F1", .text = "?", .base = lm_theme.btn_grey, .lite = lm_theme.btn_slate_lit, .bottom = true },
 	};
 	for (int i = 0; i < RB_N; i++) {
@@ -3516,6 +3944,7 @@ static void paint(struct wlwin *w)
 	if (a->survival)
 		paint_survival(a);
 	paint_stock(a);
+	paint_rival(a);
 	if (a->cmd && a->prompt == P_NONE)
 		paint_cmd(a, &cam);
 	if (a->prompt == P_NONE && !a->cmd)
@@ -3604,8 +4033,16 @@ static void card_action(struct app *a, int which)
 		resume_game(a);
 		return;
 	}
-	if (a->prompt == P_PALETTE) {
+	if (a->prompt == P_PALETTE || a->prompt == P_WON) {
 		resume_game(a);
+		return;
+	}
+	if (a->prompt == P_CLAN) {
+		card_close(a, P_PAUSE);
+		if (which == 1) {
+			rival_start(a);
+			resume_game(a);
+		}
 		return;
 	}
 	if (a->prompt == P_PAUSE) {
@@ -3711,6 +4148,12 @@ static void rail_action(struct app *a, int id)
 	case RB_SOUND:
 		a->sound_on = !a->sound_on;
 		say(a, a->sound_on ? "Sound on" : "Sound off");
+		break;
+	case RB_CLAN:
+		if (a->rival == 1)
+			rival_switch(a);
+		else
+			pause_game(a, P_CLAN);
 		break;
 	case RB_HELP:
 		pause_game(a, P_HELP);
@@ -4026,7 +4469,7 @@ static void keys_release(struct app *a)
 static bool cmd_key(struct app *a, uint32_t code)
 {
 	switch (code) {
-	case K_G: case K_M: case K_P: case K_H: case K_E: case K_F1: case K_F3: case K_X:
+	case K_G: case K_M: case K_P: case K_H: case K_E: case K_F1: case K_F3: case K_X: case K_K:
 		return false;
 	case K_TAB:
 		leave_cmd(a);
@@ -4069,6 +4512,13 @@ static bool cmd_key(struct app *a, uint32_t code)
 			if (a->mobs.mob[i].alive && bl_mob_is_unit(a->mobs.mob[i].kind) && a->mobs.mob[i].selected)
 				bl_mobs_order_stop(&a->mobs, i);
 		say(a, "Stopped");
+		return true;
+	case K_END:
+		if (a->rival == 1 && a->rival_on) {
+			a->cam_f[0] = (float)a->rkeep[0] + 0.5f;
+			a->cam_f[1] = (float)a->rkeep[1];
+			a->cam_f[2] = (float)a->rkeep[2] + 0.5f;
+		}
 		return true;
 	case K_HOME: {
 		float cx, cz;
@@ -4203,7 +4653,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		if (code == K_ESC) {
 			if (a->prompt == P_PAUSE)
 				resume_game(a);
-			else if (a->prompt == P_NEW)
+			else if (a->prompt == P_NEW || a->prompt == P_CLAN || a->prompt == P_WON)
 				card_action(a, 0);
 			else {
 				a->prompt = P_PAUSE;
@@ -4213,7 +4663,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			if (a->prompt == P_PAUSE)
 				resume_game(a);
 			else
-				card_action(a, a->prompt == P_NEW ? 1 : 0);
+				card_action(a, a->prompt == P_NEW || a->prompt == P_CLAN ? 1 : 0);
 		}
 		return;
 	}
@@ -4253,6 +4703,13 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			craft_hand(a);
 		else
 			say(a, "Nothing to make in creative: every block is there");
+		return;
+	}
+	if (code == K_K && a->playing) {
+		if (a->rival == 1)
+			rival_switch(a);
+		else
+			pause_game(a, P_CLAN);                              /* (it changes the world: asked first) */
 		return;
 	}
 	if (code == K_M && a->playing) {
@@ -4544,6 +5001,106 @@ static int selftest(void)
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
 	if (system(cmd) != 0)
 		fprintf(stderr, "(could not remove %s)\n", dir);
+
+	/* the Red Banner: its camp in a made world, what is saved of it, the way to beat it */
+	{
+		static struct app rv;
+		memset(&rv, 0, sizeof rv);
+		snprintf(rv.dir, sizeof rv.dir, "%s/rival", dir);
+		rv.world_size = 256;
+		rv.fov = 1.2f;
+		rv.cli_clock = -1;
+		rv.survival = true;
+		rv.cli_no_rival = true;
+		memcpy(rv.hotbar, k_default_hotbar, sizeof rv.hotbar);
+		int made = 0;
+		for (uint32_t seed = 1; seed <= 4; seed++) {
+			CHECK(make_world(&rv, seed, false), "a world");
+			state_reset(&rv);
+			rv.survival = true;
+			rv.cli_no_rival = true;
+			world_begin(&rv, false, 1, -1, -1);
+			CHECK(rv.rival == 0 && rival_count(&rv, false) == 0, "no camp until it is asked for");
+			if (!rival_start(&rv))
+				continue;
+			made++;
+			float d = hypotf((float)(rv.rkeep[0] - rv.keep[0]), (float)(rv.rkeep[2] - rv.keep[2]));
+			CHECK(d > 76.0f && d < 125.0f, "seed %u: the camp is 80 to 120 blocks from the keep (%.0f)", seed, d);
+			CHECK(rival_count(&rv, false) == RIVAL_GUARDS && rival_count(&rv, true) == 1, "seed %u: six guards and an archer (%d, %d)", seed, rival_count(&rv, false), rival_count(&rv, true));
+			int walls = 0;
+			for (int k = -CAMP_WALL; k <= CAMP_WALL; k++)
+				walls += (bl_get(rv.world, rv.rkeep[0] + k, rv.rkeep[1], rv.rkeep[2] - CAMP_WALL) == BL_COBBLE) + (bl_get(rv.world, rv.rkeep[0] - CAMP_WALL, rv.rkeep[1], rv.rkeep[2] + k) == BL_COBBLE);
+			CHECK(bl_get(rv.world, rv.rkeep[0], rv.rkeep[1] + 2, rv.rkeep[2]) == BL_REDKEEP && walls >= 20 && walls < 26, "seed %u: the keep stands in a wall with a gateway (%d)", seed, walls);
+			/* eight soldiers sent from the keep: they find the way there and strike it */
+			bl_mobs_clear_kind(&rv.mobs, BL_MOB_WORKER);
+			rv.mobs.enabled = false;
+			int sent = 0;
+			for (int k = 0; k < BL_SOLDIER_MAX; k++) {
+				float sp[3];
+				if (worker_spot(&rv, (float)rv.keep[0], (float)rv.keep[2], 3.0f, (float)rv.keep[1] + 2.5f, sp) && bl_mobs_add(&rv.mobs, rv.world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]))
+					sent++;
+			}
+			for (int k = 0; k < BL_MOBS_MAX; k++)
+				if (rv.mobs.mob[k].alive && rv.mobs.mob[k].kind == BL_MOB_SOLDIER)
+					bl_mobs_order_move(&rv.mobs, k, (float)rv.rkeep[0] + 0.5f, (float)rv.rkeep[2] - 0.5f);
+			rv.playing = true;
+			rv.pl.flying = true;
+			for (int i = 0; i < 30 * 150 && rv.rival == 1; i++)
+				mobs_advance(&rv, 1.0f / 30.0f);
+			CHECK(rv.rival == 2 && sent == BL_SOLDIER_MAX && nsoldiers(&rv) < sent, "seed %u: eight soldiers win, and not all come home (keep %.0f, %d of %d left)", seed, rv.rhp, nsoldiers(&rv), sent);
+			rv.playing = false;
+		}
+		CHECK(made == 4, "a camp is found a place in each world (%d)", made);
+		/* saved and read again */
+		CHECK(make_world(&rv, 2, false), "a world");
+		state_reset(&rv);
+		rv.cli_no_rival = true;
+		world_begin(&rv, false, 1, -1, -1);
+		CHECK(rival_start(&rv), "a camp");
+		rv.rhp = 33.0f;
+		CHECK(mkdirs(rv.dir) == 0, "a folder");
+		snprintf(rv.path, sizeof rv.path, "%s/world.bl", rv.dir);
+		CHECK(save_all(&rv, false), "saved");
+		int kx = rv.rkeep[0], kz = rv.rkeep[2];
+		const char *why = NULL;
+		char camp[1024];
+		snprintf(camp, sizeof camp, "%s", rv.path);
+		CHECK(world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 1 && rv.rival_on && rv.rkeep[0] == kx && rv.rkeep[2] == kz && rv.rhp == 33.0f &&
+		      rival_count(&rv, false) == RIVAL_GUARDS && rival_count(&rv, true) == 1 && rv.mobs.rival_on, "the camp comes back: its place, what its keep takes, its men");
+		/* K: they stand down, and come back as they were */
+		for (int k = 0, killed = 0; k < BL_MOBS_MAX && killed < 2; k++)
+			if (rv.mobs.mob[k].alive && rv.mobs.mob[k].kind == BL_MOB_GUARD && !rv.mobs.mob[k].posted) {
+				rv.mobs.mob[k].alive = false;
+				killed++;
+			}
+		rival_switch(&rv);
+		CHECK(!rv.rival_on && rival_count(&rv, false) == 0 && !rv.mobs.rival_on, "switched off: nobody there");
+		rival_hit(&rv, 10.0f);
+		CHECK(rv.rhp == 33.0f, "and the keep takes no harm");
+		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 1 && !rv.rival_on && rival_count(&rv, false) == 0, "saved switched off");
+		rival_switch(&rv);
+		CHECK(rv.rival_on && rival_count(&rv, false) == RIVAL_GUARDS - 2, "back again, the two that fell still missing (%d)", rival_count(&rv, false));
+		rv.rguard_t = RIVAL_REINFORCE;
+		rival_step(&rv, RIVAL_REINFORCE - 1.0f);
+		CHECK(rival_count(&rv, false) == RIVAL_GUARDS - 2, "not yet");
+		rival_step(&rv, 2.0f);
+		CHECK(rival_count(&rv, false) == RIVAL_GUARDS - 1, "a minute: one comes");
+		/* the sword on the keep, and the end */
+		rv.playing = true;
+		rival_strike(&rv, 1000);
+		rival_strike(&rv, 1100);
+		CHECK(rv.rhp == 30.0f, "a blow takes three, and the next must wait (%.0f)", rv.rhp);
+		rival_hit(&rv, 100.0f);
+		CHECK(rv.rival == 2 && !rv.rival_on && rv.prompt == P_WON && rival_count(&rv, false) == 0 && bl_get(rv.world, rv.rkeep[0], rv.rkeep[1], rv.rkeep[2]) == BL_AIR && !rv.mobs.rival_on,
+		      "at nought the keep is gone, their men too, and the game is won");
+		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 2 && !rv.rival_on && rival_count(&rv, false) == 0, "and stays won");
+		/* a new survival world has them from the start */
+		rv.cli_no_rival = false;
+		rv.survival = true;
+		new_world(&rv);
+		CHECK(rv.rival == 1 && rv.rival_on && rival_count(&rv, false) == RIVAL_GUARDS, "a new world has the camp");
+		bl_world_free(rv.world);
+	}
 
 	/* the sounds: every one the game asks for is one the compositor knows (gamesound.h) and the other way round; the materials; how often they may come */
 	int variants = 0;
@@ -5328,6 +5885,10 @@ int main(int argc, char **argv)
 			no_body = true;
 		} else if (!strcmp(argv[i], "--no-pets")) {
 			no_pets = true;
+		} else if (!strcmp(argv[i], "--rival")) {
+			a.cli_rival = true;
+		} else if (!strcmp(argv[i], "--no-rival")) {
+			a.cli_no_rival = true;
 		} else if (!strcmp(argv[i], "--no-mobs")) {
 			no_mobs = true;
 		} else if (!strcmp(argv[i], "--survival")) {
@@ -5383,7 +5944,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--no-body] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--rival | --no-rival] [--no-body] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -5436,6 +5997,8 @@ int main(int argc, char **argv)
 			a.nosave = true;
 		world_begin(&a, false, mode_cli, workers_cli, soldiers_cli);
 	}
+	if (a.cli_rival && a.rival != 1)
+		rival_start(&a);
 	if (pet_at >= 0.0f)
 		a.pet_t = pet_at;
 	for (char *tok = strtok(give, ","); tok; tok = strtok(NULL, ",")) {

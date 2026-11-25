@@ -19695,7 +19695,7 @@ class TestBlocks(Base):
     compositor's zwp_pointer_constraints_v1 / zwp_relative_pointer_v1). Through MELLAGUI_BLOCKS_DUMP: where the player is, what he aims at, the hand, the number of
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
-    K = dict(o=24, y=21, esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
+    K = dict(o=24, y=21, k=37, end=107, esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
              f1=59, f3=61, h=35, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, r=19, delete=111, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
@@ -19703,7 +19703,7 @@ class TestBlocks(Base):
         if not os.path.exists(self.EXE):
             self.skipTest('mellagui-blocks not built')
 
-    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False, survival=False, nomode=False, body=False):
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False, survival=False, nomode=False, body=False, rival=False):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
@@ -19720,6 +19720,8 @@ class TestBlocks(Base):
             argv += ['--no-mobs']                            # (the goblins have tests of their own: at night they would come to every test)
         if not body:
             argv += ['--no-body']                            # (the arm in the corner of the picture has tests of its own)
+        if not rival:
+            argv += ['--no-rival']                           # (the rival clan has tests of its own: a new survival world would get its camp)
         p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data, **(env or {})))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -19791,6 +19793,10 @@ class TestBlocks(Base):
                 st['pal'][int(f[1])] = dict((k, v if k == 'block' else int(v)) for k, v in (x.split('=') for x in f[2:]))
             elif f[0] == 'rail':
                 st.setdefault('rail', {})[int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
+            elif f[0] == 'rival':
+                st['rival'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'guard':
+                st.setdefault('guards', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'stock':
                 st['stock'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'world':
@@ -20057,6 +20063,67 @@ class TestBlocks(Base):
         self.start()
         self.assertNotIn('stock', self.state())
 
+    def test_the_red_banner_comes_when_it_is_asked_for_and_goes_and_stays_with_the_world(self):
+        # prompts: 0 none, 1 pause, 10 the question about the clan
+        self.start('--save', '--no-clock', survival=True)
+        self.assertEqual(self.state()['rival']['state'], '0')
+        self.play()
+        self.tap('k')
+        self.prompt(10)
+        self.assertEqual(self.pconstraint()['active'], 'none', 'it asks first: it changes the world')
+        self.tap('esc')
+        self.prompt(1)
+        self.assertEqual(self.state()['rival']['state'], '0', 'Esc: no camp')
+        self.tap('enter')
+        self.wait(lambda s: s['state']['playing'] == '1')
+        self.tap('k')
+        self.prompt(10)
+        self.tap('enter')
+        st = self.wait(lambda s: s['rival']['state'] == '1' and s['state']['playing'] == '1', timeout=8.0)
+        r = st['rival']
+        self.assertEqual((r['on'], r['guards'], r['archer'], r['hp']), ('1', '6', '1', '200.0'))
+        self.assertTrue(70 < float(r['dist']) < 135, 'the camp is far: %s' % r['dist'])
+        self.assertEqual(st['hist']['redkeep'], 3)
+        self.assertGreater(st['hist']['cobble'], 60, 'its wall')
+        self.assertEqual(len(st['guards']), 7)
+        self.tap('k')                                           # off ...
+        self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['guards'] == '0')
+        self.tap('k')                                           # ... and on again, without asking
+        st = self.wait(lambda s: s['rival']['on'] == '1' and s['rival']['guards'] == '6')
+        # the command view: End looks at their camp, the flag of the rail sends them away
+        self.tap('tab')
+        self.wait(lambda s: s['cmd']['on'] == '1')
+        self.tap('end')
+        kx, _, kz = (int(v) for v in st['rival']['keep'].split(','))
+        def at_camp(s):
+            fx, _, fz = (float(v) for v in s['cmd']['focus'].split(','))
+            return abs(fx - kx) < 2 and abs(fz - kz) < 2
+        self.wait(at_camp)
+        self.rail(8)
+        self.wait(lambda s: s['rival']['on'] == '0')
+        self.rail(8)
+        self.wait(lambda s: s['rival']['on'] == '1')
+        self.ctrl_tap('s')
+        self.wait(lambda s: s['state']['saved'] == '1')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        for _ in range(60):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        self.start(flat=False, data=self.data, survival=True)
+        st = self.state()
+        self.assertEqual((st['rival']['state'], st['rival']['on'], st['rival']['keep'], st['rival']['guards']), ('1', '1', r['keep'], '6'))
+        self.assertEqual(st['hist']['redkeep'], 3)
+
+    def test_a_new_survival_world_has_the_red_banner(self):
+        self.start('--no-clock', survival=True, rival=True)
+        r = self.state()['rival']
+        self.assertEqual((r['state'], r['on'], r['guards'], r['archer']), ('1', '1', '6', '1'))
+
     def test_a_slow_click_breaks_or_puts_one_block_only(self):
         self.start('--pitch', '-45')
         self.play()
@@ -20251,10 +20318,10 @@ class TestBlocks(Base):
         self.assertEqual(st['hist']['grass'], 256 * 256 - 1)
 
     def test_the_rail_of_buttons_does_what_it_says(self):
-        # buttons: 0 new, 1 open, 2 save, 3 save as, 4 play / pause, 5 command view, 6 blocks, 7 sound, 8 help
+        # buttons: 0 new, 1 open, 2 save, 3 save as, 4 play / pause, 5 command view, 6 blocks, 7 sound, 8 the Red Banner, 9 help
         self.start()
         st = self.state()
-        self.assertEqual(sorted(st['rail']), list(range(9)))
+        self.assertEqual(sorted(st['rail']), list(range(10)))
         self.assertLess(st['rail'][0]['x'], 0, 'the rail is left of the picture')
         self.rail(4)
         self.wait(lambda s: s['state']['playing'] == '1' and s['state']['locked'] == '1')

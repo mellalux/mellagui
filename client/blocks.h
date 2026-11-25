@@ -39,6 +39,7 @@ enum bl_block {
 	BL_BARRACKS,            /* a block of brick and timber with a banner: soldiers are trained where one stands (the game counts them) */
 	BL_GATE,                /* a wooden lattice: the player and his units walk through it, the goblins do not (bl_box_hits_foe) */
 	BL_TOWERPOST,           /* the post at the top of a watchtower: a soldier stands on it and shoots */
+	BL_REDKEEP,             /* the keep of the rival clan, the Red Banner: three of them; like the player's own it is made and unmade by the game only */
 	BL_COUNT
 };
 
@@ -64,7 +65,7 @@ static inline int  bl_siege_hp(int b)
 {
 	return b == BL_GLASS ? 6 : b == BL_LAMP ? 12 : b == BL_PLANKS ? 24 : b == BL_GATE ? 45 : b == BL_COBBLE ? 60 : b == BL_BRICK || b == BL_BARRACKS || b == BL_TOWERPOST ? 75 : 0;
 }
-static inline bool bl_breakable(int b)    { return b != BL_AIR && !bl_water(b) && b != BL_BEDROCK && b != BL_KEEP && b < BL_COUNT; }   /* what the player's hand can take away */
+static inline bool bl_breakable(int b)    { return b != BL_AIR && !bl_water(b) && b != BL_BEDROCK && b != BL_KEEP && b != BL_REDKEEP && b < BL_COUNT; }   /* what the player's hand can take away */
 
 /* How long it takes to break a block by hand, in seconds (survival; creative breaks at once), and what it leaves behind (0 = nothing; grass leaves dirt, stone leaves
  * cobble, glass and leaves break to nothing). Both 0 for what cannot be broken. */

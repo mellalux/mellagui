@@ -190,6 +190,20 @@ static void gen_face(int blk, int fk, uint32_t *px)
 					c = argb(0, 0, 0, 0);
 				break;
 			}
+			case BL_REDKEEP: {                           /* dark stone with a red rim, and on the sides a long red banner with a black sun */
+				int row = y / 4;
+				bool mortar = (y % 4 == 3) || ((x + (row & 1) * 4) % 8 == 7);
+				c = mortar ? tinted(0x26242a, tn(x, y, 72, 4)) : tinted(0x45414c, tn((x + (row & 1) * 4) / 8, row, 73, 9) + tn(x, y, 74, 5));
+				if (x == 0 || x == 15 || y == 0 || y == 15)
+					c = tinted(0x7a1818, tn(x, y, 75, 8));
+				if (fk == BL_FACE_SIDE && x >= 4 && x <= 11 && y >= 1 && y <= 13 && !(y >= 12 && x >= 7 && x <= 8)) {
+					int d2 = (2 * x - 15) * (2 * x - 15) + (2 * y - 13) * (2 * y - 13);
+					c = d2 <= 20 ? tinted(0x140c0c, 0) : tinted(0xd02828, tn(x, y, 76, 9));
+				} else if (fk == BL_FACE_TOP && x >= 5 && x <= 10 && y >= 5 && y <= 10) {
+					c = tinted(0xd02828, tn(x, y, 77, 9));
+				}
+				break;
+			}
 			case BL_TOWERPOST: {                         /* dressed stone with a yellow flag on the sides and a ringed plate on top */
 				int row = y / 4;
 				bool mortar = (y % 4 == 3) || ((x + (row & 1) * 4) % 8 == 7);

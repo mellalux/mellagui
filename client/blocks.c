@@ -13,7 +13,7 @@ const int8_t bl_face_n[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1
 
 static const char *const k_names[BL_COUNT] = {
 	"air", "grass", "dirt", "stone", "sand", "log", "leaves", "planks", "glass", "water", "bedrock", "brick", "snow", "cobble", "torch", "lamp",
-	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep", "barracks", "gate", "watchpost",
+	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep", "barracks", "gate", "watchpost", "redkeep",
 };
 
 const char *bl_block_name(int block)
@@ -797,7 +797,7 @@ bool bl_break(struct bl_world *w, const struct bl_hit *h)
 
 bool bl_place(struct bl_world *w, const struct bl_hit *h, int block, const struct bl_player *p)
 {
-	if (!h || !h->hit || block <= BL_AIR || block >= BL_COUNT || block == BL_BEDROCK || block == BL_KEEP || (block >= BL_FLOW1 && block <= BL_FLOW7))
+	if (!h || !h->hit || block <= BL_AIR || block >= BL_COUNT || block == BL_BEDROCK || block == BL_KEEP || block == BL_REDKEEP || (block >= BL_FLOW1 && block <= BL_FLOW7))
 		return false;
 	if (!bl_inside(w, h->px, h->py, h->pz))
 		return false;

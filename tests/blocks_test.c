@@ -13,6 +13,7 @@
 #include "blocksview.h"
 #include "blockspets.h"
 #include "blocksbuild.h"
+#include "blockshero.h"
 #include "blocksmobs.h"
 
 #include <math.h>
@@ -3077,6 +3078,210 @@ static void test_ghosts(void)
 	bl_world_free(w);
 }
 
+/* ---- the player's body ---------------------------------------------------------------------------------------------------- */
+
+static bool purple(const float c[3])
+{
+	return c[2] > c[0] && c[0] > c[1] * 1.2f;
+}
+
+static void test_hero(void)
+{
+	struct bl_world *w = bl_world_flat(96, 96, 64, 20);
+	struct bl_hero h;
+	memset(&h, 0, sizeof h);
+	h.x = 48.5f;
+	h.y = 20.0f;
+	h.z = 48.5f;
+	h.fov = 1.2f;
+	h.aspect = 1.6f;
+	h.held = BL_STONE;
+	bl_hero_set(&h, w, 12.0f);
+	float rgb[3], t = 0;
+	float front[3] = { 48.5f, 21.1f, 51.5f }, back[3] = { 48.5f, 21.1f, 45.5f }, tz[3] = { 0, 0, 1 }, mz[3] = { 0, 0, -1 };
+	CHECK(bl_hero_ray(&h, front, mz, 20.0f, rgb, &t) && purple(rgb) && fabsf(t - 2.86f) < 0.02f, "from the front: the purple tunic (%.2f at %.2f, %.2f %.2f %.2f)", t, 3.0f, rgb[0], rgb[1], rgb[2]);
+	CHECK(bl_hero_ray(&h, back, tz, 20.0f, rgb, &t) && rgb[0] > 0.6f && rgb[2] > 0.6f && rgb[1] > 0.6f, "from behind: the white cape (%.2f %.2f %.2f)", rgb[0], rgb[1], rgb[2]);
+	front[1] = back[1] = 21.62f;
+	CHECK(bl_hero_ray(&h, front, mz, 20.0f, rgb, &t) && bl_hero_ray(&h, back, tz, 20.0f, rgb, &t) && rgb[0] > rgb[2], "a head at the height of the eyes, brown hair behind");
+	front[1] = 21.95f;
+	CHECK(!bl_hero_ray(&h, front, mz, 20.0f, rgb, &t), "nothing over it");
+	float side[3] = { 49.3f, 21.1f, 51.5f };
+	CHECK(!bl_hero_ray(&h, side, mz, 20.0f, rgb, &t) && !bl_hero_ray(&h, back, tz, 2.0f, rgb, &t), "nothing beside it, or beyond the reach");
+	h.yaw = 3.14159265f;
+	bl_hero_set(&h, w, 12.0f);
+	back[1] = 21.1f;
+	CHECK(bl_hero_ray(&h, back, tz, 20.0f, rgb, &t) && purple(rgb), "turned round, the front is the other way");
+	h.yaw = 0.0f;
+
+	/* from his own eyes */
+	h.first = true;
+	h.eye[0] = 48.5f;
+	h.eye[1] = 21.62f;
+	h.eye[2] = 48.5f;
+	bl_hero_set(&h, w, 12.0f);
+	float boots[3] = { 0.1f, -1.5f, 0.12f }, ahead[3] = { 0, 0, 1 }, chest[3] = { 0.0f, -1.0f, -0.4f };
+	for (int i = 0; i < 2; i++) {
+		float *d = i ? chest : boots, l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+		for (int k = 0; k < 3; k++)
+			d[k] /= l;
+	}
+	CHECK(bl_hero_ray(&h, h.eye, boots, 20.0f, rgb, &t) && !purple(rgb) && t > 0.75f, "looking down he sees a boot or a leg (%.2f)", t);
+	CHECK(bl_hero_ray(&h, h.eye, chest, 20.0f, rgb, &t) && purple(rgb) && t > 0.4f, "and his chest below and behind (%.2f)", t);
+	CHECK(!bl_hero_ray(&h, h.eye, ahead, 20.0f, rgb, &t), "his own head is not in the way");
+	float lr[3] = { 0.48f, -0.27f, 1.0f }, mid[3] = { 0, 0, 1 }, ll[3] = { -0.48f, -0.27f, 1.0f };
+	for (int k = 0; k < 3; k++) {
+		lr[k] /= 1.19f;
+		ll[k] /= 1.19f;
+	}
+	CHECK(bl_hero_arm_ray(&h, lr, rgb) && !bl_hero_arm_ray(&h, mid, rgb) && !bl_hero_arm_ray(&h, ll, rgb), "the arm is in the lower right, not in the middle or on the left");
+	/* what the arm holds changes the picture */
+	enum { W = 160, H = 100 };
+	static uint32_t base[W * H], stone[W * H], sword[W * H], empty[W * H], swung[W * H], t4[W * H];
+	struct bl_camera cam = { 48.5f, 21.62f, 48.5f, 0.0f, 0.0f, 1.2f };
+	struct bl_view v;
+	bl_view_init(&v);
+	bl_render(w, &cam, &v, base, W, H, W, 2);
+	v.hero = &h;
+	bl_render(w, &cam, &v, stone, W, H, W, 2);
+	bl_render(w, &cam, &v, t4, W, H, W, 4);
+	h.sword = true;
+	bl_hero_set(&h, w, 12.0f);
+	bl_render(w, &cam, &v, sword, W, H, W, 2);
+	h.sword = false;
+	h.held = 0;
+	bl_hero_set(&h, w, 12.0f);
+	bl_render(w, &cam, &v, empty, W, H, W, 2);
+	h.held = BL_STONE;
+	h.swing = 0.5f;
+	bl_hero_set(&h, w, 12.0f);
+	bl_render(w, &cam, &v, swung, W, H, W, 2);
+	h.swing = 0.0f;
+	bl_hero_set(&h, w, 12.0f);
+	int n_arm = 0, n_left = 0, grey = 0, high = 0, d_empty = 0, d_swing = 0;
+	for (int y = 0; y < H; y++)
+		for (int x = 0; x < W; x++) {
+			int i = y * W + x;
+			if (stone[i] != base[i]) {
+				n_arm++;
+				n_left += x < W / 2;
+				int r = (int)(stone[i] >> 16 & 255), g = (int)(stone[i] >> 8 & 255), b = (int)(stone[i] & 255);
+				grey += abs(r - g) < 12 && abs(g - b) < 12;
+			}
+			high += sword[i] != base[i] && y < H / 2;
+			d_empty += empty[i] != stone[i];
+			d_swing += swung[i] != stone[i];
+		}
+	CHECK(n_arm > 600 && n_left == 0 && grey > 150, "the arm and a stone in the right half of the picture (%d pixels, %d grey)", n_arm, grey);
+	CHECK(high > 30, "the sword reaches above the middle (%d)", high);
+	CHECK(d_empty > 150 && d_swing > 200, "an empty hand and a swing look different (%d, %d)", d_empty, d_swing);
+	CHECK(memcmp(stone, t4, sizeof stone) == 0, "four threads draw the same");
+	/* the hook for the tests does not see him */
+	v.ids = true;
+	bl_render(w, &cam, &v, stone, W, H, W, 2);
+	v.hero = NULL;
+	bl_render(w, &cam, &v, base, W, H, W, 2);
+	CHECK(memcmp(stone, base, sizeof stone) == 0, "pointing at blocks is not changed");
+	/* the rectangles the boxes are looked for in miss nothing: the same pictures without them, looking down and turned and walking */
+	{
+		static uint32_t with[W * H], without[W * H];
+		int differ = 0;
+		for (int i = 0; i < 24; i++) {
+			h.first = true;
+			h.sword = i % 3 == 0;
+			h.held = i % 3 == 1 ? BL_TORCH : BL_PLANKS;
+			h.yaw = (float)i * 0.7f;
+			h.pitch = -1.5f + (float)(i % 8) * 0.3f;
+			h.phase = (float)i * 0.13f;
+			h.stride = (float)(i % 2);
+			h.swing = (float)(i % 5) * 0.2f;
+			h.sneak = i % 7 == 0;
+			bl_hero_set(&h, w, 12.0f);
+			struct bl_camera c2 = { h.eye[0], h.eye[1], h.eye[2], h.yaw, h.pitch, 1.2f };
+			v.hero = &h;
+			bl_render(w, &c2, &v, with, W, H, W, 2);
+			static struct bl_hero plain;
+			plain = h;
+			for (int k = 0; k < plain.nbody; k++)
+				plain.body[k].bound = false;
+			for (int k = 0; k < plain.narm; k++)
+				plain.vm[k].bound = false;
+			v.hero = &plain;
+			bl_render(w, &c2, &v, without, W, H, W, 2);
+			for (int k = 0; k < W * H; k++)
+				differ += with[k] != without[k];
+		}
+		CHECK(differ == 0, "24 poses with and without the rectangles: %d pixels differ", differ);
+		h.yaw = h.pitch = h.phase = h.stride = h.swing = 0.0f;
+		h.sneak = h.sword = false;
+		h.held = BL_STONE;
+	}
+	/* a night is darker, a torch lights him */
+	h.first = false;
+	bl_hero_set(&h, w, 0.0f);
+	float night[3];
+	back[1] = 21.1f;
+	CHECK(bl_hero_ray(&h, back, tz, 20.0f, night, &t) && night[1] < 0.4f && night[1] > 0.05f, "dim at night (%.2f)", night[1]);
+	bl_set(w, 49, 20, 47, BL_TORCH);
+	bl_hero_set(&h, w, 0.0f);
+	CHECK(bl_hero_ray(&h, back, tz, 20.0f, rgb, &t) && rgb[0] > night[0] * 1.5f, "a torch lights him");
+	CHECK(bl_hero_floor_shade(&h, 48.5f, 20.0f, 48.5f) < 0.7f && bl_hero_floor_shade(&h, 49.5f, 20.0f, 48.5f) == 1.0f && bl_hero_floor_shade(&h, 48.5f, 16.0f, 48.5f) == 1.0f, "a shadow under his feet only");
+
+	/* nobody walks through him */
+	struct bl_mobs M;
+	bl_mobs_init(&M, 3);
+	struct bl_player p;
+	bl_player_init(&p, w);
+	p.x = 30.5f;
+	p.y = 20.0f;
+	p.z = 30.5f;
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 30.8f, 20.0f, 30.5f);
+	bl_mobs_push_player(&M, w, &p);
+	CHECK(fabsf(M.mob[0].x - p.x) > 0.59f && p.x == 30.5f, "a worker he walks into gives way all the way (%.2f, %.2f)", M.mob[0].x, p.x);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 30.8f, 20.0f, 30.5f);
+	bl_mobs_push_player(&M, w, &p);
+	CHECK(fabsf((M.mob[0].x - 30.8f) - 0.15f) < 0.01f && fabsf((30.5f - p.x) - 0.15f) < 0.01f, "a goblin and he each give half (%.3f, %.3f)", M.mob[0].x, p.x);
+	bl_mobs_clear(&M);
+	for (int y = 20; y < 23; y++)
+		bl_set(w, 32, y, 30, BL_STONE);
+	p.x = 31.2f;
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 31.69f, 20.0f, 30.5f);
+	bl_mobs_push_player(&M, w, &p);
+	CHECK(M.mob[0].x < 31.71f && M.mob[0].x - p.x > 0.58f && !bl_box_hits(w, M.mob[0].x, M.mob[0].y, M.mob[0].z, BL_GOBLIN_HW, BL_WORKER_H), "against a wall it cannot give way: he steps back (%.2f, %.2f)", M.mob[0].x, p.x);
+	bl_mobs_clear(&M);
+	p.x = 40.5f;
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 40.7f, 20.0f, 30.5f);
+	M.mob[0].posted = true;
+	bl_mobs_push_player(&M, w, &p);
+	CHECK(M.mob[0].x == 40.7f && 40.7f - p.x > 0.59f, "one on a watchtower does not move");
+	p.y = 22.0f;
+	p.x = 40.6f;
+	bl_mobs_push_player(&M, w, &p);
+	CHECK(p.x == 40.6f, "somebody above his head is not pushed");
+	/* walking into a crowd never puts anybody into a block */
+	bl_mobs_clear(&M);
+	struct bl_world *tw = bl_world_new(7, 128, 128, 64);
+	bl_player_init(&p, tw);
+	for (int i = 0; i < 12; i++)
+		bl_mobs_add(&M, tw, i & 1 ? BL_MOB_WORKER : BL_MOB_GOBLIN, p.x + (float)(i % 4) - 1.5f, p.y + 1.0f, p.z + (float)(i / 4) - 1.0f);
+	int bad = 0;
+	uint32_t r = 5;
+	for (int i = 0; i < 4000; i++) {
+		r = r * 1103515245u + 12345u;
+		struct bl_input in = { .fwd = (float)((r >> 8) % 3) - 1.0f, .strafe = (float)((r >> 16) % 3) - 1.0f, .jump = (r >> 24) % 9 == 0 };
+		p.yaw += (float)((r >> 4) % 100) * 0.002f - 0.1f;
+		bl_player_step(tw, &p, &in, 1.0f / 30.0f);
+		bl_mobs_push_player(&M, tw, &p);
+		bad += bl_box_hits(tw, p.x, p.y, p.z, BL_PLAYER_W * 0.5f, BL_PLAYER_H);
+		for (int k = 0; k < BL_MOBS_MAX; k++)
+			if (M.mob[k].alive)
+				bad += bl_box_hits_foe(tw, M.mob[k].x, M.mob[k].y, M.mob[k].z, BL_GOBLIN_HW, bl_mob_h(M.mob[k].kind)) && M.mob[k].kind == BL_MOB_WORKER;
+	}
+	CHECK(bad == 0, "4000 steps among twelve: nobody is pushed into a block (%d)", bad);
+	bl_world_free(tw);
+	bl_world_free(w);
+}
+
 static void test_brutes(void)
 {
 	const float dusk = 17.9f;
@@ -3812,6 +4017,8 @@ int main(int argc, char **argv)
 	test_gates_and_siege();
 	test_tower();
 	test_ghosts();
+	printf("the player's body\n");
+	test_hero();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

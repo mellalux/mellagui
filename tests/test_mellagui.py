@@ -19615,14 +19615,14 @@ class TestBlocks(Base):
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
     K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
-             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, r=19, delete=111, **{str(i): 1 + i for i in range(1, 10)})
+             f1=59, f3=61, h=35, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, r=19, delete=111, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
         super().setUp()
         if not os.path.exists(self.EXE):
             self.skipTest('mellagui-blocks not built')
 
-    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False, survival=False, nomode=False):
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False, survival=False, nomode=False, body=False):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
@@ -19637,6 +19637,8 @@ class TestBlocks(Base):
             argv += ['--survival' if survival else '--creative']    # (the old tests break and put blocks as they please)
         if not mobs:
             argv += ['--no-mobs']                            # (the goblins have tests of their own: at night they would come to every test)
+        if not body:
+            argv += ['--no-body']                            # (the arm in the corner of the picture has tests of its own)
         p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data, **(env or {})))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -19669,7 +19671,7 @@ class TestBlocks(Base):
                 st['state'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'aim':
                 st['aim'] = dict(x.split('=', 1) for x in f[1:])
-            elif f[0] in ('pets', 'tom', 'filip', 'player', 'game', 'cmd'):
+            elif f[0] in ('pets', 'tom', 'filip', 'player', 'game', 'cmd', 'hero'):
                 st[f[0]] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'help':
                 st['help'] = dict(x.split('=', 1) for x in f[1:])
@@ -20949,7 +20951,7 @@ class TestBlocks(Base):
         st = self.wait(lambda s: s['cmd']['sites'] == '0', timeout=60.0)
         self.assertEqual(st['game']['barracks'], '1')
         self.assertEqual(st['hist']['barracks'], 1)
-        self.assertEqual([w['order'] for w in st['workers'].values()], ['0', '0'])
+        st = self.wait(lambda s: [w['order'] for w in s['workers'].values()] == ['0', '0'])      # (they hear of it at their next step)
         self.tap('v')
         st = self.wait(lambda s: s['cmd']['soldiers'] == '1')
         self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (14, 6), 'six cobble and four planks')
@@ -21180,6 +21182,92 @@ class TestBlocks(Base):
         self.tap('e')
         st = self.wait(lambda s: s['state']['prompt'] == '4' and s['pal'])
         self.assertIn('barracks', [p['block'] for p in st['pal'].values()])
+
+    # ---- the player's body ----
+    def picture(self):
+        """The screen as it is now."""
+        time.sleep(0.5)
+        path = os.path.join(tmp, 'blocks-body.ppm')
+        ctl.cmd('dump ' + path)
+        return Ppm(path)
+
+    def greenish(self, img, x0, y0, x1, y1):
+        n = total = 0
+        for y in range(y0, y1, 4):
+            for x in range(x0, x1, 4):
+                r, g, b = img.px(self.win['x'] + x, self.win['y'] + y)
+                total += 1
+                n += g > r + 20 and g > b + 20
+        return n / total
+
+    def test_the_arm_is_in_the_lower_right_of_the_picture_and_h_hides_the_body(self):
+        self.start('--pitch', '-20', body=True)
+        self.play()
+        st = self.state()
+        self.assertEqual((st['hero']['on'], st['hero']['held'], st['hero']['sword']), ('1', 'stone', '0'))
+        w, h = self.win['w'], self.win['h']
+        with_arm = self.picture()
+        self.assertLess(self.greenish(with_arm, w * 3 // 4 - 40, h * 2 // 3, w * 3 // 4 + 60, h - 130), 0.6, 'the arm covers grass at the lower right')
+        self.assertGreater(self.greenish(with_arm, w // 4 - 40, h * 2 // 3, w // 4 + 60, h - 130), 0.9, 'and nothing at the lower left')
+        self.tap('h')
+        self.wait(lambda s: s['hero']['on'] == '0')
+        self.assertGreater(self.greenish(self.picture(), w * 3 // 4 - 40, h * 2 // 3, w * 3 // 4 + 60, h - 130), 0.9, 'gone with H')
+        self.tap('h')
+        self.wait(lambda s: s['hero']['on'] == '1')
+
+    def test_the_legs_walk_the_arm_swings_and_a_goblin_brings_the_sword_out(self):
+        self.start('--time', '17.9', '--pitch', '-60', '--goblin', '0,5', body=True, mobs=True)
+        self.play()
+        st = self.wait(lambda s: s['hero']['sword'] == '1')
+        phase = st['hero']['phase']
+        ctl.key(self.K['s'], True)
+        st = self.wait(lambda s: float(s['hero']['stride']) > 0.5 and s['hero']['phase'] != phase)
+        ctl.key(self.K['s'], False)
+        self.wait(lambda s: float(s['hero']['stride']) < 0.1)
+        ctl.button(272, True)
+        self.wait(lambda s: float(s['hero']['swing']) > 0.0)
+        ctl.button(272, False)
+        self.wait(lambda s: float(s['hero']['swing']) == 0.0)
+
+    def test_the_player_cannot_walk_through_a_worker(self):
+        self.start('--workers', '1', body=True)
+        self.play()
+        st = self.state()
+        i = list(st['workers'])[0]
+        wx, wz = float(st['workers'][i]['x']), float(st['workers'][i]['z'])
+        import math
+        yaw = math.atan2(wx - float(st['state']['x']), wz - float(st['state']['z']))
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '0')
+        self.quit_game()
+        self.start('--workers', '1', '--yaw', '%.2f' % math.degrees(yaw), body=True)
+        self.play()
+        ctl.key(self.K['w'], True)
+        near, moved = 9.0, 0.0
+        end = time.time() + 2.5
+        while time.time() < end:
+            st = self.state()
+            wk = list(st['workers'].values())[0]
+            d = math.hypot(float(wk['x']) - float(st['state']['x']), float(wk['z']) - float(st['state']['z']))
+            near = min(near, d)
+            moved = max(moved, math.hypot(float(wk['x']) - wx, float(wk['z']) - wz))
+            time.sleep(0.03)
+        ctl.key(self.K['w'], False)
+        self.assertGreater(near, 0.5, 'never inside the worker')
+        self.assertGreater(moved, 0.5, 'he gave way')
+
+    def test_the_hidden_body_is_saved(self):
+        self.start('--save', body=True)
+        self.play()
+        self.tap('h')
+        self.wait(lambda s: s['hero']['on'] == '0')
+        self.ctrl_tap('s')
+        conf = os.path.join(self.data, 'player.conf')
+        end = time.time() + 5.0
+        while time.time() < end and not (os.path.exists(conf) and 'body = 0' in open(conf).read()):
+            time.sleep(0.05)
+        with open(conf) as f:
+            self.assertIn('body = 0', f.read())
 
     def test_the_goblins_are_a_setting_of_the_world_and_a_bad_goblin_option_is_refused(self):
         p = subprocess.run([self.EXE, '--goblin', '1'], capture_output=True, text=True, timeout=10)

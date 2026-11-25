@@ -1195,6 +1195,32 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 		*out = R;
 }
 
+/* ---- the player's body ------------------------------------------------------------------------------------------------ */
+
+void bl_mobs_push_player(struct bl_mobs *M, const struct bl_world *w, struct bl_player *p)
+{
+	const float phw = BL_PLAYER_W * 0.5f, near = phw + BL_GOBLIN_HW;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		struct bl_mob *b = &M->mob[i];
+		if (!b->alive || p->y >= b->y + bl_mob_height(b) || p->y + BL_PLAYER_H <= b->y)
+			continue;
+		float ex = b->x - p->x, ez = b->z - p->z, e = hypotf(ex, ez);
+		if (e >= near)
+			continue;
+		float over = near - e, nx = e > 0.001f ? ex / e : sinf(p->yaw), nz = e > 0.001f ? ez / e : cosf(p->yaw);
+		float give = b->posted ? 0.0f : b->kind == BL_MOB_GOBLIN ? 0.5f : 1.0f, ox = b->x, oz = b->z;
+		if (give > 0.0f) {
+			mob_move(w, b, 0, nx * over * give, bl_mob_height(b));
+			mob_move(w, b, 2, nz * over * give, bl_mob_height(b));
+		}
+		float rest = over - ((b->x - ox) * nx + (b->z - oz) * nz);
+		if (rest > 0.002f) {
+			bl_box_move(w, &p->x, &p->y, &p->z, 0, -nx * rest, phw, BL_PLAYER_H);
+			bl_box_move(w, &p->x, &p->y, &p->z, 2, -nz * rest, phw, BL_PLAYER_H);
+		}
+	}
+}
+
 /* ---- the sword and the pointer ---------------------------------------------------------------------------------------------- */
 
 /* where a ray meets a box: the distance in, or -1 (the slab method; the ray's start inside the box counts as 0) */
@@ -1366,21 +1392,25 @@ static const struct bbox k_soldier[] = {
 	{ 0.05f, 0.11f, 1.20f, 1.26f, 0.165f, 0.18f, 0x20180fu, LIMB_NONE, false },
 };
 
-void bl_mobs_light(struct bl_mobs *m, const struct bl_world *w, float time_h)
+void bl_mobs_light_at(const struct bl_world *w, float time_h, float px, float py, float pz, float lit[3])
 {
 	float day = bl_daylight(time_h);
+	int x = (int)floorf(px), z = (int)floorf(pz), y = (int)floorf(py + 1.0f);
+	bool open = bl_top(w, x, z) < y;
+	float sky = open ? 0.22f + 0.78f * day : 0.20f + 0.12f * day;
+	float bl = (float)bl_light(w, x, y, z) / 15.0f;
+	bl = bl > 0.0f ? powf(bl, 0.85f) : 0.0f;
+	lit[0] = fmaxf(sky * (open && day < 0.3f ? 0.85f : 1.0f), bl * 1.0f);
+	lit[1] = fmaxf(sky * (open && day < 0.3f ? 0.9f : 1.0f), bl * 0.80f);
+	lit[2] = fmaxf(sky * (open && day < 0.3f ? 1.15f : 1.0f), bl * 0.52f);
+}
+
+void bl_mobs_light(struct bl_mobs *m, const struct bl_world *w, float time_h)
+{
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		struct bl_mob *b = &m->mob[i];
-		if (!b->alive)
-			continue;
-		int x = (int)floorf(b->x), z = (int)floorf(b->z), y = (int)floorf(b->y + 1.0f);
-		bool open = bl_top(w, x, z) < y;
-		float sky = open ? 0.22f + 0.78f * day : 0.20f + 0.12f * day;
-		float bl = (float)bl_light(w, x, y, z) / 15.0f;
-		bl = bl > 0.0f ? powf(bl, 0.85f) : 0.0f;
-		b->lit[0] = fmaxf(sky * (open && day < 0.3f ? 0.85f : 1.0f), bl * 1.0f);
-		b->lit[1] = fmaxf(sky * (open && day < 0.3f ? 0.9f : 1.0f), bl * 0.80f);
-		b->lit[2] = fmaxf(sky * (open && day < 0.3f ? 1.15f : 1.0f), bl * 0.52f);
+		if (b->alive)
+			bl_mobs_light_at(w, time_h, b->x, b->y, b->z, b->lit);
 	}
 }
 

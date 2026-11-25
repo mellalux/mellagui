@@ -21,6 +21,8 @@
  * where you stand, the hand and the settings in player.conf. It is saved a minute after a change, when you pause, and when the window closes. `--seed` and
  * `--flat` make a new world that is NOT saved (so a look at a seed never replaces yours) unless `--save` is given.
  *
+ * The player has a body (client/blockshero.c): his arm and what it holds in the first person, the whole figure from above; H hides it.
+ *
  * Survival has a keep to defend, workers and soldiers commanded from above (Tab), and buildings the workers put up there: a barracks, a watchtower, walls and a
  * gate (3 .. 6; client/blocksbuild.c). F1 in the game explains it all.
  *
@@ -40,6 +42,7 @@
 
 #include "blocks.h"
 #include "blocksbuild.h"
+#include "blockshero.h"
 #include "blockspets.h"
 #include "blocksmobs.h"
 #include "blocksview.h"
@@ -63,7 +66,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111, K_H = 35,
 };
 
 #define SLOTS 9
@@ -73,6 +76,7 @@ enum {
 #define MIN_BUDGET 40000                                    /* the least pixels the picture is made of, and the most it is asked to take (ms) */
 #define SLOW_MS 27.0
 #define MAX_HP 20.0f                                        /* ten hearts, two hit points each */
+#define SWORD_SHOWN 7.0f                                    /* a goblin this near: the sword is in the hand */
 #define SWORD_MS 400                                        /* the least time between two blows */
 #define KEEP_HP 60.0f                                       /* what the keep can take: a goblin's blow is 2 */
 #define KEEP_H 3                                            /* it is a tower of three blocks */
@@ -177,6 +181,10 @@ struct app {
 	float soldier_conf[BL_SOLDIER_MAX][3];
 	bool wave_msg_done;                                     /* the message of the wave's end was given */
 	bool brute_warned;                                      /* the first brute of the game has been told about */
+
+	bool body;                                              /* the player has a body in the picture (H) */
+	struct bl_hero hero;                                    /* ... as it was posed for the last frame */
+	float walk_phase, walk_stride, arm_swing;               /* its walk (a stride is one turn, how far the legs go) and the swing of the arm */
 
 	struct bl_hit aim;
 	bool aimed;
@@ -400,6 +408,8 @@ static void conf_load(struct app *a, bool with_player)
 			a->pets_on = d != 0;
 		else if (!strcmp(k, "mobs") && (d == 0 || d == 1))
 			a->mobs_on = d != 0;
+		else if (!strcmp(k, "body") && (d == 0 || d == 1))
+			a->body = d != 0;
 		else if (with_player && !strcmp(k, "survival") && (d == 0 || d == 1)) {
 			a->survival = d != 0;
 			a->conf_mode = true;
@@ -494,7 +504,7 @@ static void conf_save(const struct app *a)
 	if (a->pets.placed)
 		fprintf(f, "yard_x = %.2f\nyard_z = %.2f\ntom_x = %.3f\ntom_y = %.3f\ntom_z = %.3f\nfilip_x = %.3f\nfilip_y = %.3f\nfilip_z = %.3f\n", a->pets.yard[0], a->pets.yard[2],
 		        a->pets.tom.x, a->pets.tom.y, a->pets.tom.z, a->pets.filip.x, a->pets.filip.y, a->pets.filip.z);
-	fprintf(f, "survival = %d\nnights = %d\nkills = %d\n", a->survival, a->nights, a->kills);
+	fprintf(f, "survival = %d\nnights = %d\nkills = %d\nbody = %d\n", a->survival, a->nights, a->kills, a->body);
 	if (a->have_keep)
 		fprintf(f, "keep_x = %d\nkeep_y = %d\nkeep_z = %d\nkeep_hp = %.1f\n", a->keep[0], a->keep[1], a->keep[2], a->keep_hp);
 	fprintf(f, "workers = ");
@@ -1640,6 +1650,7 @@ static bool sword_swing(struct app *a, int64_t now)
 	if (now < a->next_sword)
 		return true;                                         /* too soon for another blow, and the block behind it is not touched */
 	a->next_sword = now + SWORD_MS;
+	a->arm_swing = 1.0f;
 	bool dead = bl_mobs_hurt(&a->mobs, id, BL_SWORD_DAMAGE, look[0], look[2]);
 	a->hit_t = 0.18f;
 	if (dead) {
@@ -1656,6 +1667,7 @@ static void do_break(struct app *a, int64_t now)
 {
 	if (sword_swing(a, now))
 		return;
+	a->arm_swing = 1.0f;
 	if (a->aimed && bl_break(a->world, &a->aim)) {
 		sound(a, "draw");
 		aim_update(a);
@@ -1689,6 +1701,8 @@ static void dig_step(struct app *a, int64_t now, float dt)
 		a->dig_t = 0.0f;
 	}
 	a->dig_t += dt;
+	if (a->arm_swing <= 0.0f)                                   /* the arm goes on swinging while a block is being broken */
+		a->arm_swing = 1.0f;
 	if (a->dig_t >= bl_hardness(b)) {
 		if (bl_break(a->world, &a->aim)) {
 			int d = bl_drop(b);
@@ -1717,6 +1731,7 @@ static void do_place(struct app *a)
 		return;
 	}
 	if (bl_place(a->world, &a->aim, hand_block(a), &a->pl)) {
+		a->arm_swing = 1.0f;
 		if (a->survival)
 			a->inv[hand_block(a)]--;
 		sound(a, "place");
@@ -1907,13 +1922,23 @@ static void advance(struct app *a, int64_t now, float dt)
 			in = (struct bl_input){ .fwd = (a->k_fwd ? 1.0f : 0.0f) - (a->k_back ? 1.0f : 0.0f), .strafe = (a->k_right ? 1.0f : 0.0f) - (a->k_left ? 1.0f : 0.0f),
 			                        .jump = a->k_jump || a->jump_latch, .sneak = a->k_sneak, .sprint = a->k_ctrl && a->k_fwd };
 		}
+		float ox = a->pl.x, oz = a->pl.z;
 		bl_player_step(a->world, &a->pl, &in, dt);
 		a->jump_latch = false;
+		{                                                   /* the legs go by the distance walked */
+			float gone = hypotf(a->pl.x - ox, a->pl.z - oz), v = dt > 0.0f ? gone / dt : 0.0f;
+			float want = a->pl.on_ground && v > 0.2f ? fminf(1.0f, v / 3.0f) : 0.0f;
+			a->walk_stride += (want - a->walk_stride) * fminf(1.0f, 10.0f * dt);
+			if (a->pl.on_ground)
+				a->walk_phase = fmodf(a->walk_phase + gone / 1.5f, 1.0f);
+			a->arm_swing = fmaxf(0.0f, a->arm_swing - 3.6f * dt);
+		}
 		if (a->pets_on && a->pets.placed) {
 			bl_pets_step(&a->pets, a->world, dt);
 			bl_pets_push_player(&a->pets, a->world, &a->pl);
 		}
 		mobs_advance(a, dt);                                 /* (the goblins only when they are on: the workers always) */
+		bl_mobs_push_player(&a->mobs, a->world, &a->pl);     /* nobody walks through the player */
 		a->hurt_t = fmaxf(0.0f, a->hurt_t - dt);
 		a->hit_t = fmaxf(0.0f, a->hit_t - dt);
 		if (a->playing && !a->cmd)                           /* (he may have died in that step) */
@@ -2147,10 +2172,10 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 	}
 	{                                                                        /* where he stands */
 		float sx, sy;
-		if (cmd_project(a, cam, a->pl.x, a->pl.y + 1.0f, a->pl.z, &sx, &sy)) {
+		if (cmd_project(a, cam, a->pl.x, a->pl.y + (a->body ? 2.2f : 1.0f), a->pl.z, &sx, &sy)) {
 			wlwin_round_fill(w, (int)sx - 6, (int)sy - 6, 12, 12, 6, 0x10141cu);
 			wlwin_round_fill(w, (int)sx - 4, (int)sy - 4, 8, 8, 4, 0xffd34cu);
-			shadow_text(w, (int)sx - lm_font_text_width("you") / 2, (int)sy + 9, "you", 0xffe080u);
+			shadow_text(w, (int)sx - lm_font_text_width("you") / 2, (int)sy - LM_FONT_H - 8, "you", 0xffe080u);
 		}
 	}
 	char l[200];
@@ -2248,6 +2273,9 @@ static const char *const HP_MOVING[] = {
 	"|Shift|Sneak: slow, lower, and you do not walk off an edge. While flying it goes down.",
 	"|Ctrl|Run.",
 	"|F|Fly (double speed with Ctrl). Press it again to come down.",
+	"# You",
+	"You have a body. In the lower right is your arm with the block you hold, or the sword when a goblin is near; look down and you see your chest and boots. From the command view you are the figure in the purple tunic and the white cape. Goblins, workers, soldiers, Tom and Filip cannot walk through you: they give way, or you do.",
+	"|H|Hide your body, or show it again.",
 	"# Time",
 	"|[ and ]|Move the clock an hour back or on.",
 	"|T|The clock stands still, runs (a day is twenty minutes), or follows the real sun of the place the computer is in: the real sunrise is six o'clock here and the real sunset is six in the evening.",
@@ -2388,6 +2416,7 @@ static const char *const HP_KEYS[] = {
 	"|G|Survival / creative",
 	"|M|Goblins on / off",
 	"|P|Tom and Filip on / off",
+	"|H|Your body shown / hidden",
 	"|Tab|Command view",
 	"|B|Train a worker (command view)",
 	"|V|Train a soldier (command view)",
@@ -2570,6 +2599,8 @@ static void write_dump(struct app *a)
 			const struct bl_mob *m = &a->mobs.mob[i];
 			fprintf(f, "mob %d x=%.3f y=%.3f z=%.3f hp=%.1f yaw=%.3f hurt=%.2f dist=%.2f\n", i, m->x, m->y, m->z, m->hp, m->yaw, m->hurt, hypotf(m->x - a->pl.x, m->z - a->pl.z));
 		}
+	fprintf(f, "hero on=%d phase=%.3f stride=%.2f swing=%.2f sword=%d held=%s\n", a->body, a->walk_phase, a->walk_stride, a->arm_swing, a->body && a->hero.sword,
+	        a->survival && a->inv[hand_block(a)] < 1 ? "air" : bl_block_name(hand_block(a)));
 	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f wave=%d/%d/%d barracks=%d brutes=%d\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
 	        a->dig_on ? a->dig_t : -1.0f, a->mobs.wave_on ? bl_mobs_wave_remaining(&a->mobs) : 0, a->mobs.wave_on ? a->mobs.wave_size : 0, a->mobs.wave_on, barracks_find(a, NULL), bl_mobs_count_brutes(&a->mobs));
 	{
@@ -2649,6 +2680,36 @@ static void write_dump(struct app *a)
 	}
 	fclose(f);
 	rename(tmp, g_dump);
+}
+
+/* the player's body for a frame: whole from above, from his own eyes the arm with the sword (a goblin is near) or the block he holds */
+static void hero_pose(struct app *a, const struct bl_camera *cam)
+{
+	struct bl_hero *h = &a->hero;
+	memset(h, 0, sizeof *h);
+	h->x = a->pl.x;
+	h->y = a->pl.y;
+	h->z = a->pl.z;
+	h->yaw = a->pl.yaw;
+	h->first = !a->cmd;
+	h->pitch = h->first ? a->pl.pitch : 0.0f;
+	h->phase = a->walk_phase;
+	h->stride = a->walk_stride;
+	h->swing = a->arm_swing;
+	h->hurt = a->hurt_t / 0.45f;
+	h->sneak = a->pl.sneaking && !a->pl.flying;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *m = &a->mobs.mob[i];
+		if (m->alive && m->kind == BL_MOB_GOBLIN && hypotf(m->x - a->pl.x, m->z - a->pl.z) < SWORD_SHOWN && fabsf(m->y - a->pl.y) < 4.0f)
+			h->sword = true;
+	}
+	h->held = a->survival && a->inv[hand_block(a)] < 1 ? 0 : hand_block(a);
+	h->eye[0] = cam->x;
+	h->eye[1] = cam->y;
+	h->eye[2] = cam->z;
+	h->fov = cam->fov;
+	h->aspect = a->rh > 0 ? (float)a->rw / (float)a->rh : 1.6f;
+	bl_hero_set(h, a->world, a->time_h);
 }
 
 static void paint(struct wlwin *w)
@@ -2734,6 +2795,10 @@ static void paint(struct wlwin *w)
 	}
 	if (a->ghosts.n)
 		v.ghosts = &a->ghosts;
+	if (a->body) {
+		hero_pose(a, &cam);
+		v.hero = &a->hero;
+	}
 	bl_render(a->world, &cam, &v, a->frame, a->rw, a->rh, a->rw, a->threads);
 	if (a->hurt_t > 0.0f || a->hp <= 0.0f)
 		red_flash(a);
@@ -3016,7 +3081,7 @@ static void keys_release(struct app *a)
 static bool cmd_key(struct app *a, uint32_t code)
 {
 	switch (code) {
-	case K_G: case K_M: case K_P: case K_E: case K_F1: case K_F3: case K_X:
+	case K_G: case K_M: case K_P: case K_H: case K_E: case K_F1: case K_F3: case K_X:
 		return false;
 	case K_TAB:
 		leave_cmd(a);
@@ -3235,6 +3300,11 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		if (!a->mobs_on)
 			bl_mobs_clear_kind(&a->mobs, BL_MOB_GOBLIN);
 		say(a, a->mobs_on ? "The goblins come out at night" : "No goblins");
+		return;
+	}
+	if (code == K_H && a->playing) {
+		a->body = !a->body;
+		say(a, a->body ? "You can see yourself" : "Your body is hidden");
 		return;
 	}
 	if (code == K_P && a->playing) {
@@ -3877,6 +3947,37 @@ static int selftest(void)
 		CHECK(build_cancel(&wa) && bl_mobs_count_sites(&wa.mobs) == 0 && wa.inv[BL_COBBLE] == 12, "given up before a block: all comes back (%d)", wa.inv[BL_COBBLE]);
 		wa.cmd = false;
 		wa.has_pointer = false;
+		/* the body: the sword comes into the hand when a goblin is near, an empty pocket leaves the hand empty, and the choice is saved */
+		{
+			struct bl_camera hc = { wa.pl.x, wa.pl.y + BL_EYE, wa.pl.z, wa.pl.yaw, 0.0f, 1.2f };
+			bool was = wa.cmd;
+			wa.cmd = false;
+			bl_mobs_clear_kind(&wa.mobs, BL_MOB_GOBLIN);
+			wa.hotbar[wa.slot] = BL_STONE;
+			wa.inv[BL_STONE] = 0;
+			hero_pose(&wa, &hc);
+			CHECK(wa.hero.first && !wa.hero.sword && wa.hero.held == 0, "first person, an empty hand");
+			wa.inv[BL_STONE] = 3;
+			hero_pose(&wa, &hc);
+			CHECK(wa.hero.held == BL_STONE, "the stone in the hand");
+			CHECK(bl_mobs_add(&wa.mobs, wa.world, BL_MOB_GOBLIN, wa.pl.x + 3.0f, (float)bl_top(wa.world, (int)floorf(wa.pl.x + 3.0f), (int)floorf(wa.pl.z)) + 1.0f, wa.pl.z), "a goblin beside him");
+			hero_pose(&wa, &hc);
+			CHECK(wa.hero.sword, "the sword is in the hand");
+			bl_mobs_clear_kind(&wa.mobs, BL_MOB_GOBLIN);
+			wa.cmd = true;
+			hero_pose(&wa, &hc);
+			CHECK(!wa.hero.first, "whole in the command view");
+			wa.cmd = was;
+			wa.body = false;
+			conf_save(&wa);
+			static struct app wh;
+			memset(&wh, 0, sizeof wh);
+			memcpy(wh.dir, wa.dir, sizeof wh.dir);
+			wh.body = true;
+			conf_load(&wh, true);
+			CHECK(!wh.body, "a hidden body stays hidden");
+			wa.body = true;
+		}
 		/* soldiers: at the barracks that was built they stand on the ground, not on its roof */
 		wa.inv[BL_COBBLE] = 100;
 		wa.inv[BL_PLANKS] = 100;
@@ -4040,9 +4141,10 @@ int main(int argc, char **argv)
 	a.pal_hover = -1;
 	a.pets_on = true;
 	a.mobs_on = true;
+	a.body = true;
 	a.survival = true;
 	int clock_cli = -1;
-	bool no_pets = false, no_mobs = false;
+	bool no_pets = false, no_mobs = false, no_body = false;
 	int workers_cli = -1;                                   /* --workers N */
 	int soldiers_cli = -1;                                  /* --soldiers N */
 	int mode_cli = -1;                                      /* --survival 1, --creative 0 */
@@ -4104,6 +4206,8 @@ int main(int argc, char **argv)
 			clock_cli = 2;
 		} else if (!strcmp(argv[i], "--clock")) {
 			clock_cli = 1;
+		} else if (!strcmp(argv[i], "--no-body")) {
+			no_body = true;
 		} else if (!strcmp(argv[i], "--no-pets")) {
 			no_pets = true;
 		} else if (!strcmp(argv[i], "--no-mobs")) {
@@ -4161,7 +4265,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--no-body] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -4206,6 +4310,8 @@ int main(int argc, char **argv)
 		a.sound_on = false;
 	if (no_pets)
 		a.pets_on = false;
+	if (no_body)
+		a.body = false;
 	if (no_mobs)
 		a.mobs_on = false;
 	if (pet_at >= 0.0f)

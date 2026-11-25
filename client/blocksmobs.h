@@ -210,6 +210,10 @@ void bl_mobs_order_move(struct bl_mobs *m, int i, float x, float z);
 bool bl_mobs_order_gather(struct bl_mobs *m, const struct bl_world *w, int i, int bx, int by, int bz);
 void bl_mobs_order_stop(struct bl_mobs *m, int i);
 
+/* The player is a body to the mobs (call it after his step): one he walks into gives way (a worker or a soldier all the way, a goblin half), as far as the world
+ * lets it, and he steps back by the rest; one on a watchtower does not move. Nobody stands on anybody: they slide apart sideways. */
+void bl_mobs_push_player(struct bl_mobs *m, const struct bl_world *w, struct bl_player *p);
+
 /* ---- building ---------------------------------------------------------------------------------------------------------- */
 
 /* A site (bl_plan_lay) to be built: its index, -1 when there are BL_SITES_MAX already or it has no cells. */
@@ -233,6 +237,8 @@ struct bl_mob_hit {
 
 /* Light every mob for a frame: the sky's light (the hour, and whether the sky is over it) and the light of torches and lamps near it. */
 void bl_mobs_light(struct bl_mobs *m, const struct bl_world *w, float time_h);
+/* the light on a body that stands at (x, y, z) (the feet), per colour: what bl_mobs_light gives a mob (the player's body uses it too) */
+void bl_mobs_light_at(const struct bl_world *w, float time_h, float x, float y, float z, float lit[3]);
 /* the nearest mob the ray (origin o, unit direction d) hits within tmax; false when none */
 bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], float tmax, struct bl_mob_hit *hit);
 

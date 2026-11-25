@@ -2,6 +2,7 @@
 #include "blocksview.h"
 #include "blockspets.h"
 #include "blocksbuild.h"
+#include "blockshero.h"
 #include "blocksmobs.h"
 
 #include <math.h>
@@ -320,6 +321,7 @@ struct frame {
 	const struct bl_pets *pets;
 	const struct bl_mobs *mobs;
 	const struct bl_ghosts *ghosts;
+	const struct bl_hero *hero;
 	float inv_f;              /* metres a pixel covers at a distance of one metre */
 	float petmax;             /* the pets are drawn up to here (beyond it the fog has them) */
 	bool start_water;
@@ -464,6 +466,12 @@ static inline int event_sort(struct bl_pet_event *ev, int n)
 static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 {
 	enum { END_SKY, END_FAR, END_EDGE };
+	if (F->hero && F->hero->first && !F->ids) {       /* the player's own arm and what it holds are in front of everything */
+		float ad[3] = { dx, dy, dz }, rgb[3];
+		if (bl_hero_arm_ray(F->hero, ad, rgb))
+			return 0xff000000u | (uint32_t)clamp8((int)(rgb[0] * 255.0f + 0.5f)) << 16 | (uint32_t)clamp8((int)(rgb[1] * 255.0f + 0.5f)) << 8 |
+			       (uint32_t)clamp8((int)(rgb[2] * 255.0f + 0.5f));
+	}
 	float acc[3] = { 0, 0, 0 }, trans = 1.0f;
 	float px = F->ox, py = F->oy, pz = F->oz;
 	float t = 0.0f;
@@ -471,7 +479,7 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 	bool in_water = F->start_water;
 	float wt0 = 0.0f;
 	const float maxd = F->maxd;
-	struct bl_pet_event pev[4];                       /* Tom, Filip, a goblin and a planned block along this ray: laid over what is nearer when the ray gets to their distance */
+	struct bl_pet_event pev[5];                       /* Tom, Filip, a mob, the player's body and a planned block along this ray: laid over what is nearer when the ray gets to their distance */
 	int npev = 0, ipev = 0;
 	if (F->pets && !F->ids) {
 		float po[3] = { F->ox, F->oy, F->oz }, pd[3] = { dx, dy, dz };
@@ -488,6 +496,19 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 				pev[npev].c[i] = mh.rgb[i] * (1.0f - fog) + F->hor[i] * fog;
 			pev[npev].a = 1.0f;
 			pev[npev].tp = mh.t;
+			npev = event_sort(pev, npev);
+		}
+	}
+	if (F->hero && !F->ids) {
+		float po[3] = { F->ox, F->oy, F->oz }, pd[3] = { dx, dy, dz }, rgb[3], th;
+		if (bl_hero_ray(F->hero, po, pd, F->maxd, rgb, &th)) {
+			float fog = th > 0.6f * F->maxd ? (th - 0.6f * F->maxd) / (0.4f * F->maxd) : 0.0f;
+			if (fog > 1.0f)
+				fog = 1.0f;
+			for (int i = 0; i < 3; i++)
+				pev[npev].c[i] = rgb[i] * (1.0f - fog) + F->hor[i] * fog;
+			pev[npev].a = 1.0f;
+			pev[npev].tp = th;
 			npev = event_sort(pev, npev);
 		}
 	}
@@ -770,6 +791,12 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 			}
 			for (int i = 0; i < 3; i++)
 				col[i] *= sh * mult[i];
+			if (F->hero && face == BL_PY) {                  /* the player's shadow */
+				float hs = bl_hero_floor_shade(F->hero, hpx, (float)(iy + 1), hpz);
+				if (hs < 1.0f)
+					for (int i = 0; i < 3; i++)
+						col[i] *= hs;
+			}
 			if (F->pets && face == BL_PY) {                  /* the shadow of Tom and of Filip on the top of a block at their feet */
 				float fs = bl_pets_floor_shade(F->pets, hpx, (float)(iy + 1), hpz);
 				if (fs < 1.0f)
@@ -972,6 +999,7 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	F.pets = v->pets;
 	F.mobs = v->mobs;
 	F.ghosts = v->ghosts;
+	F.hero = v->hero;
 	F.petmax = 0.7f * F.maxd;
 
 	int ex = (int)floorf(c->x), ey = (int)floorf(c->y), ez = (int)floorf(c->z);

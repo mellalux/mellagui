@@ -19695,7 +19695,7 @@ class TestBlocks(Base):
     compositor's zwp_pointer_constraints_v1 / zwp_relative_pointer_v1). Through MELLAGUI_BLOCKS_DUMP: where the player is, what he aims at, the hand, the number of
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
-    K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
+    K = dict(o=24, y=21, esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
              f1=59, f3=61, h=35, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, r=19, delete=111, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
@@ -19731,11 +19731,18 @@ class TestBlocks(Base):
             time.sleep(0.05)
             self.win = wait_for_window('mellagui.blocks')
         self.assertGreater(self.win['w'], 0, 'the window got a size')
+        self.win = self.view(self.win)
         self.wait(lambda s: 'state' in s)
         self.cx, self.cy = self.win['x'] + self.win['w'] // 2, self.win['y'] + self.win['h'] // 2
         ctl.abs(self.cx, self.cy)
         time.sleep(0.2)
         return p
+
+    RAIL = 52                                                   # the rail of buttons at the left of the window
+
+    def view(self, win):
+        """The part of the window beside the rail: where the picture is, and what every x of the dump is counted from."""
+        return dict(win, x=win['x'] + self.RAIL, w=win['w'] - self.RAIL)
 
     def read_dump(self):
         st = {'slot': {}, 'cbtn': {}, 'hist': {}, 'hotbar': [], 'pal': {}, 'mobs': {}, 'workers': {}}
@@ -19782,6 +19789,18 @@ class TestBlocks(Base):
                 st['slot'][int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
             elif f[0] == 'pal':
                 st['pal'][int(f[1])] = dict((k, v if k == 'block' else int(v)) for k, v in (x.split('=') for x in f[2:]))
+            elif f[0] == 'rail':
+                st.setdefault('rail', {})[int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
+            elif f[0] == 'stock':
+                st['stock'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'world':
+                st['world'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'field':
+                st['field'] = dict(x.split('=', 1) for x in l.split(' ', 5)[1:])
+            elif f[0] == 'cmsg':
+                st['cmsg'] = f[1] if len(f) > 1 else ''
+            elif f[0] == 'crow':
+                st.setdefault('crows', {})[l.split('name=', 1)[1]] = int(l.split('y=')[1].split()[0])
             elif f[0] == 'cbtn':
                 st['cbtn'][int(f[1])] = tuple(int(v) for v in f[2:6])
         return st
@@ -20016,6 +20035,37 @@ class TestBlocks(Base):
         self.wait(lambda s: s['state']['rev'] == '6')                     # planks again, in the hole
         self.assertEqual(self.state()['hist']['planks'], 1)
 
+    def test_what_he_has_is_listed_in_survival_also_in_the_command_view(self):
+        self.start('--give', 'cobble=7,sand=3', survival=True)
+        st = self.wait(lambda s: 'stock' in s)
+        self.assertEqual(st['stock']['list'], 'log:0,planks:0,cobble:7,sand:3', 'the wood and the stone always, then what else there is')
+        self.play()
+        self.tap('tab')
+        st = self.wait(lambda s: s['cmd']['on'] == '1')
+        self.assertEqual(st['stock']['list'], 'log:0,planks:0,cobble:7,sand:3')
+        out = os.path.join(tmp, 'blocks-stock.ppm')
+        self.addCleanup(lambda: os.path.exists(out) and os.unlink(out))
+        time.sleep(0.2)
+        pic = ctl.dump(out)
+        x, y = self.win['x'] + int(st['stock']['x']), self.win['y'] + int(st['stock']['y'])
+        self.assertEqual(pic.px(x + 4, y + 20), (43, 48, 59), 'the panel is there, in the colour of the bars')
+        self.tap('g')                                           # (a key of the game, not of the view: creative)
+        self.wait(lambda s: s['game']['survival'] == '0' and 'stock' not in s)
+
+    def test_a_slow_click_breaks_or_puts_one_block_only(self):
+        self.start('--pitch', '-45')
+        self.play()
+        ctl.button(272, True)
+        time.sleep(0.38)
+        ctl.button(272, False)
+        time.sleep(0.5)
+        self.assertEqual(self.S()['rev'], '1', 'a click that takes a third of a second breaks one block')
+        ctl.button(273, True)
+        time.sleep(0.38)
+        ctl.button(273, False)
+        time.sleep(0.5)
+        self.assertEqual(self.S()['rev'], '2', 'and puts one')
+
     def test_a_held_button_breaks_again_and_again(self):
         self.start('--pitch', '-85')
         self.play()
@@ -20083,6 +20133,150 @@ class TestBlocks(Base):
         self.tap('t')
         self.assertEqual(self.S()['clock'], '1')
 
+    LETTERS = dict(a=30, c=46, d=32, e=18, l=38, o=24, r=19, s=31, t=20, w=17, z=44)
+
+    def type_text(self, text):
+        for ch in text:
+            ctl.tap(self.LETTERS[ch])
+            time.sleep(0.03)
+        time.sleep(0.15)
+
+    def click_view(self, x, y):
+        ctl.abs(self.win['x'] + x, self.win['y'] + y)
+        time.sleep(0.12)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        time.sleep(0.15)
+
+    def rail(self, i):
+        b = self.state()['rail'][i]
+        self.click_view(b['x'] + b['w'] // 2, b['y'] + b['h'] // 2)
+
+    def prompt(self, n):
+        return self.wait(lambda s: s['state']['prompt'] == str(n))
+
+    def ctrl_shift_tap(self, name):
+        ctl.key(self.K['shift'], True)
+        self.ctrl_tap(name)
+        ctl.key(self.K['shift'], False)
+        time.sleep(0.12)
+
+    def test_worlds_are_saved_as_files_of_their_own_and_opened_again(self):
+        # prompts: 1 pause, 2 new, 7 open, 8 save as, 9 replace
+        self.start('--pitch', '-85')
+        data = self.data
+        castle, first = os.path.join(data, 'castle.bl'), os.path.join(data, 'world.bl')
+        self.assertEqual(self.state()['world']['file'], '-', 'a world made from a seed has no file')
+        self.play()
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['state']['rev'] == '1')
+        self.tap('esc')
+        self.prompt(1)
+        self.rail(2)                                            # Save, of a world with no file: Save as
+        self.prompt(8)
+        self.assertEqual(self.state()['field']['text'], '')
+        self.type_text('castle')
+        self.tap('enter')
+        st = self.wait(lambda s: s['state']['prompt'] == '1' and s['world']['name'] == 'castle')
+        self.assertTrue(os.path.exists(castle))
+        self.assertEqual(st['state']['nosave'], '0')
+        # a new world beside it
+        self.ctrl_tap('n')
+        self.prompt(2)
+        self.tap('enter')
+        st = self.wait(lambda s: s['state']['playing'] == '1' and s['world']['name'] == 'world')
+        self.assertEqual(st['state']['kind'], '0')
+        self.assertTrue(os.path.exists(first) and os.path.exists(castle))
+        # open the castle again: from the list, with the mouse
+        self.ctrl_tap('o')
+        st = self.wait(lambda s: s['state']['prompt'] == '7' and 'castle.bl' in s.get('crows', {}))
+        self.assertIn('world.bl', st['crows'])
+        self.assertNotIn('player.conf', st['crows'], 'only worlds are listed')
+        f = st['field']
+        self.click_view(int(f['x']) + 40, st['crows']['castle.bl'] + 10)
+        self.wait(lambda s: s['field']['text'] == 'castle.bl')
+        x, y, w, h = self.state()['cbtn'][1]
+        self.click_view(x + w // 2, y + h // 2)
+        st = self.wait(lambda s: s['state']['prompt'] == '1' and s['world']['name'] == 'castle')
+        self.assertEqual(st['state']['kind'], '1')
+        self.assertEqual(st['hist']['grass'], 256 * 256 - 1, 'the block that was broken is still gone')
+        # a name that is no world stays on the card
+        self.ctrl_tap('o')
+        self.prompt(7)
+        self.type_text('zzz')
+        self.tap('enter')
+        self.wait(lambda s: s['cmsg'] != '')
+        self.assertEqual(self.S()['prompt'], '7')
+        self.tap('esc')
+        self.prompt(1)
+        # Save as over another world asks; Enter does not replace by accident
+        size = os.path.getsize(first)
+        self.ctrl_shift_tap('s')
+        self.prompt(8)
+        self.assertEqual(self.state()['field']['text'], 'castle.bl', 'its own name, chosen')
+        self.type_text('world')
+        self.tap('enter')
+        self.prompt(9)
+        self.tap('enter')
+        self.prompt(8)
+        self.assertEqual(os.path.getsize(first), size, 'nothing replaced')
+        self.tap('enter')
+        self.prompt(9)
+        self.tap('y')
+        self.wait(lambda s: s['state']['prompt'] == '1' and s['world']['name'] == 'world')
+        self.ctrl_tap('o')                                      # the castle is the open one the next time
+        self.prompt(7)
+        self.type_text('castle')
+        self.tap('enter')
+        self.wait(lambda s: s['world']['name'] == 'castle')
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.proc.poll(), 0)
+        for _ in range(60):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+        self.start(flat=False, data=data)
+        st = self.state()
+        self.assertEqual(st['world']['name'], 'castle', 'the world that was open last')
+        self.assertEqual(st['hist']['grass'], 256 * 256 - 1)
+
+    def test_the_rail_of_buttons_does_what_it_says(self):
+        # buttons: 0 new, 1 open, 2 save, 3 save as, 4 play / pause, 5 command view, 6 blocks, 7 sound, 8 help
+        self.start()
+        st = self.state()
+        self.assertEqual(sorted(st['rail']), list(range(9)))
+        self.assertLess(st['rail'][0]['x'], 0, 'the rail is left of the picture')
+        self.rail(4)
+        self.wait(lambda s: s['state']['playing'] == '1' and s['state']['locked'] == '1')
+        self.tap('esc')
+        self.prompt(1)
+        self.rail(5)
+        self.wait(lambda s: s['cmd']['on'] == '1')
+        self.assertEqual(self.pconstraint()['active'], 'none', 'the pointer is free in the command view')
+        self.rail(7)
+        self.wait(lambda s: s['state']['sound'] == '0')
+        self.assertEqual(self.state()['cmd']['on'], '1')
+        self.rail(4)                                            # pause
+        self.prompt(1)
+        self.rail(1)
+        st = self.prompt(7)
+        self.assertEqual(st['rail'][0]['idle'], 1, 'the rail waits while a card asks')
+        self.rail(0)
+        self.assertEqual(self.S()['prompt'], '7')
+        self.tap('esc')
+        self.prompt(1)
+        self.rail(0)
+        self.prompt(2)
+        self.tap('esc')
+        self.prompt(1)
+        self.rail(6)
+        self.prompt(4)
+
     def test_f1_lists_the_keys_and_ctrl_n_asks_before_a_new_world(self):
         self.start()
         self.play()
@@ -20140,7 +20334,10 @@ class TestBlocks(Base):
         path = os.path.join(self.data, 'world.bl')
         self.assertTrue(os.path.exists(path))
         self.assertEqual(os.stat(path).st_mode & 0o077, 0, 'private')
-        self.assertLess(os.path.getsize(path), 200, 'only the edit is in the file')
+        with open(path, 'rb') as f:
+            data = f.read()
+        self.assertLess(data.index(b'PLAY'), 60, 'only the edit is in the world part of the file')
+        self.assertIn(b'slot = 6', data, 'and after it where he stood and what he held')
         self.assertTrue(os.path.exists(os.path.join(self.data, 'player.conf')))
         # started again with no world asked for: the saved one
         self.proc = None
@@ -20173,9 +20370,9 @@ class TestBlocks(Base):
         self.assertTrue(low[1] > low[2] and low[1] > 60, 'grass at the bottom: %s' % (low,))
         self.assertEqual(pic.px(wx + ww // 2, wy + wh // 2), (244, 244, 244), 'the crosshair')
         s1 = st['slot'][1]
-        self.assertEqual(pic.px(wx + s1['x'] - 2, wy + s1['y'] + s1['h'] // 2), (240, 240, 240), 'the chosen slot has a frame')
+        self.assertEqual(pic.px(wx + s1['x'] - 2, wy + s1['y'] + s1['h'] // 2), (111, 168, 255), 'the chosen slot has a frame (the accent colour)')
         mid = pic.px(wx + s1['x'] + s1['w'] // 2, wy + s1['y'] + s1['h'] // 2)
-        self.assertNotEqual(mid, (43, 48, 57), 'a block in the slot: %s' % (mid,))
+        self.assertNotEqual(mid, (20, 23, 31), 'a block in the slot: %s' % (mid,))
         # with the card up the picture is dimmed
         self.tap('esc')
         self.wait(lambda s: s['state']['playing'] == '0')
@@ -20767,6 +20964,11 @@ class TestBlocks(Base):
             lines = [l for l in f.read().splitlines() if not l.startswith('survival')]
         with open(conf, 'w') as f:
             f.write('\n'.join(lines) + '\n')
+        world = os.path.join(self.data, 'world.bl')                             # such a world carried no state of its own: that was all in player.conf
+        with open(world, 'rb') as f:
+            data = f.read()
+        with open(world, 'wb') as f:
+            f.write(data[:data.index(b'PLAY')])
         self.start(flat=False, data=self.data, nomode=True)
         self.assertEqual(self.state()['game']['survival'], '0', 'an old file: creative')
 

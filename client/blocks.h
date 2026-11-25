@@ -52,9 +52,10 @@ const char *bl_block_name(int block);                 /* "grass"; "?" for a numb
 /* what a block is (the renderer and the physics both read it). WATER is the source (the sea, a block put by hand); FLOW1..7 is water that has flowed. */
 static inline bool bl_water(int b)        { return b == BL_WATER || (b >= BL_FLOW1 && b <= BL_FLOW7); }
 static inline int  bl_water_level(int b)  { return b == BL_WATER ? 0 : b - BL_FLOW1 + 1; }                /* 0 for a source, 1 .. 7 for flowing water (b must be water) */
-static inline bool bl_solid(int b)        { return b != BL_AIR && !bl_water(b) && b != BL_TORCH && b != BL_GATE; }   /* stops the player and his units */
+static inline bool bl_solid(int b)        { return b != BL_AIR && !bl_water(b) && b != BL_TORCH && b != BL_GATE; }   /* stops the player */
 static inline bool bl_opaque(int b)       { return b != BL_AIR && !bl_water(b) && b != BL_GLASS && b != BL_TORCH && b != BL_GATE; }   /* stops light and sight */
 static inline bool bl_solid_foe(int b)    { return bl_solid(b) || b == BL_GATE; }                           /* stops a goblin */
+static inline bool bl_solid_unit(int b)   { return bl_solid(b) && b != BL_LEAVES; }                         /* stops a worker or a soldier: they push through leaves */
 static inline bool bl_targetable(int b)   { return b != BL_AIR && !bl_water(b); }                           /* can be aimed at and broken */
 static inline bool bl_blocks_light(int b) { return bl_opaque(b) && b != BL_LEAVES; }                       /* shades the cells below it from the sky (leaves let most light through) */
 static inline int  bl_emission(int b)     { return b == BL_LAMP ? 15 : b == BL_TORCH ? 14 : 0; }            /* the light a block gives (0 .. 15) */
@@ -198,6 +199,10 @@ bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, 
 /* the same for a goblin: a gate stops it, too */
 bool bl_box_hits_foe(const struct bl_world *w, float x, float y, float z, float hw, float h);
 bool bl_box_move_foe(const struct bl_world *w, float *x, float *y, float *z, int axis, float d, float hw, float h);
+/* the same for the player's workers and soldiers: leaves do not stop them, nor do they stand on them */
+bool bl_box_hits_unit(const struct bl_world *w, float x, float y, float z, float hw, float h);
+bool bl_box_move_unit(const struct bl_world *w, float *x, float *y, float *z, int axis, float d, float hw, float h);
+float bl_box_support_unit(const struct bl_world *w, float x, float y, float z, float hw, float down);
 /* The top of the highest solid block under the feet (the middle of the box and four points inside its corners) within `down` below them: its height, -1e9 when
  * there is none. */
 float bl_box_support(const struct bl_world *w, float x, float y, float z, float hw, float down);
@@ -210,8 +215,13 @@ bool bl_box_move(const struct bl_world *w, float *x, float *y, float *z, int axi
 /* Writes the seed, the size and every cell that differs from the world the seed makes (file mode 0600, written to a temporary
  * name and renamed). 0 = ok, -1 = failed. */
 int bl_save(const struct bl_world *w, const char *path);
+/* The same with a note of the caller's own at the end of the file (the game keeps there where the player stood and what he had): at most BL_NOTE_MAX bytes.
+ * bl_load_with gives it back (a malloc'd string, NULL when the file has none); bl_load reads such a file too and leaves the note. */
+#define BL_NOTE_MAX (256u << 10)
+int bl_save_with(const struct bl_world *w, const char *path, const void *note, size_t nnote);
 /* Reads it back (makes the world from the seed and lays the edits over it). NULL with *err set to a message: a missing file, a bad
  * header or a size that is no size, an entry out of order or out of range, a block that is none, a file that ends early. */
 struct bl_world *bl_load(const char *path, const char **err);
+struct bl_world *bl_load_with(const char *path, char **note, const char **err);
 
 #endif

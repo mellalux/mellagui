@@ -1015,6 +1015,7 @@ void bl_player_step(const struct bl_world *w, struct bl_player *p, const struct 
 #define SAVE_MAGIC "MGBL"
 #define SAVE_VERSION 1u
 #define SAVE_HEADER 36u
+#define SAVE_NOTE "PLAY"                                        /* after the edits, optionally: this, a length and that many bytes of the caller's own */
 
 struct buf {
 	uint8_t *p;
@@ -1072,6 +1073,13 @@ static struct bl_world *baseline(uint8_t kind, uint32_t seed, int w, int d, int 
 
 int bl_save(const struct bl_world *w, const char *path)
 {
+	return bl_save_with(w, path, NULL, 0);
+}
+
+int bl_save_with(const struct bl_world *w, const char *path, const void *note, size_t nnote)
+{
+	if (nnote > BL_NOTE_MAX)
+		return -1;
 	struct bl_world *base = baseline(w->kind, w->seed, w->w, w->d, w->h, w->ground);
 	if (!base)
 		return -1;
@@ -1101,6 +1109,11 @@ int bl_save(const struct bl_world *w, const char *path)
 		first = false;
 	}
 	bl_world_free(base);
+	if (note && nnote) {
+		buf_put(&b, SAVE_NOTE, 4);
+		buf_u32(&b, (uint32_t)nnote);
+		buf_put(&b, note, nnote);
+	}
 	if (b.bad) {
 		free(b.p);
 		return -1;
@@ -1134,6 +1147,13 @@ int bl_save(const struct bl_world *w, const char *path)
 
 struct bl_world *bl_load(const char *path, const char **err)
 {
+	return bl_load_with(path, NULL, err);
+}
+
+struct bl_world *bl_load_with(const char *path, char **note, const char **err)
+{
+	if (note)
+		*note = NULL;
 	const char *e = NULL;
 	struct bl_world *w = NULL, *res = NULL;
 	uint8_t *data = NULL;
@@ -1224,9 +1244,23 @@ struct bl_world *bl_load(const char *path, const char **err)
 		}
 		w->b[idx] = blk;
 	}
-	if (pos != len) {
-		e = "there is more in the file than it says";
-		goto out;
+	size_t nnote = 0;
+	if (pos != len) {                                               /* the caller's note, and nothing after it */
+		if (len - pos < 8 || memcmp(data + pos, SAVE_NOTE, 4) != 0 || rd32(data + pos + 4) != len - pos - 8 || len - pos - 8 > BL_NOTE_MAX) {
+			e = "there is more in the file than it says";
+			goto out;
+		}
+		nnote = len - pos - 8;
+		pos += 8;
+	}
+	if (note && nnote) {
+		*note = malloc(nnote + 1);
+		if (!*note) {
+			e = "out of memory";
+			goto out;
+		}
+		memcpy(*note, data + pos, nnote);
+		(*note)[nnote] = 0;
 	}
 	columns_all(w);
 	bl_lights_rebuild(w);
@@ -1249,14 +1283,22 @@ out:
 
 /* ---- bodies that are not the player ------------------------------------------------------------------------------------ */
 
-static bool box_hits_as(const struct bl_world *w, float x, float y, float z, float hw, float h, bool foe)
+/* whom a block stops */
+enum body { AS_PLAYER, AS_FOE, AS_UNIT };
+
+static bool solid_as(int b, enum body who)
+{
+	return who == AS_FOE ? bl_solid_foe(b) : who == AS_UNIT ? bl_solid_unit(b) : bl_solid(b);
+}
+
+static bool box_hits_as(const struct bl_world *w, float x, float y, float z, float hw, float h, enum body who)
 {
 	int x0 = (int)floorf(x - hw), x1 = (int)ceilf(x + hw) - 1, y0 = (int)floorf(y), y1 = (int)ceilf(y + h) - 1, z0 = (int)floorf(z - hw), z1 = (int)ceilf(z + hw) - 1;
 	for (int yy = y0; yy <= y1; yy++)
 		for (int zz = z0; zz <= z1; zz++)
 			for (int xx = x0; xx <= x1; xx++) {
 				int b = bl_get(w, xx, yy, zz);
-				if (foe ? bl_solid_foe(b) : bl_solid(b))
+				if (solid_as(b, who))
 					return true;
 			}
 	return false;
@@ -1264,33 +1306,48 @@ static bool box_hits_as(const struct bl_world *w, float x, float y, float z, flo
 
 bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h)
 {
-	return box_hits_as(w, x, y, z, hw, h, false);
+	return box_hits_as(w, x, y, z, hw, h, AS_PLAYER);
 }
 
 bool bl_box_hits_foe(const struct bl_world *w, float x, float y, float z, float hw, float h)
 {
-	return box_hits_as(w, x, y, z, hw, h, true);
+	return box_hits_as(w, x, y, z, hw, h, AS_FOE);
 }
 
-float bl_box_support(const struct bl_world *w, float x, float y, float z, float hw, float down)
+bool bl_box_hits_unit(const struct bl_world *w, float x, float y, float z, float hw, float h)
+{
+	return box_hits_as(w, x, y, z, hw, h, AS_UNIT);
+}
+
+static float support_as(const struct bl_world *w, float x, float y, float z, float hw, float down, enum body who)
 {
 	static const float k[5][2] = { { 0, 0 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } };
 	int ytop = (int)floorf(y + 0.05f), ybot = (int)floorf(y - down);
 	for (int yy = ytop; yy >= ybot; yy--)
 		for (int i = 0; i < 5; i++)
-			if (bl_solid(bl_get(w, (int)floorf(x + k[i][0] * hw * 0.8f), yy, (int)floorf(z + k[i][1] * hw * 0.8f))))
+			if (solid_as(bl_get(w, (int)floorf(x + k[i][0] * hw * 0.8f), yy, (int)floorf(z + k[i][1] * hw * 0.8f)), who))
 				return (float)(yy + 1);
 	return -1e9f;
 }
 
-static bool box_move_as(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h, bool foe)
+float bl_box_support(const struct bl_world *w, float x, float y, float z, float hw, float down)
+{
+	return support_as(w, x, y, z, hw, down, AS_PLAYER);
+}
+
+float bl_box_support_unit(const struct bl_world *w, float x, float y, float z, float hw, float down)
+{
+	return support_as(w, x, y, z, hw, down, AS_UNIT);
+}
+
+static bool box_move_as(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h, enum body who)
 {
 	float *c = axis == 0 ? px : axis == 1 ? py : pz;
 	while (d != 0.0f) {
 		float s = d > 0.25f ? 0.25f : d < -0.25f ? -0.25f : d, old = *c;
 		d -= s;
 		*c = old + s;
-		if (!box_hits_as(w, *px, *py, *pz, hw, h, foe))
+		if (!box_hits_as(w, *px, *py, *pz, hw, h, who))
 			continue;
 		float n = *c;
 		if (axis == 1) {
@@ -1299,7 +1356,7 @@ static bool box_move_as(const struct bl_world *w, float *px, float *py, float *p
 			n = s > 0 ? (float)(int)floorf(n + hw) - hw - 0.001f : (float)(int)floorf(n - hw) + 1.0f + hw + 0.001f;
 		}
 		*c = n;
-		if (box_hits_as(w, *px, *py, *pz, hw, h, foe))
+		if (box_hits_as(w, *px, *py, *pz, hw, h, who))
 			*c = old;
 		return true;
 	}
@@ -1308,10 +1365,15 @@ static bool box_move_as(const struct bl_world *w, float *px, float *py, float *p
 
 bool bl_box_move(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
 {
-	return box_move_as(w, px, py, pz, axis, d, hw, h, false);
+	return box_move_as(w, px, py, pz, axis, d, hw, h, AS_PLAYER);
 }
 
 bool bl_box_move_foe(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
 {
-	return box_move_as(w, px, py, pz, axis, d, hw, h, true);
+	return box_move_as(w, px, py, pz, axis, d, hw, h, AS_FOE);
+}
+
+bool bl_box_move_unit(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
+{
+	return box_move_as(w, px, py, pz, axis, d, hw, h, AS_UNIT);
 }

@@ -939,6 +939,27 @@ static void test_save(void)
 	}
 	bl_world_free(w);
 
+	/* with a note of the caller's own at the end */
+	w = bl_world_flat(32, 32, 48, 12);
+	bl_set(w, 4, 11, 4, BL_LAMP);
+	const char *note = "x = 1.5\ninv = 3:4\n";
+	CHECK(bl_save_with(w, path, note, strlen(note)) == 0, "saved with a note");
+	char *got = NULL;
+	r = bl_load_with(path, &got, &err);
+	CHECK(r && bl_hash(r) == bl_hash(w) && got && !strcmp(got, note), "the world and the note come back");
+	bl_world_free(r);
+	free(got);
+	r = bl_load(path, &err);
+	CHECK(r && bl_hash(r) == bl_hash(w), "a reader that wants no note reads the world");
+	bl_world_free(r);
+	got = (char *)path;
+	CHECK(bl_save(w, path) == 0 && (r = bl_load_with(path, &got, &err)) != NULL && got == NULL, "a file without one gives none");
+	bl_world_free(r);
+	CHECK(bl_save_with(w, path, note, BL_NOTE_MAX + 1) != 0, "a note that is too long is refused");
+	bl_save_with(w, path, note, strlen(note));
+	CHECK(stat(path, &st) == 0 && truncate(path, st.st_size - 1) == 0 && bl_load(path, &err) == NULL, "a note that ends early is refused");
+	bl_world_free(w);
+
 	/* a flat world too, and an unedited one is a header only */
 	w = bl_world_flat(32, 32, 48, 12);
 	bl_set(w, 3, 11, 3, BL_BRICK);
@@ -3398,6 +3419,65 @@ static void test_brutes(void)
 	bl_world_free(w);
 }
 
+/* trees: a click on the leaves means the tree, every tree of a made world can be gone to, and leaves do not stop the player's own */
+static void test_trees(void)
+{
+	static struct bl_mobs M;
+	struct bl_world *w = bl_world_new(7, 128, 128, 64);
+	int trees = 0, by_trunk = 0, by_leaf = 0, leaf_is_log = 0;
+	for (int z = 8; z < 120; z++)
+		for (int x = 8; x < 120; x++)
+			for (int y = 2; y < 60; y++) {
+				if (bl_get(w, x, y, z) != BL_LOG || bl_get(w, x, y - 1, z) == BL_LOG)
+					continue;
+				int top = y;
+				while (bl_get(w, x, top + 1, z) == BL_LOG)
+					top++;
+				trees++;
+				bl_mobs_init(&M, 1);
+				bool in = false;
+				for (int k = 3; k < 8 && !in; k++)
+					in = bl_mobs_add(&M, w, BL_MOB_WORKER, (float)(x + k) + 0.5f, (float)(bl_top(w, x + k, z) + 1), (float)z + 0.5f);
+				if (!in)
+					M.mob[0] = (struct bl_mob){ .alive = true, .kind = BL_MOB_WORKER, .x = (float)x + 3.5f, .y = (float)y, .z = (float)z + 0.5f };
+				by_trunk += bl_mobs_order_gather(&M, w, 0, x, top, z);
+				int leaf = top + 1;
+				while (bl_get(w, x, leaf + 1, z) == BL_LEAVES)
+					leaf++;
+				if (bl_mobs_order_gather(&M, w, 0, x, leaf, z)) {
+					by_leaf++;
+					leaf_is_log += M.mob[0].gblock == BL_LOG && bl_get(w, M.mob[0].gx, M.mob[0].gy, M.mob[0].gz) == BL_LOG && bl_get(w, M.mob[0].gx, M.mob[0].gy - 1, M.mob[0].gz) != BL_LOG;
+				}
+			}
+	CHECK(trees > 50 && by_trunk == trees, "every tree's trunk can be gone to (%d of %d)", by_trunk, trees);
+	CHECK(by_leaf == trees && leaf_is_log == trees, "an order on the crown is an order for the tree: the foot of a trunk (%d, %d of %d)", by_leaf, leaf_is_log, trees);
+	bl_world_free(w);
+
+	/* leaves beside a post of logs make no tree; a hedge of leaves stops the player and the goblins, not the workers */
+	w = bl_world_flat(96, 96, 64, 20);
+	bl_set(w, 40, 20, 40, BL_LOG);
+	bl_set(w, 41, 20, 40, BL_LEAVES);
+	bl_mobs_init(&M, 2);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 44.5f, 20.0f, 40.5f);
+	CHECK(bl_mobs_order_gather(&M, w, 0, 41, 20, 40) && M.mob[0].gblock == BL_LEAVES, "a leaf beside a log that has none over it is just a leaf");
+	for (int x = 0; x < 96; x++)
+		for (int y = 20; y < 24; y++)
+			bl_set(w, x, y, 60, BL_LEAVES);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f, 20.0f, 55.5f);
+	bl_mobs_order_move(&M, 0, 50.5f, 66.5f);
+	M.enabled = false;
+	struct bl_mobs_result R;
+	float far_pl[3] = { 5.5f, 20.0f, 5.5f };
+	for (int i = 0; i < 30 * 10; i++)
+		bl_mobs_step(&M, w, far_pl, true, 12.0f, 1.0f / 30.0f, &R);
+	CHECK(M.mob[0].z > 65.5f && M.mob[0].y < 20.1f, "a worker goes through a hedge four high (z %.1f y %.1f)", M.mob[0].z, M.mob[0].y);
+	CHECK(bl_box_hits(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f) && bl_box_hits_foe(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f) && !bl_box_hits_unit(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f),
+	      "it stops the player and a goblin still");
+	CHECK(bl_mobs_add(&M, w, BL_MOB_SOLDIER, 20.5f, 20.0f, 60.5f) && !bl_mobs_add(&M, w, BL_MOB_GOBLIN, 30.5f, 20.0f, 60.5f), "a soldier may stand in leaves, a goblin does not appear there");
+	bl_world_free(w);
+}
+
 static void test_workers(void)
 {
 	const float far_pl[3] = { 64.5f, 20.0f, 110.0f };
@@ -4008,6 +4088,7 @@ int main(int argc, char **argv)
 	printf("survival: hardness, drops, the keep\n");
 	test_keep();
 	printf("workers\n");
+	test_trees();
 	test_workers();
 	test_soldiers();
 	test_brutes();

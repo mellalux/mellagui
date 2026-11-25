@@ -15,11 +15,13 @@
  * Keys (the PLACE of a key counts, not its letter): W A S D walk, Space jumps (up while flying, in water), Shift sneaks (down while flying) and does not walk
  * off an edge, Ctrl runs, F flies, the arrow keys look, 1 .. 9 or the wheel choose the block in the hand, the left button breaks (hold it to go on), the
  * right one puts the block in the hand against the face you aim at, the middle one takes the block you aim at into the hand, [ and ] move the clock by an hour,
- * T stops and starts it, F3 shows the numbers, F1 the keys, Ctrl+S saves, Ctrl+N a new world, Ctrl+Q quits (it saves).
+ * T stops and starts it, F3 shows the numbers, F1 the keys, Ctrl+S saves (Ctrl+Shift+S as another world), Ctrl+O opens a world, Ctrl+N makes one, Ctrl+Q quits (it saves).
  *
- * The world is kept as the edits to what its seed makes (`bl_save`) in $MELLAGUI_BLOCKS_DIR (default $XDG_DATA_HOME/mellagui/blocks) as world.bl, with
- * where you stand, the hand and the settings in player.conf. It is saved a minute after a change, when you pause, and when the window closes. `--seed` and
- * `--flat` make a new world that is NOT saved (so a look at a seed never replaces yours) unless `--save` is given.
+ * Every world is a file of its own: the edits to what its seed makes, and after them where you stand, what you have, the keep and the units (`bl_save_with`).
+ * The worlds live in $MELLAGUI_BLOCKS_DIR (default $XDG_DATA_HOME/mellagui/blocks): world.bl, world-2.bl ... and whatever Save as made; the open / save as
+ * card (wlpicker.h) reaches other folders too. player.conf holds the person's choices and which world was open, and that one is opened the next time. A world
+ * is saved a minute after a change, when you pause, and when the window closes. `--seed` and `--flat` make a world with no file (so a look at a seed never
+ * replaces yours) unless `--save` is given. The buttons at the left (wlrail.h) are the new / open / save / play ... of the other programs.
  *
  * The player has a body (client/blockshero.c): his arm and what it holds in the first person, the whole figure from above; H hides it.
  *
@@ -50,6 +52,7 @@
 #include "gamesound.h"
 #include "keymap.h"
 #include "metrics.h"
+#include "pathcomp.h"
 #include "protocol.h"
 #include "smartsun.h"
 #include "theme.h"
@@ -57,7 +60,11 @@
 #include "util.h"
 #include "wlc.h"
 #include "wlcard.h"
+#include "wlclip.h"
 #include "wlhelp.h"
+#include "wlpicker.h"
+#include "wlrail.h"
+#include "wltext.h"
 #include "wlwin.h"
 
 #ifndef M_PI
@@ -67,11 +74,13 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111, K_H = 35,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_O = 24, K_Y = 21, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111, K_H = 35,
 };
 
 #define SLOTS 9
-#define REPEAT_MS 250                                       /* a held button breaks / places again after this */
+#define REPEAT_FIRST_MS 500                                 /* a button held this long breaks / places again (a click, even a slow one, does it once) ... */
+#define REPEAT_MS 250                                       /* ... and then every this often */
+#define DIG_PAUSE 0.3f                                      /* survival: after a block gives way the next one is not begun for this long, unless the button is pressed anew */
 #define AUTOSAVE_MS 60000
 #define LOOK_RATE 1.7f                                      /* radians a second with the arrow keys */
 #define MIN_BUDGET 40000                                    /* the least pixels the picture is made of, and the most it is asked to take (ms) */
@@ -85,7 +94,7 @@ enum {
 
 #define N_SFX 33                                            /* the sounds of k_sfx */
 
-enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST };
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE };
 
 struct app {
 	struct wlhelp help;                                     /* the pages of F1 */
@@ -94,6 +103,18 @@ struct app {
 	struct bl_player pl;
 	char dir[512];
 	bool nosave, force_save;
+	char path[1024];                                        /* the world file that is open ("" = this world has none: a seed's, or one that could not be read) */
+	char last_world[1024];                                  /* player.conf's `world`: the file that was open the last time */
+	int cli_clock;                                          /* what the command line said holds for every world of this run: the clock (-1 = nothing said) ... */
+	bool cli_no_pets, cli_no_mobs, cli_no_save;             /* ... and no pets, no goblins, nothing saved by itself */
+	enum prompt back;                                       /* where Cancel of the new / open / save as card goes */
+	char field[1024];                                       /* the path in the open / save as card ... */
+	char target[1024];                                      /* ... the file it is about to replace ... */
+	char card_msg[200];                                     /* ... and why it did not do what was asked */
+	struct wlpicker pk;
+	struct wlclip clip;
+	struct wlrail_anim ran;                                 /* the springs of the rail */
+	int rail_hover;
 	uint32_t saved_rev;
 	int64_t last_save_ms;
 	uint32_t seed_given;
@@ -159,6 +180,7 @@ struct app {
 	bool dig_on;                                            /* a block is being broken: which, and for how long */
 	int dig_x, dig_y, dig_z;
 	float dig_t;
+	float dig_wait;                                         /* seconds of DIG_PAUSE that are left */
 	float dig_tick;                                         /* the dig_t at which the next blow is heard */
 	bool have_keep;
 	int keep[3];                                            /* the lowest block of the keep */
@@ -240,6 +262,13 @@ static void say(struct app *a, const char *fmt, ...)
 /* ================================================================ the hand and the clock ================================================================ */
 
 static const int k_default_hotbar[SLOTS] = { BL_STONE, BL_DIRT, BL_GRASS, BL_COBBLE, BL_PLANKS, BL_LOG, BL_BRICK, BL_SAND, BL_GLASS };
+
+/* the worlds the open / save as card lists */
+static bool world_file(const char *name)
+{
+	size_t l = strlen(name);
+	return l > 3 && !strcmp(name + l - 3, ".bl");
+}
 
 /* a block that can be in the hand: any but air, bedrock and flowing water (water in the hand is a source) */
 static bool hand_ok(int b)
@@ -381,14 +410,10 @@ static bool parse_site(const char *v, struct bl_site *s)
 	return true;
 }
 
-/* x y z yaw pitch time slot hotbar fov sens flying */
-static void conf_load(struct app *a, bool with_player)
+/* Lines `key = value`. `with_player`: also what belongs to one world (where he stood, what he had, the keep, the units); `prefs`: also what is the person's,
+ * whatever world is open (the field of view, the pointer's speed, sound, the body). */
+static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 {
-	char path[600];
-	conf_path(a, path, sizeof path);
-	FILE *f = fopen(path, "r");
-	if (!f)
-		return;
 	a->conf_read = true;
 	char line[2048];
 	while (fgets(line, sizeof line, f)) {
@@ -404,7 +429,12 @@ static void conf_load(struct app *a, bool with_player)
 		while (*v == ' ')
 			v++;
 		double d = strtod(v, NULL);
-		if (!strcmp(k, "fov") && d >= 40 && d <= 120)
+		if (!prefs && (!strcmp(k, "fov") || !strcmp(k, "sensitivity") || !strcmp(k, "sound") || !strcmp(k, "body")))
+			continue;
+		if (!strcmp(k, "world")) {
+			v[strcspn(v, "\r\n")] = 0;
+			snprintf(a->last_world, sizeof a->last_world, "%s", v);
+		} else if (!strcmp(k, "fov") && d >= 40 && d <= 120)
 			a->fov = (float)(d * M_PI / 180.0);
 		else if (!strcmp(k, "sensitivity") && d >= 0.0005 && d <= 0.02)
 			a->sens = (float)d;
@@ -496,17 +526,23 @@ static void conf_load(struct app *a, bool with_player)
 			else if (!strcmp(k, "flying")) a->pl.flying = d != 0;
 		}
 	}
+}
+
+/* player.conf */
+static void conf_load(struct app *a, bool with_player)
+{
+	char path[600];
+	conf_path(a, path, sizeof path);
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	conf_read(a, f, with_player, true);
 	fclose(f);
 }
 
-static void conf_save(const struct app *a)
+/* everything about the game as it is now, as lines conf_read understands */
+static void conf_write(const struct app *a, FILE *f)
 {
-	char path[600], tmp[620];
-	conf_path(a, path, sizeof path);
-	snprintf(tmp, sizeof tmp, "%s.new", path);
-	FILE *f = fopen(tmp, "w");
-	if (!f)
-		return;
 	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\npets = %d\npet_t = %.2f\nmobs = %d\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
 	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on, a->pets_on, a->pet_t, a->mobs_on);
 	if (a->pets.placed)
@@ -553,36 +589,81 @@ static void conf_save(const struct app *a)
 	for (int i = 0; i < SLOTS; i++)
 		fprintf(f, "%s%d", i ? "," : "", a->hotbar[i]);
 	fprintf(f, "\nfov = %.1f\nsensitivity = %.5f\n", a->fov * 180.0 / M_PI, a->sens);
-	fclose(f);
-	if (rename(tmp, path) != 0)
+}
+
+/* player.conf: the same and which world is open (the next start opens it) */
+static void conf_save(const struct app *a)
+{
+	char path[600], tmp[620];
+	conf_path(a, path, sizeof path);
+	snprintf(tmp, sizeof tmp, "%s.new", path);
+	FILE *f = fopen(tmp, "w");
+	if (!f)
+		return;
+	conf_write(a, f);
+	if (a->path[0])
+		fprintf(f, "world = %s\n", a->path);
+	if (fclose(f) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
 }
 
+/* the name a world goes by: its file's without the folder and ".bl" */
+static void world_name(const char *path, char *out, size_t n)
+{
+	if (!path[0]) {
+		snprintf(out, n, "Unsaved world");
+		return;
+	}
+	const char *sl = strrchr(path, '/');
+	snprintf(out, n, "%s", sl ? sl + 1 : path);
+	size_t l = strlen(out);
+	if (l > 3 && !strcmp(out + l - 3, ".bl"))
+		out[l - 3] = 0;
+}
+
+static void title_update(struct app *a)
+{
+	if (!a->win.c)
+		return;
+	char name[300], t[340];
+	world_name(a->path, name, sizeof name);
+	snprintf(t, sizeof t, "%s - Blocks", name);
+	WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
+}
+
+/* The world and everything about the game into the world's file, and player.conf. False when it has no file, is not to be saved or cannot be written. */
 static bool save_all(struct app *a, bool say_it)
 {
-	if (a->nosave) {
+	if (a->nosave || !a->path[0]) {
 		if (say_it)
-			say(a, "This world is not saved (it was started with --seed or --flat)");
+			say(a, "This world is not saved: Save as gives it a file");
 		return false;
 	}
 	if (mkdirs(a->dir) != 0) {
 		say(a, "Cannot make %s", a->dir);
 		return false;
 	}
-	char path[600];
-	world_path(a, path, sizeof path);
-	if (a->world->rev != a->saved_rev || a->force_save) {
-		if (bl_save(a->world, path) != 0) {
-			say(a, "Saving failed");
-			return false;
-		}
-		a->saved_rev = a->world->rev;
-		a->force_save = false;
+	char *text = NULL;
+	size_t len = 0;
+	FILE *m = open_memstream(&text, &len);
+	if (!m)
+		return false;
+	conf_write(a, m);
+	bool ok = fclose(m) == 0 && bl_save_with(a->world, a->path, text, len) == 0;
+	free(text);
+	if (!ok) {
+		say(a, "Saving failed");
+		return false;
 	}
+	a->saved_rev = a->world->rev;
+	a->force_save = false;
 	conf_save(a);
 	a->last_save_ms = now_ms();
-	if (say_it)
-		say(a, "Saved");
+	if (say_it) {
+		char name[300];
+		world_name(a->path, name, sizeof name);
+		say(a, "Saved %s", name);
+	}
 	return true;
 }
 
@@ -1491,7 +1572,7 @@ static void cmd_order(struct app *a)
 		say(a, "Nothing there");
 		return;
 	}
-	int ok = 0, k = 0, soldiers = 0, manned = -1, post[3];
+	int ok = 0, k = 0, soldiers = 0, manned = -1, post[3], going = BL_AIR;
 	if (a->order_mode == 0 && tower_at(a, &h, post))            /* a watchtower: one chosen soldier goes up (one that is not on it already) */
 		for (int i = 0; i < BL_MOBS_MAX && manned < 0; i++) {
 			const struct bl_mob *m = &a->mobs.mob[i];
@@ -1503,7 +1584,10 @@ static void cmd_order(struct app *a)
 		if (!m->alive || !bl_mob_is_unit(m->kind) || !m->selected || i == manned)
 			continue;
 		if (a->order_mode == 1 && m->kind == BL_MOB_WORKER) {
-			ok += bl_mobs_order_gather(&a->mobs, a->world, i, h.x, h.y, h.z);
+			if (bl_mobs_order_gather(&a->mobs, a->world, i, h.x, h.y, h.z)) {
+				ok++;
+				going = m->gblock;                              /* (a click on a tree's leaves means its logs) */
+			}
 		} else {
 			soldiers += m->kind == BL_MOB_SOLDIER;
 			float gx = (h.face == BL_PY ? (float)h.x : (float)h.px) + 0.5f, gz = (h.face == BL_PY ? (float)h.z : (float)h.pz) + 0.5f;
@@ -1516,7 +1600,7 @@ static void cmd_order(struct app *a)
 		say(a, ok ? "A soldier goes up the watchtower, %d unit%s there" : "A soldier goes up the watchtower", ok, ok == 1 ? " goes" : "s go");
 		ok++;
 	} else if (a->order_mode == 1 && ok > soldiers)
-		say(a, "%d unit%s: break %s%s", ok - soldiers, ok - soldiers == 1 ? "" : "s", bl_block_name(bl_get(a->world, h.x, h.y, h.z)), soldiers ? " (the soldiers go and stand guard there)" : "");
+		say(a, "%d unit%s: break %s%s", ok - soldiers, ok - soldiers == 1 ? "" : "s", bl_block_name(going != BL_AIR ? going : bl_get(a->world, h.x, h.y, h.z)), soldiers ? " (the soldiers go and stand guard there)" : "");
 	else if (a->order_mode == 1 && ok == 0)
 		say(a, "They cannot reach that");
 	else
@@ -1590,13 +1674,32 @@ static bool make_world(struct app *a, uint32_t seed, bool flat)
 	return true;
 }
 
+/* a file name that is not taken yet, in the worlds' folder: world.bl, world-2.bl ... */
+static bool free_world_path(const struct app *a, char *out, size_t n)
+{
+	for (int i = 1; i < 1000; i++) {
+		if (i == 1)
+			snprintf(out, n, "%.500s/world.bl", a->dir);
+		else
+			snprintf(out, n, "%.500s/world-%d.bl", a->dir, i);
+		if (access(out, F_OK) != 0 && errno == ENOENT)
+			return true;
+	}
+	out[0] = 0;
+	return false;
+}
+
+/* A new world beside the one that was open: that one is saved first and stays in its file. */
 static void new_world(struct app *a)
 {
+	if (a->path[0] && !a->nosave)
+		save_all(a, false);
 	if (!make_world(a, fresh_seed(), false)) {
 		say(a, "Cannot make a world");
 		return;
 	}
-	a->nosave = false;
+	free_world_path(a, a->path, sizeof a->path);
+	a->nosave = a->cli_no_save;
 	a->time_h = 9.0f;
 	a->pet_t = 0.0f;
 	a->have_yard = false;
@@ -1604,11 +1707,223 @@ static void new_world(struct app *a)
 	mobs_setup(a);
 	a->kills = 0;
 	survival_setup(a, a->pl.x, a->pl.z);
-	{
+	if (a->pets_on) {
 		float near[3] = { a->pl.x, a->pl.y, a->pl.z };
 		pets_setup(a, near, false);
+	} else {
+		memset(&a->pets, 0, sizeof a->pets);
 	}
-	say(a, "A new world (seed %u)", a->world->seed);
+	save_all(a, false);                                     /* (it is in the list of worlds at once) */
+	title_update(a);
+	char name[300];
+	world_name(a->path, name, sizeof name);
+	say(a, "A new world: %s (seed %u)", name, a->world->seed);
+}
+
+/* what belongs to one world, as it is before the world's own lines are read */
+static void state_reset(struct app *a)
+{
+	a->survival = true;
+	a->conf_read = a->conf_mode = false;
+	memset(a->inv, 0, sizeof a->inv);
+	a->dig_on = false;
+	a->dig_t = 0.0f;
+	a->have_keep = false;
+	a->keep_hp = KEEP_HP;
+	a->keep_msg_t = 0.0f;
+	a->nights = a->kills = 0;
+	a->in_night = a->brute_warned = a->wave_msg_done = false;
+	a->cmd = a->drag_sel = false;
+	a->order_mode = 0;
+	a->nsites_conf = a->nworkers_conf = a->nsoldiers_conf = 0;
+	a->workers_saved = a->soldiers_saved = false;
+	a->have_yard = a->have_tom = a->have_filip = false;
+	a->yard_x = a->yard_z = 0.0f;
+	memset(&a->pets, 0, sizeof a->pets);
+	a->pet_t = 0.0f;
+	memcpy(a->hotbar, k_default_hotbar, sizeof a->hotbar);
+	a->slot = 0;
+	a->time_h = 9.0f;
+	a->clockm = 1;
+	a->real_ms = 0;
+	a->pets_on = a->mobs_on = true;
+	a->water_acc = 0.0f;
+	a->walk_phase = a->walk_stride = a->arm_swing = 0.0f;
+	a->next_sword = 0;
+	a->growl_t = 0.0f;
+	a->aimed = false;
+	a->hist_ok = false;
+}
+
+/* The world that was just made or read gets going: the player stands, the pets and the goblins are set up, and a world from a file gets back its keep, its
+ * workers and soldiers (a new one gets those of a new world). `mode`: 1 survival, 0 creative, -1 what the world says. */
+static void world_begin(struct app *a, bool from_file, int mode, int workers, int soldiers)
+{
+	if (a->cli_clock >= 0)
+		a->clockm = a->cli_clock;
+	if (a->cli_no_pets)
+		a->pets_on = false;
+	if (a->cli_no_mobs)
+		a->mobs_on = false;
+	settle_player(a);
+	if (a->pets_on) {                                       /* (without them no yard is looked for and no pond is dug: the world is left as it is) */
+		float near[3];
+		bl_spawn(a->world, near);
+		pets_setup(a, near, true);
+	}
+	mobs_setup(a);
+	if (from_file && a->conf_read && !a->conf_mode && mode < 0)
+		a->survival = false;                                    /* a world saved before survival was a creative world */
+	if (mode >= 0)
+		a->survival = mode != 0;
+	if (from_file) {
+		ensure_keep(a, a->pl.x, a->pl.z);
+		workers_restore(a);
+		soldiers_restore(a);
+	} else {
+		survival_setup(a, a->pl.x, a->pl.z);
+	}
+	if (workers >= 0) {                                     /* --workers N: exactly that many, whatever the world had */
+		bl_mobs_clear_kind(&a->mobs, BL_MOB_WORKER);
+		workers_start(a, workers);
+	}
+	if (soldiers >= 0) {                                    /* --soldiers N: that many near the keep (no barracks needed: for the tests) */
+		bl_mobs_clear_kind(&a->mobs, BL_MOB_SOLDIER);
+		for (int i = 0; i < soldiers; i++) {
+			float cx, cz, sp[3];
+			worker_home(a, &cx, &cz);
+			if (worker_spot(a, cx, cz, 3.0f, a->have_keep ? (float)a->keep[1] + 2.5f : 1e9f, sp))
+				bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]);
+		}
+	}
+	if (from_file)
+		sites_restore(a);
+}
+
+/* Reads a world's file and makes it the one that is played; false = it cannot be read (the world that is open stays, *err says why). A world.bl in the worlds'
+ * folder from before the worlds carried their own state takes it from player.conf. */
+static bool world_load(struct app *a, const char *path, const char **err, int mode, int workers, int soldiers)
+{
+	char *note = NULL, deflt[600], keep_path[1024];
+	snprintf(keep_path, sizeof keep_path, "%s", path);              /* (`path` may be one of the app's own strings) */
+	struct bl_world *w = bl_load_with(keep_path, &note, err);
+	if (!w)
+		return false;
+	state_reset(a);
+	bl_world_free(a->world);
+	a->world = w;
+	snprintf(a->path, sizeof a->path, "%s", keep_path);
+	a->nosave = a->cli_no_save;
+	a->saved_rev = w->rev;
+	a->force_save = false;
+	bl_player_init(&a->pl, w);
+	world_path(a, deflt, sizeof deflt);
+	if (note) {
+		FILE *f = fmemopen(note, strlen(note), "r");
+		if (f) {
+			conf_read(a, f, true, false);
+			fclose(f);
+		}
+	} else if (!strcmp(a->path, deflt)) {
+		conf_load(a, true);
+	}
+	free(note);
+	world_begin(a, true, mode, workers, soldiers);
+	return true;
+}
+
+/* the folder the open / save as card starts in: the world's own, else the worlds' folder */
+static void card_base(const struct app *a, char *out, size_t n)
+{
+	snprintf(out, n, "%s", a->path[0] ? a->path : "");
+	char *sl = strrchr(out, '/');
+	if (sl && sl != out)
+		*sl = 0;
+	else
+		snprintf(out, n, "%s", a->dir);
+}
+
+/* What the card's field names, as a path: "~/x" is in the home folder, a name alone is in the card's folder; ".bl" is added when saving (and when opening, if
+ * only that file is there). False with *why when it names no file. */
+static bool field_path(const struct app *a, bool saving, char *out, size_t n, const char **why)
+{
+	char base[1024];
+	card_base(a, base, sizeof base);
+	size_t l = strlen(a->field);
+	if (l == 0) {
+		*why = saving ? "Type a name for the world" : "Choose a world";
+		return false;
+	}
+	lm_resolve_path(base, a->field, out, n - 4);
+	struct stat st;
+	if (a->field[l - 1] == '/' || (stat(out, &st) == 0 && S_ISDIR(st.st_mode))) {
+		*why = saving ? "That is a folder: type a name after it" : "That is a folder: choose a world in it";
+		return false;
+	}
+	size_t ol = strlen(out);
+	bool bl = ol > 3 && !strcmp(out + ol - 3, ".bl");
+	if (!bl && (saving || stat(out, &st) != 0))
+		snprintf(out + ol, n - ol, ".bl");
+	return true;
+}
+
+static bool same_file(const char *a, const char *b)
+{
+	struct stat x, y;
+	return !strcmp(a, b) || (stat(a, &x) == 0 && stat(b, &y) == 0 && x.st_dev == y.st_dev && x.st_ino == y.st_ino);
+}
+
+/* Open the world the field names: the one that is open is saved first. False = the card stays (card_msg says why). */
+static bool world_open(struct app *a)
+{
+	char path[1024];
+	const char *why = NULL;
+	if (!field_path(a, false, path, sizeof path, &why)) {
+		snprintf(a->card_msg, sizeof a->card_msg, "%s", why);
+		return false;
+	}
+	if (a->path[0] && !a->nosave) {
+		if (same_file(path, a->path)) {
+			say(a, "That world is open already");
+			return true;
+		}
+		if (!save_all(a, false)) {
+			snprintf(a->card_msg, sizeof a->card_msg, "The world that is open cannot be saved, so it stays open");
+			return false;
+		}
+	}
+	if (access(path, R_OK) != 0) {
+		snprintf(a->card_msg, sizeof a->card_msg, "There is no such world");
+		return false;
+	}
+	if (!world_load(a, path, &why, -1, -1, -1)) {
+		snprintf(a->card_msg, sizeof a->card_msg, "%s", why ? why : "It cannot be read");
+		return false;
+	}
+	conf_save(a);                                           /* (the next start opens this one; the world's own file is not touched) */
+	title_update(a);
+	char name[300];
+	world_name(a->path, name, sizeof name);
+	say(a, "Opened %s", name);
+	return true;
+}
+
+/* The world goes into `path` and is that file's from now on. */
+static bool world_save_to(struct app *a, const char *path)
+{
+	char old[1024];
+	bool was_nosave = a->nosave;
+	snprintf(old, sizeof old, "%s", a->path);
+	snprintf(a->path, sizeof a->path, "%s", path);
+	a->nosave = false;
+	if (!save_all(a, true)) {
+		snprintf(a->path, sizeof a->path, "%s", old);
+		a->nosave = was_nosave;
+		snprintf(a->card_msg, sizeof a->card_msg, "It cannot be written there");
+		return false;
+	}
+	title_update(a);
+	return true;
 }
 
 /* ================================================================ the icons of the hotbar ================================================================ */
@@ -1791,6 +2106,10 @@ static void dig_step(struct app *a, int64_t now, float dt)
 		a->dig_on = false;
 		return;
 	}
+	if (a->dig_wait > 0.0f) {                                  /* one block has just given way: a held button does not go straight on to the next */
+		a->dig_wait -= dt;
+		return;
+	}
 	if (!a->aimed) {
 		a->dig_on = false;
 		return;
@@ -1825,6 +2144,7 @@ static void dig_step(struct app *a, int64_t now, float dt)
 				inv_add(a, d, 1);
 			block_sound(a, "break", b);
 			aim_update(a);
+			a->dig_wait = DIG_PAUSE;
 		}
 		a->dig_on = false;
 		a->dig_t = 0.0f;
@@ -2100,8 +2420,10 @@ static void advance(struct app *a, int64_t now, float dt)
 			bl_world_tick(a->world, 3000);
 		}
 	}
-	if (!a->nosave && a->world->rev != a->saved_rev && now - a->last_save_ms >= AUTOSAVE_MS)
+	if (!a->nosave && a->path[0] && a->world->rev != a->saved_rev && now - a->last_save_ms >= AUTOSAVE_MS) {
+		a->last_save_ms = now;                               /* (a failure is tried again a minute later) */
 		save_all(a, false);
+	}
 }
 
 /* ================================================================ the picture ================================================================ */
@@ -2187,20 +2509,20 @@ static void paint_hotbar(struct app *a, const struct lay *L)
 	int isz = L->slot - 8;
 	icons_for(a, isz * sc);
 	int total = SLOTS * L->slot + (SLOTS - 1) * L->gap;
-	wlwin_round_fill(w, L->x0 - 6, L->y0 - 6, total + 12, L->slot + 12, 8, 0x12151bu);
+	wlwin_round_fill(w, L->x0 - 7, L->y0 - 7, total + 14, L->slot + 14, lm_button_radius(14), lm_theme.bar);
 	for (int i = 0; i < SLOTS; i++) {
 		int x = L->x0 + i * (L->slot + L->gap), y = L->y0;
 		if (i == a->slot) {
-			wlwin_round_fill(w, x - 3, y - 3, L->slot + 6, L->slot + 6, 6, 0xf0f0f0u);
-			wlwin_round_fill(w, x - 1, y - 1, L->slot + 2, L->slot + 2, 5, 0x2b3039u);
+			wlwin_round_fill(w, x - 3, y - 3, L->slot + 6, L->slot + 6, lm_button_radius(11), lm_theme.accent);
+			wlwin_round_fill(w, x - 1, y - 1, L->slot + 2, L->slot + 2, lm_button_radius(9), lm_theme.background);
 		} else {
-			wlwin_round_fill(w, x, y, L->slot, L->slot, 5, 0x2b3039u);
+			wlwin_round_fill(w, x, y, L->slot, L->slot, lm_button_radius(9), lm_theme.background);
 		}
 		const uint32_t *ic = a->icon[a->hotbar[i]];
 		if (ic)
 			wlwin_blit_px_over(w, x + 4, y + 4, ic, isz * sc, isz * sc, isz * sc);
 		char n[2] = { (char)('1' + i), 0 };
-		wlwin_text(w, x + 3, y + 1, n, 1, i == a->slot ? 0xffffffu : 0xa8b0bcu, 0);
+		wlwin_text(w, x + 4, y + 1, n, 1, i == a->slot ? lm_theme.text_bright : lm_theme.text_dim, 0);
 		if (a->survival) {                                                     /* how many he has: red when none */
 			int have = a->inv[a->hotbar[i]];
 			char cnt[16];
@@ -2222,8 +2544,8 @@ static void paint_survival(struct app *a)
 		int bw = LM_CLAMP(w->bw / 3, 140, 260), x = (w->bw - bw) / 2, y = 8;
 		float f = a->keep_hp / KEEP_HP;
 		f = f < 0 ? 0 : f > 1 ? 1 : f;
-		wlwin_round_fill(w, x - 2, y - 2, bw + 4, 16, 6, 0x101216u);
-		wlwin_round_fill(w, x, y, bw, 12, 5, 0x3a2a2au);
+		wlwin_round_fill(w, x - 3, y - 3, bw + 6, 18, 9, lm_theme.bar);
+		wlwin_round_fill(w, x, y, bw, 12, 6, lm_theme.background);
 		if (f > 0.0f)
 			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 12, 5, f > 0.5f ? 0x4cb050u : f > 0.25f ? 0xe0a030u : 0xe04030u);
 		char l[160];
@@ -2244,6 +2566,44 @@ static void paint_survival(struct app *a)
 		int cx = w->bw / 2, cy = w->bh / 2 + 22;
 		wlwin_fill(w, cx - 24, cy - 1, 48, 7, 0x101010u);
 		wlwin_fill(w, cx - 23, cy, (int)(46.0f * f), 5, 0xf0e8d0u);
+	}
+}
+
+/* where the list of what he has lies: at the right, under the lines of the top; `rows` of it show (the wood and the stone always, then whatever else there is) */
+static int stock_layout(const struct app *a, int *x, int *y, int *wd, int list[BL_COUNT])
+{
+	int n = 0;
+	static const int k_first[3] = { BL_LOG, BL_PLANKS, BL_COBBLE };
+	for (int i = 0; i < 3; i++)
+		list[n++] = k_first[i];
+	for (int b = 1; b < BL_COUNT; b++)
+		if (a->inv[b] > 0 && b != BL_LOG && b != BL_PLANKS && b != BL_COBBLE)
+			list[n++] = b;
+	*wd = 0;
+	for (int i = 0; i < n; i++)
+		*wd = LM_MAX(*wd, lm_font_text_width(bl_block_name(list[i])));
+	*wd += 72;
+	*x = a->win.bw - *wd - 8;
+	*y = 90;
+	int fit = (a->win.bh - *y - 84) / (LM_FONT_H + 2);          /* (down to the hotbar or the plans) */
+	return n < fit ? n : LM_MAX(fit, 0);
+}
+
+static void paint_stock(struct app *a)
+{
+	struct wlwin *w = &a->win;
+	int x, y, wd, list[BL_COUNT];
+	int rows = stock_layout(a, &x, &y, &wd, list);
+	if (rows <= 0)
+		return;
+	wlwin_round_fill(w, x, y, wd, rows * (LM_FONT_H + 2) + 10, lm_button_radius(10), lm_theme.bar);
+	for (int i = 0; i < rows; i++) {
+		int b = list[i], ry = y + 5 + i * (LM_FONT_H + 2), have = a->inv[b];
+		char n[16];
+		snprintf(n, sizeof n, "%d", have > 99999 ? 99999 : have);
+		wlwin_round_fill(w, x + 8, ry + 3, 11, 11, 3, bl_block_color(b) & 0xffffffu);
+		wlwin_text(w, x + 26, ry + 1, bl_block_name(b), 1, have ? lm_theme.text_soft : lm_theme.text_dim, 0);
+		wlwin_text(w, x + wd - 8 - lm_font_text_width(n), ry + 1, n, 1, have ? lm_theme.text_bright : lm_theme.text_dim, 0);
 	}
 }
 
@@ -2323,13 +2683,14 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 		bar_rect(a, i, &x, &y, &bw, &bh);
 		bl_plan_cost(i, &cob, &pl);
 		if (a->plan == i) {
-			wlwin_round_fill(w, x - 3, y - 3, bw + 6, bh + 6, 8, 0xf0f0f0u);
-			wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, 7, 0x2b3039u);
+			wlwin_round_fill(w, x - 3, y - 3, bw + 6, bh + 6, lm_button_radius(13), lm_theme.accent);
+			wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius(11), lm_theme.background);
 		} else {
-			wlwin_round_fill(w, x, y, bw, bh, 7, 0x2b3039u);
+			wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius(11), lm_theme.bar);
+			wlwin_round_fill(w, x, y, bw, bh, lm_button_radius(10), lm_theme.background);
 		}
 		snprintf(l, sizeof l, "%d %s", i + 3, plan_title(i));
-		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 3, l, 1, 0xffffffu, bw - 6);
+		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 3, l, 1, lm_theme.text_bright, bw - 6);
 		if (!a->survival)
 			snprintf(l, sizeof l, "free");
 		else if (pl)
@@ -2338,7 +2699,7 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 			snprintf(l, sizeof l, "%d cobble", cob);
 		if (lm_font_text_width(l) > bw - 6)
 			snprintf(l, sizeof l, "%dc %dp", cob, pl);
-		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 5 + LM_FONT_H, l, 1, plan_affordable(a, i) ? 0xa8b0bcu : 0xff6a5au, bw - 6);
+		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 5 + LM_FONT_H, l, 1, plan_affordable(a, i) ? lm_theme.text_dim : lm_theme.caution, bw - 6);
 	}
 	if (a->plan >= 0 && a->has_pointer && bar_at(a, a->px, a->py) < 0) {     /* what a click would do, by the pointer */
 		struct bl_site s;
@@ -2384,16 +2745,22 @@ static const char *const HP_WELCOME[] = {
 	"- The picture is drawn at a smaller size and stretched, so it stays quick; it takes more pixels by itself when the machine has the time.",
 	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In survival the number under a block is how many you have.",
 	"- Ten hearts over the hotbar are your hit points. In survival the keep's bar is at the top.",
+	"- In survival the list at the right is what you have: the wood, the planks and the cobble always, then everything else you carry. It is there in the command view, too.",
 	"# Sounds",
 	"Blocks sound of what they are made of; the sword, the goblins, your soldiers, the builders, the keep's bell, the horn of a wave and the dawn have their own sounds. They follow Settings > Sound > Sound feedback and the chosen output; --no-sound starts without them.",
 	"# To start",
 	"|Click|Click in the window: the pointer is locked to it and the game goes on. Esc lets the pointer go and pauses.",
 	"|F1|These pages.",
-	"|Ctrl+S|Save the world and where you are (it also saves itself every minute and when you pause or quit).",
-	"|Ctrl+N|A new world (asks first).",
 	"|Ctrl+Q|Quit.",
-	"# A world from a seed",
-	"A world started with --seed or --flat is not saved unless you also give --save, so looking at a seed never replaces your own world.",
+	"# The buttons at the left",
+	"New, Open, Save, Save as; Play or Pause, the command view, the blocks, sound on and off; ? for these pages. They work while the pointer is free: when the game is paused and in the command view.",
+	"# Worlds",
+	"Every world is a file of its own, with where you stand, what you have, the keep, the workers and the buildings in it. The one that was open last is opened the next time; the window's title says which it is.",
+	"|Ctrl+S|Save (the world also saves itself every minute and when you pause or quit).",
+	"|Ctrl+Shift+S|Save as: the world goes into another file and goes on there; the old file stays as it was saved last. It asks before it replaces a world.",
+	"|Ctrl+O|Open another world; the one you are in is saved first.",
+	"|Ctrl+N|A new world in a file of its own (world-2, world-3 ...); the old one stays.",
+	"A world started with --seed or --flat has no file: Save as gives it one. Worlds are deleted in the file manager.",
 };
 
 static const char *const HP_MOVING[] = {
@@ -2418,7 +2785,7 @@ static const char *const HP_MOVING[] = {
 static const char *const HP_BUILDING[] = {
 	"# Breaking and putting",
 	"|Left button|Break the block you aim at (hold it). In survival a block takes time and the crosshair shows how far it is.",
-	"|Right button|Put the block in your hand against the face you aim at (hold it to go on).",
+	"|Right button|Put the block in your hand against the face you aim at. One click, one block: held for half a second it goes on, four a second (breaking too).",
 	"|Middle button|Take the block you aim at into your hand.",
 	"|1 to 9, wheel|Choose the square of the hotbar.",
 	"|E|The palette: every block you can put. A click puts it into the square in your hand. In survival only what you have.",
@@ -2506,7 +2873,7 @@ static const char *const HP_COMMAND[] = {
 	"|3 to 6|Build: see the page Buildings.",
 	"|Backspace|Stop what the chosen are doing.",
 	"# Gathering",
-	"A worker stands beside the block, works for one and a half times as long as you would and then goes on to the next block of the same kind within six blocks. A tree is aimed at its lowest log: the whole trunk and the leaves of its crown go together. What he breaks goes into your pockets.",
+	"A worker stands beside the block, works for one and a half times as long as you would and then goes on to the next block of the same kind within six blocks. For a tree click its trunk or its leaves (in mode 2): the whole trunk and the leaves of its crown go together, and he goes on to the next tree. Your workers and soldiers push through leaves. What he breaks goes into your pockets.",
 	"# The camera",
 	"|W A S D|Move the view.",
 	"|Arrows|Turn it.",
@@ -2560,7 +2927,8 @@ static const char *const HP_KEYS[] = {
 	"|F1|These pages",
 	"|F3|Numbers",
 	"|Esc|Pause",
-	"|Ctrl+S, Ctrl+N, Ctrl+Q|Save, new world, quit",
+	"|Ctrl+S, Ctrl+Shift+S|Save, save as",
+	"|Ctrl+O, Ctrl+N, Ctrl+Q|Open a world, new world, quit",
 };
 
 static const struct wlhelp_page BLOCKS_HELP[] = {
@@ -2584,11 +2952,41 @@ static int pal_cell(const struct app *a)                   /* the size of a squa
 	return L.slot + 10;
 }
 
+/* is the card one with a path in it (open, save as)? */
+static bool file_card(const struct app *a)
+{
+	return a->prompt == P_OPEN || a->prompt == P_SAVEAS;
+}
+
+/* a card that has to be answered before anything else: the rail waits */
+static bool modal_card(const struct app *a)
+{
+	return a->prompt != P_NONE && a->prompt != P_PAUSE;
+}
+
+/* the open / save as card: the field, the folder list under it (`rows` of it, 0 in a very low window) */
+static void file_layout(const struct app *a, struct wlcard *c, int *fx, int *fy, int *fw, int *ly, int *rows)
+{
+	*rows = wlpicker_fit(a->win.bh, 180);
+	c->w = LM_MIN(560, a->win.bw - 16);
+	c->h = LM_MIN(WLCARD_PAD + 24 + 34 + (*rows ? *rows * WLPICKER_ROW_H + 12 : 0) + 44 + WLCARD_BTN_H + WLCARD_PAD, a->win.bh - 16);
+	wlcard_center(&a->win, c);
+	*fx = c->x + WLCARD_PAD;
+	*fy = c->y + WLCARD_PAD + 24;
+	*fw = c->w - 2 * WLCARD_PAD;
+	*ly = *fy + 34;
+}
+
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
-	*nb = a->prompt == P_PAUSE ? 4 : a->prompt == P_NEW ? 2 : 1;
-	int ch = a->prompt == P_HELP ? 580 : a->prompt == P_PAUSE ? 200 : (a->prompt == P_DEAD || a->prompt == P_LOST) ? 150 : 130;
-	int cw = a->prompt == P_HELP ? 940 : 470;
+	*nb = a->prompt == P_PAUSE ? 4 : (a->prompt == P_NEW || a->prompt == P_REPLACE || file_card(a)) ? 2 : 1;
+	if (file_card(a)) {
+		int fx, fy, fw, ly, rows;
+		file_layout(a, c, &fx, &fy, &fw, &ly, &rows);
+		return;
+	}
+	int ch = a->prompt == P_HELP ? 580 : a->prompt == P_PAUSE ? 222 : (a->prompt == P_DEAD || a->prompt == P_LOST || a->prompt == P_NEW) ? 150 : 130;
+	int cw = a->prompt == P_HELP ? 940 : a->prompt == P_PAUSE ? 540 : 470;
 	if (a->prompt == P_PALETTE) {
 		int cell = pal_cell(a);
 		cw = PAL_COLS * cell + 2 * WLCARD_PAD;
@@ -2627,8 +3025,12 @@ static void paint_card(struct app *a)
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
-	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Help" : a->prompt == P_PALETTE ? "Blocks" : a->first ? "Blocks" : "Paused";
+	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Help" : a->prompt == P_PALETTE ? "Blocks" :
+	                    a->prompt == P_OPEN ? "Open a world" : a->prompt == P_SAVEAS ? "Save the world as" : a->prompt == P_REPLACE ? "Replace the world" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
+	char name[300];
+	world_name(a->path, name, sizeof name);
+	bool kept = a->path[0] && !a->nosave;
 	const char *labels[4] = { "Cancel", "OK" };
 	uint32_t cols[4] = { lm_theme.btn_grey, lm_theme.btn_blue };
 	int tx = c.x + WLCARD_PAD, ty = c.y + 44, tw = c.w - 2 * WLCARD_PAD;
@@ -2641,6 +3043,10 @@ static void paint_card(struct app *a)
 		cols[1] = lm_theme.btn_blue;
 		cols[2] = lm_theme.btn_amber;
 		cols[3] = lm_theme.btn_green;
+		char l[400];
+		snprintf(l, sizeof l, "World: %s%s", name, kept || !a->path[0] ? "" : "  (not saved)");
+		wlwin_text(w, tx, ty, l, 1, lm_theme.accent, tw);
+		ty += LM_FONT_H + 6;
 		wlwin_text(w, tx, ty, a->first ? "Click in the window to look around and play." : "Click in the window to go on.", 1, lm_theme.text, tw);
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, "W A S D walk, Space jumps, Shift sneaks, Ctrl runs, F flies.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Left button breaks, right button puts a block, 1 to 9 choose it.", 1, lm_theme.text_dim, tw);
@@ -2667,8 +3073,8 @@ static void paint_card(struct app *a)
 		for (int i = 0; i < PAL_N; i++) {
 			int x = gx + (i % PAL_COLS) * cell, y = gy + (i / PAL_COLS) * cell;
 			bool cur = hand_block(a) == k_palette[i];
-			wlwin_round_fill(w, x + 1, y + 1, cell - 2, cell - 2, 6, cur ? 0xf0f0f0u : a->pal_hover == i ? 0x6a7384u : 0x3a4150u);
-			wlwin_round_fill(w, x + 3, y + 3, cell - 6, cell - 6, 5, 0x20242cu);
+			wlwin_round_fill(w, x + 1, y + 1, cell - 2, cell - 2, 6, cur ? lm_theme.accent : a->pal_hover == i ? lm_theme.button_hover : lm_theme.panel_line);
+			wlwin_round_fill(w, x + 3, y + 3, cell - 6, cell - 6, 5, lm_theme.bar);
 			const uint32_t *ic = a->icon[k_palette[i]];
 			if (ic && a->icon_s == isz * sc)
 				wlwin_blit_px_over(w, x + (cell - isz) / 2, y + (cell - isz) / 2, ic, isz * sc, isz * sc, isz * sc);
@@ -2684,9 +3090,45 @@ static void paint_card(struct app *a)
 		snprintf(l, sizeof l, "%s - slot %d  (click to put it there; 1-9: other slot)", bl_block_name(shown), a->slot + 1);
 		wlwin_text(w, tx, gy + 2 * cell + 8, l, 1, lm_theme.text, tw);
 	} else if (a->prompt == P_NEW) {
-		wlwin_text(w, tx, ty, "Make a new world? The one you have now is replaced.", 1, lm_theme.text, tw);
+		char l[400];
+		wlwin_text(w, tx, ty, "Make a new world?", 1, lm_theme.text, tw);
+		if (kept)
+			snprintf(l, sizeof l, "%s stays saved: you can open it again.", name);
+		else
+			snprintf(l, sizeof l, "The one you are in is not saved and will be gone.");
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, kept ? lm_theme.text_dim : lm_theme.caution, tw);
 		labels[1] = "New world";
 		cols[1] = lm_theme.btn_amber;
+		cols[0] = lm_theme.btn_slate;
+	} else if (a->prompt == P_REPLACE) {
+		char l[400], other[300];
+		world_name(a->target, other, sizeof other);
+		snprintf(l, sizeof l, "There is a world called %s already.", other);
+		wlwin_text(w, tx, ty, l, 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, "Replace it with this one?", 1, lm_theme.caution, tw);
+		labels[1] = "Replace";
+		cols[0] = lm_theme.btn_slate;
+		cols[1] = lm_theme.btn_red;
+	} else if (file_card(a)) {
+		struct wlcard fc;
+		int fx, fy, fw, ly, rows;
+		file_layout(a, &fc, &fx, &fy, &fw, &ly, &rows);
+		const char *h = "Tab completes";
+		wlwin_text(w, c.x + c.w - WLCARD_PAD - lm_font_text_width(h), c.y + WLCARD_PAD - 2, h, 1, lm_theme.text_dim, 0);
+		wlwin_round_fill(w, fx, fy, fw, 28, 14, lm_theme.bar);              /* the field */
+		wltext_paint(w, fx + 12, fy + 6, fw - 24, a->field, true, lm_theme.text_soft, lm_theme.button_hover, lm_theme.text_soft);
+		if (rows) {
+			char base[1024];
+			card_base(a, base, sizeof base);
+			wlpicker_paint(w, &a->pk, base, a->field, fx, ly, fw, rows, a->px, a->py, a->has_pointer);
+		}
+		int my = c.y + c.h - WLCARD_PAD - WLCARD_BTN_H - 40;
+		const char *note = a->prompt == P_SAVEAS ? "A world is one file; .bl is added to the name." : kept ? "" : "The world you are in is not saved: opening another leaves it behind.";
+		wlwin_text(w, fx, my, note, 1, a->prompt == P_OPEN ? lm_theme.caution : lm_theme.text_dim, fw);
+		wlwin_text(w, fx, my + LM_FONT_H + 2, a->card_msg, 1, lm_theme.caution, fw);
+		labels[1] = a->prompt == P_OPEN ? "Open" : "Save";
+		cols[0] = lm_theme.btn_slate;
+		cols[1] = a->prompt == P_OPEN ? lm_theme.btn_blue : lm_theme.btn_green;
 	} else {
 		labels[0] = "Close";
 		cols[0] = lm_theme.btn_blue;
@@ -2694,6 +3136,8 @@ static void paint_card(struct app *a)
 	}
 	wlcard_buttons(w, &c, labels, nb, cols, a->pc_hover, a->pc_down, lm_theme.on_colour);
 }
+
+static void rail_build(const struct app *a, struct wlrail *L);
 
 static void write_dump(struct app *a)
 {
@@ -2763,6 +3207,44 @@ static void write_dump(struct app *a)
 			fprintf(f, "%s %d x=%.3f y=%.3f z=%.3f hp=%.1f order=%d sel=%d vis=%d sx=%.1f sy=%.1f gather=%d,%d,%d post=%.2f,%.2f posted=%d site=%d\n", m->kind == BL_MOB_SOLDIER ? "soldier" : "worker", i, m->x, m->y, m->z, m->hp, m->order, m->selected, vis, sx, sy, m->gx, m->gy,
 			        m->gz, m->tx, m->tz, m->posted, m->order == BL_ORDER_BUILD ? m->site : -1);
 		}
+	}
+	{
+		char name[300], file[1024];
+		world_name(a->path, name, sizeof name);
+		snprintf(file, sizeof file, "%s", a->path[0] ? a->path : "-");
+		for (char *q = name; *q; q++)
+			*q = *q == ' ' ? '_' : *q;
+		for (char *q = file; *q; q++)
+			*q = *q == ' ' ? '_' : *q;
+		fprintf(f, "world name=%s file=%s\n", name, file);
+		struct wlrail rail;
+		int ry[WLRAIL_MAX];
+		rail_build(a, &rail);
+		wlrail_layout(&rail, ry);
+		for (int i = 0; i < rail.n; i++)                        /* (x like everything else here: from the picture's left edge, so the rail's is negative) */
+			if (ry[i] >= 0)
+				fprintf(f, "rail %d x=%d y=%d w=%d h=%d idle=%d lit=%d\n", i, (WLRAIL_W - WLRAIL_D) / 2 - WLRAIL_W, ry[i], WLRAIL_D, WLRAIL_D, rail.it[i].idle, rail.it[i].lit);
+	}
+	if (file_card(a)) {
+		struct wlcard c;
+		int fx, fy, fw, ly, rows;
+		char base[1024], msg[200];
+		file_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
+		card_base(a, base, sizeof base);
+		snprintf(msg, sizeof msg, "%s", a->card_msg);
+		for (char *q = msg; *q; q++)
+			*q = *q == ' ' ? '_' : *q;
+		fprintf(f, "field x=%d y=%d w=%d h=28 text=%s\ncmsg %s\n", fx, fy, fw, a->field, msg);
+		if (rows)
+			wlpicker_dump(f, &a->pk, base, a->field, fx, ly, fw, rows, 0);
+	}
+	if (a->survival) {
+		int x, y, wd, list[BL_COUNT];
+		int rows = stock_layout(a, &x, &y, &wd, list);
+		fprintf(f, "stock x=%d y=%d w=%d rows=%d list=", x, y, wd, rows);
+		for (int i = 0; i < rows; i++)
+			fprintf(f, "%s%s:%d", i ? "," : "", bl_block_name(list[i]), a->inv[list[i]]);
+		fprintf(f, "\n");
 	}
 	fprintf(f, "inv");
 	for (int b = 1; b < BL_COUNT; b++)
@@ -2843,6 +3325,84 @@ static void hero_pose(struct app *a, const struct bl_camera *cam)
 	bl_hero_set(h, a->world, a->time_h);
 }
 
+/* ================================================================ the rail ================================================================ */
+
+/* the buttons at the left, as in MellaGUI's other programs; the item's number is its place */
+enum { RB_NEW, RB_OPEN, RB_SAVE, RB_SAVEAS, RB_PLAY, RB_CMD, RB_BLOCKS, RB_SOUND, RB_HELP, RB_N };
+
+static void ic_play(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+	(void)bg;
+	for (int i = 0; i < 7; i++)                             /* a triangle pointing right */
+		wlwin_fill(w, cx - 4 + i, cy - 7 + i, 2, 15 - 2 * i, c);
+}
+
+static void ic_cube(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+	(void)bg;
+	wlrail_line(w, cx - 1, cy - 8, cx - 8, cy - 4, 2, c);
+	wlrail_line(w, cx - 1, cy - 8, cx + 6, cy - 4, 2, c);
+	wlrail_line(w, cx - 8, cy - 4, cx - 1, cy, 2, c);
+	wlrail_line(w, cx + 6, cy - 4, cx - 1, cy, 2, c);
+	wlwin_fill(w, cx - 8, cy - 4, 2, 8, c);
+	wlwin_fill(w, cx + 6, cy - 4, 2, 8, c);
+	wlwin_fill(w, cx - 1, cy, 2, 8, c);
+	wlrail_line(w, cx - 8, cy + 3, cx - 1, cy + 7, 2, c);
+	wlrail_line(w, cx + 6, cy + 3, cx - 1, cy + 7, 2, c);
+}
+
+static void ic_speaker(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+	(void)bg;
+	wlwin_fill(w, cx - 8, cy - 3, 4, 7, c);
+	for (int i = 0; i < 5; i++)
+		wlwin_fill(w, cx - 4 + i, cy - 3 - i, 1, 7 + 2 * i, c);
+	wlwin_fill(w, cx + 3, cy - 3, 2, 7, c);
+	wlwin_fill(w, cx + 6, cy - 6, 2, 13, c);
+}
+
+static void ic_mute(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+	(void)bg;
+	wlwin_fill(w, cx - 8, cy - 3, 4, 7, c);
+	for (int i = 0; i < 5; i++)
+		wlwin_fill(w, cx - 4 + i, cy - 3 - i, 1, 7 + 2 * i, c);
+	wlrail_line(w, cx + 3, cy - 3, cx + 8, cy + 3, 2, c);
+	wlrail_line(w, cx + 8, cy - 3, cx + 3, cy + 3, 2, c);
+}
+
+static void rail_build(const struct app *a, struct wlrail *L)
+{
+	memset(L, 0, sizeof *L);
+	L->x = 0;
+	L->y0 = 0;
+	L->y1 = a->win.bh;
+	bool wait = modal_card(a);
+	const struct wlrail_item it[RB_N] = {
+		[RB_NEW] = { .tip = "A new world  Ctrl+N", .icon = wlrail_ic_new, .base = lm_theme.btn_teal, .lite = lm_theme.btn_teal_lit },
+		[RB_OPEN] = { .tip = "Open a world  Ctrl+O", .icon = wlrail_ic_open, .base = lm_theme.btn_blue, .lite = lm_theme.btn_blue_lit },
+		[RB_SAVE] = { .tip = "Save  Ctrl+S", .icon = wlrail_ic_save, .base = lm_theme.btn_green, .lite = lm_theme.btn_green_lit },
+		[RB_SAVEAS] = { .tip = "Save as  Ctrl+Shift+S", .icon = wlrail_ic_saveas, .base = lm_theme.btn_olive, .lite = lm_theme.btn_olive_lit },
+		[RB_PLAY] = { .tip = a->playing ? "Pause  Esc" : "Play  Esc", .icon = a->playing ? wlrail_ic_pause : ic_play, .base = lm_theme.btn_amber, .lite = lm_theme.btn_amber_lit, .gap = true },
+		[RB_CMD] = { .tip = "Command view  Tab", .icon = wlrail_ic_eye, .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .lit = a->cmd },
+		[RB_BLOCKS] = { .tip = "Blocks  E", .icon = ic_cube, .base = lm_theme.btn_rust, .lite = lm_theme.btn_rust_lit },
+		[RB_SOUND] = { .tip = a->sound_on ? "Sound is on" : "Sound is off", .icon = a->sound_on ? ic_speaker : ic_mute, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit },
+		[RB_HELP] = { .tip = "Help  F1", .text = "?", .base = lm_theme.btn_grey, .lite = lm_theme.btn_slate_lit, .bottom = true },
+	};
+	for (int i = 0; i < RB_N; i++) {
+		L->it[i] = it[i];
+		L->it[i].show = true;
+		L->it[i].idle = wait;
+	}
+	L->n = RB_N;
+}
+
+/* the rail can be used while the pointer is free: not while it is locked to the game */
+static bool rail_usable(const struct app *a)
+{
+	return !a->playing || a->cmd;
+}
+
 static void paint(struct wlwin *w)
 {
 	struct app *a = w->data;
@@ -2852,7 +3412,7 @@ static void paint(struct wlwin *w)
 		a->rw = a->fix_w;
 		a->rh = a->fix_h;
 	} else {
-		render_size(w->pw, w->ph, a->budget, &a->rw, &a->rh);
+		render_size(w->bw * wlwin_scale(w), w->bh * wlwin_scale(w), a->budget, &a->rw, &a->rh);
 	}
 	size_t need = (size_t)a->rw * (size_t)a->rh;
 	if (need > a->frame_cap) {
@@ -2936,7 +3496,7 @@ static void paint(struct wlwin *w)
 	int64_t t1 = now_ms();
 	a->ms_render = (double)(t1 - t0);
 	if (a->fix_w <= 0 && a->prompt == P_NONE)
-		a->budget = budget_next(a->budget, a->ms_render, (double)w->pw * (double)w->ph);
+		a->budget = budget_next(a->budget, a->ms_render, (double)w->bw * (double)w->bh * wlwin_scale(w) * wlwin_scale(w));
 	wlwin_blit(w, 0, 0, w->bw, w->bh, a->frame, a->rw, a->rh, a->rw);
 
 	struct lay L;
@@ -2944,8 +3504,10 @@ static void paint(struct wlwin *w)
 	if (!a->cmd || a->prompt != P_NONE)
 		paint_hotbar(a, &L);
 	paint_hearts(a, &L);
-	if (a->survival)
+	if (a->survival) {
 		paint_survival(a);
+		paint_stock(a);
+	}
 	if (a->cmd && a->prompt == P_NONE)
 		paint_cmd(a, &cam);
 	if (a->prompt == P_NONE && !a->cmd)
@@ -2959,6 +3521,11 @@ static void paint(struct wlwin *w)
 	}
 	if (a->prompt != P_NONE)
 		paint_card(a);
+	{
+		struct wlrail rail;
+		rail_build(a, &rail);
+		wlrail_paint(w, &rail, &a->ran, rail_usable(a) && !modal_card(a) && a->has_pointer ? a->rail_hover : -1, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text_soft);
+	}
 	a->fps_n++;
 	if (t1 - a->fps_t0 >= 1000) {
 		a->fps = (int)((int64_t)a->fps_n * 1000 / (t1 - a->fps_t0));
@@ -2970,9 +3537,56 @@ static void paint(struct wlwin *w)
 
 /* ================================================================ the pointer and the keys ================================================================ */
 
+/* Puts up the new / open / save as card; the game waits, and Cancel goes back to where it came from. */
+static void open_dialog(struct app *a, enum prompt p)
+{
+	if (a->prompt == P_DEAD || a->prompt == P_LOST)
+		a->back = a->prompt;
+	else if (a->prompt != P_NEW && a->prompt != P_OPEN && a->prompt != P_SAVEAS && a->prompt != P_REPLACE)
+		a->back = P_PAUSE;
+	if (a->playing) {
+		pause_game(a, p);
+		save_all(a, false);
+	} else {
+		a->prompt = p;
+		a->cmd = false;
+	}
+	a->pc_hover = a->pc_down = -1;
+	a->card_msg[0] = 0;
+	if (p == P_OPEN || p == P_SAVEAS) {
+		mkdirs(a->dir);
+		a->field[0] = 0;
+		if (p == P_SAVEAS && a->path[0]) {                  /* the name it has, chosen: typing replaces it */
+			const char *sl = strrchr(a->path, '/');
+			snprintf(a->field, sizeof a->field, "%s", sl ? sl + 1 : a->path);
+		}
+		wltext_end(a->field);
+		if (a->field[0])
+			wltext_select_all(a->field);
+		wlpicker_reset(&a->pk);                             /* (the folder is read again) */
+	}
+	a->win.redraw = true;
+}
+
+/* the Save button and Ctrl+S: a world with no file is asked for one */
+static void do_save(struct app *a)
+{
+	if (a->nosave || !a->path[0])
+		open_dialog(a, P_SAVEAS);
+	else
+		save_all(a, true);
+}
+
+static void card_close(struct app *a, enum prompt p)
+{
+	a->prompt = p;
+	a->pc_hover = a->pc_down = -1;
+	a->pk.sb_drag = -1;
+}
+
 static void card_action(struct app *a, int which)
 {
-	if (a->prompt == P_LOST) {                                  /* the game is over: a new world (the old one stays in its file until it is saved over) */
+	if (a->prompt == P_LOST) {                                  /* the game is over: a new world (the lost one stays in its file) */
 		new_world(a);
 		resume_game(a);
 		return;
@@ -2991,30 +3605,199 @@ static void card_action(struct app *a, int which)
 			save_all(a, false);
 			a->win.running = false;
 		} else if (which == 1) {
-			save_all(a, true);
+			do_save(a);
 		} else if (which == 2) {
-			a->prompt = P_NEW;
-			a->pc_hover = a->pc_down = -1;
+			open_dialog(a, P_NEW);
 		} else {
 			resume_game(a);
 		}
 		return;
 	}
 	if (a->prompt == P_NEW) {
-		a->prompt = P_PAUSE;
-		a->pc_hover = a->pc_down = -1;
 		if (which == 1) {
+			card_close(a, P_PAUSE);
 			new_world(a);
 			resume_game(a);
+		} else {
+			card_close(a, a->back);
 		}
 		return;
 	}
-	a->prompt = P_PAUSE;                                    /* the keys card closes back to the pause card */
-	a->pc_hover = a->pc_down = -1;
+	if (a->prompt == P_OPEN) {
+		if (which == 0) {
+			card_close(a, a->back);
+			return;
+		}
+		size_t l = strlen(a->field);
+		char base[1024], full[1100];
+		struct stat st;
+		card_base(a, base, sizeof base);
+		lm_resolve_path(base, a->field, full, sizeof full);
+		if (l && a->field[l - 1] != '/' && l + 2 < sizeof a->field && stat(full, &st) == 0 && S_ISDIR(st.st_mode)) {    /* a folder: go into it */
+			strcat(a->field, "/");
+			wltext_end(a->field);
+			wlpicker_typed(&a->pk);
+			return;
+		}
+		if (world_open(a))
+			card_close(a, P_PAUSE);
+		return;
+	}
+	if (a->prompt == P_SAVEAS) {
+		if (which == 0) {
+			card_close(a, a->back);
+			return;
+		}
+		char path[1024];
+		const char *why = NULL;
+		if (!field_path(a, true, path, sizeof path, &why)) {
+			snprintf(a->card_msg, sizeof a->card_msg, "%s", why);
+			return;
+		}
+		if (access(path, F_OK) == 0 && !(a->path[0] && !a->nosave && same_file(path, a->path))) {
+			snprintf(a->target, sizeof a->target, "%s", path);
+			card_close(a, P_REPLACE);
+			return;
+		}
+		if (world_save_to(a, path))
+			card_close(a, a->back == P_LOST || a->back == P_DEAD ? a->back : P_PAUSE);
+		return;
+	}
+	if (a->prompt == P_REPLACE) {
+		if (which == 1 && world_save_to(a, a->target))
+			card_close(a, a->back == P_LOST || a->back == P_DEAD ? a->back : P_PAUSE);
+		else
+			card_close(a, P_SAVEAS);                            /* (the field is as it was) */
+		return;
+	}
+	card_close(a, P_PAUSE);                                     /* the keys card closes back to the pause card */
+}
+
+static void rail_action(struct app *a, int id)
+{
+	if (modal_card(a))
+		return;
+	switch (id) {
+	case RB_NEW: open_dialog(a, P_NEW); break;
+	case RB_OPEN: open_dialog(a, P_OPEN); break;
+	case RB_SAVE: do_save(a); break;
+	case RB_SAVEAS: open_dialog(a, P_SAVEAS); break;
+	case RB_PLAY:
+		if (a->prompt == P_PAUSE) {
+			resume_game(a);
+		} else {
+			pause_game(a, P_PAUSE);
+			save_all(a, false);
+		}
+		break;
+	case RB_CMD:
+		if (a->cmd) {
+			leave_cmd(a);
+		} else {
+			if (!a->playing)
+				resume_game(a);
+			enter_cmd(a);
+		}
+		break;
+	case RB_BLOCKS: pause_game(a, P_PALETTE); break;
+	case RB_SOUND:
+		a->sound_on = !a->sound_on;
+		say(a, a->sound_on ? "Sound on" : "Sound off");
+		break;
+	case RB_HELP:
+		pause_game(a, P_HELP);
+		wlhelp_open(&a->help);
+		break;
+	default: break;
+	}
+	a->win.redraw = true;
+}
+
+/* the pointer on the open / save as card */
+static void file_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+	struct wlcard c;
+	int fx, fy, fw, ly, rows;
+	file_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
+	char base[1024];
+	card_base(a, base, sizeof base);
+	if (op == LM_WL_POINTER_EVT_AXIS) {
+		if (args[1].u == 0)
+			wlpicker_wheel(&a->pk, lm_fixed_to_double(args[2].f) > 0 ? 1 : -1);
+	} else if (op == LM_WL_POINTER_EVT_MOTION) {
+		if (!wlcard_drag_motion(&a->win, &c, a->px, a->py)) {
+			wlpicker_motion(&a->pk, base, a->field, ly, rows, a->py);
+			a->pc_hover = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+		}
+	} else if (op == LM_WL_POINTER_EVT_BUTTON) {
+		uint32_t button = args[2].u, state = args[3].u;
+		int k = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+		bool on_field = a->px >= fx && a->px < fx + fw && a->py >= fy && a->py < fy + 28;
+		a->clip.serial = args[0].u;
+		if (button == 273 && state == 1 && on_field) {
+			wlwin_menu(&a->win, wltext_menu(a->field));
+		} else if (button != 272) {
+			return;
+		} else if (state == 0) {
+			wlcard_drag_release(&a->win);
+			wlpicker_release(&a->pk);
+			if (a->pc_down >= 0 && a->pc_down == k)
+				card_action(a, k);
+			a->pc_down = -1;
+		} else if (k >= 0) {
+			a->pc_down = k;
+		} else if (wlcard_drag_press(&a->win, &c, a->px, a->py)) {
+			;
+		} else if (on_field) {
+			wltext_click(a->field, (int)a->px - (fx + 12), (a->win.mods & LM_MOD_SHIFT) != 0);
+		} else if (rows && wlpicker_inside(fx, ly, fw, rows, a->px, a->py)) {
+			a->card_msg[0] = 0;
+			if (wlpicker_press(&a->pk, base, a->field, sizeof a->field, fx, ly, fw, rows, a->px, a->py, args[1].u, (uint32_t)lm_metrics.double_click_ms) == WLPICKER_OPEN)
+				card_action(a, 1);
+		} else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
+			card_action(a, 0);
+		}
+	}
+	a->win.redraw = true;
+}
+
+/* the keys of the open / save as card */
+static void file_key(struct app *a, uint32_t code)
+{
+	uint32_t ks = lm_keymap_keysym(code, a->win.mods);
+	char base[1024];
+	card_base(a, base, sizeof base);
+	int rows = wlpicker_fit(a->win.bh, 180);
+	if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0)) {
+		if (wlpicker_key(&a->pk, base, a->field, sizeof a->field, rows, ks) == WLPICKER_OPEN)
+			card_action(a, 1);
+	} else if (ks == LM_KS_Escape) {
+		card_action(a, 0);
+	} else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+		card_action(a, 1);
+	} else if (ks == LM_KS_Tab) {
+		char list[160];
+		int n = lm_complete_path(base, a->field, sizeof a->field, true, list, sizeof list);
+		if (n == 0)
+			snprintf(a->card_msg, sizeof a->card_msg, "Nothing here starts like that");
+		else if (n > 1)
+			snprintf(a->card_msg, sizeof a->card_msg, "%d matches: %s", n, list);
+		else
+			a->card_msg[0] = 0;
+		wltext_end(a->field);
+		wlpicker_typed(&a->pk);
+	} else if (wltext_edit(&a->clip, a->field, sizeof a->field, ks, a->win.mods)) {
+		wlpicker_typed(&a->pk);                             /* (the list follows what is typed) */
+		a->card_msg[0] = 0;
+	}
 }
 
 static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 {
+	if (file_card(a)) {
+		file_pointer(a, op, args);
+		return;
+	}
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
@@ -3127,6 +3910,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 	case LM_WL_POINTER_EVT_LEAVE:
 		a->has_pointer = false;
 		a->pc_hover = -1;
+		a->rail_hover = -1;
+		wlrail_release(&a->ran);
 		w->redraw = true;
 		return;
 	case LM_WL_POINTER_EVT_MOTION:
@@ -3136,6 +3921,26 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 		break;
 	default:
 		break;
+	}
+	{                                                           /* the rail at the left (its pointer is in window pixels) */
+		struct wlrail rail;
+		rail_build(a, &rail);
+		bool over = a->has_pointer && w->rpx < WLRAIL_W && rail_usable(a);
+		int at = over ? wlrail_at(&rail, w->rpx, w->rpy) : -1;
+		if (at != a->rail_hover) {
+			a->rail_hover = at;
+			w->redraw = true;
+		}
+		if (op == LM_WL_POINTER_EVT_BUTTON && args[3].u == 0)
+			wlrail_release(&a->ran);
+		if (over && !a->win.card_drag && ((op == LM_WL_POINTER_EVT_BUTTON && args[3].u == 1) || op == LM_WL_POINTER_EVT_AXIS)) {
+			if (op == LM_WL_POINTER_EVT_BUTTON && args[2].u == 272 && at >= 0 && !modal_card(a)) {
+				wlrail_press(&a->ran, at, wlrail_now());
+				rail_action(a, at);
+			}
+			w->redraw = true;
+			return;
+		}
 	}
 	if (a->prompt != P_NONE) {
 		card_pointer(a, op, args);
@@ -3157,11 +3962,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 		if (button == 272) {
 			a->b_break = state == 1;
 			if (state == 1) {
+				a->dig_wait = 0.0f;                             /* (a new press begins at once) */
 				if (a->survival)
 					dig_step(a, now, 0.0f);                    /* (the sword at once; a block takes its time) */
 				else
 					do_break(a, now);
-				a->next_break = now + REPEAT_MS;
+				a->next_break = now + REPEAT_FIRST_MS;
 			} else {
 				a->dig_on = false;
 				a->dig_t = 0.0f;
@@ -3170,7 +3976,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 			a->b_place = state == 1;
 			if (state == 1) {
 				do_place(a);
-				a->next_place = now + REPEAT_MS;
+				a->next_place = now + REPEAT_FIRST_MS;
 			}
 		} else if (button == 274 && state == 1) {
 			do_pick(a);
@@ -3283,6 +4089,13 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		return;
 	uint32_t code = args[2].u;
 	bool down = args[3].u != 0;
+	if (down)
+		a->clip.serial = args[0].u;
+	if (down && file_card(a) && !((w->mods & LM_MOD_CTRL) && code == K_Q)) {     /* the keys are the text field's */
+		file_key(a, code);
+		w->redraw = true;
+		return;
+	}
 	/* keys that are held: they count while the game is on, and are let go whatever happens */
 	switch (code) {
 	case K_W: a->k_fwd = down && a->playing; break;
@@ -3315,14 +4128,21 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	if (ctrl) {
 		if (code == K_Q)
 			w->running = false;
+		else if (code == K_S && (w->mods & LM_MOD_SHIFT))
+			open_dialog(a, P_SAVEAS);
 		else if (code == K_S)
-			save_all(a, true);
-		else if (code == K_N) {
-			if (a->playing)
-				pause_game(a, P_NEW);
-			else
-				a->prompt = P_NEW;
-		}
+			do_save(a);
+		else if (code == K_O)
+			open_dialog(a, P_OPEN);
+		else if (code == K_N)
+			open_dialog(a, P_NEW);
+		return;
+	}
+	if (a->prompt == P_REPLACE) {                               /* (Enter does not replace by accident: Y or the button does) */
+		if (code == K_ESC || code == K_ENTER)
+			card_action(a, 0);
+		else if (code == K_Y)
+			card_action(a, 1);
 		return;
 	}
 	if (a->prompt == P_PALETTE) {
@@ -3375,6 +4195,8 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		if (code == K_ESC) {
 			if (a->prompt == P_PAUSE)
 				resume_game(a);
+			else if (a->prompt == P_NEW)
+				card_action(a, 0);
 			else {
 				a->prompt = P_PAUSE;
 				a->pc_hover = a->pc_down = -1;
@@ -3473,10 +4295,18 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	}
 }
 
+static void menu_event(struct wlwin *w, int index)
+{
+	struct app *a = w->data;
+	if (file_card(a))
+		wltext_menu_do(&a->clip, a->field, sizeof a->field, index);
+	w->redraw = true;
+}
+
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t version)
 {
 	struct app *a = w->data;
-	(void)version;
+	wlclip_global(&a->clip, w, name, iface, version);
 	if (!strcmp(iface, "mellagui_settings_v1"))
 		a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, NULL, a);
 }
@@ -3568,8 +4398,10 @@ static int selftest(void)
 	a.hotbar[2] = BL_LEAVES;
 	a.pl.flying = true;
 	bl_set(a.world, 5, 20, 5, BL_BRICK);
-	CHECK(save_all(&a, false), "saved");
+	CHECK(!save_all(&a, false), "a world with no file is not saved");
 	char path[600];
+	world_path(&a, a.path, sizeof a.path);
+	CHECK(save_all(&a, false), "saved");
 	world_path(&a, path, sizeof path);
 	CHECK(stat(path, &st) == 0, "the world file is there");
 	struct app b2;
@@ -3604,6 +4436,101 @@ static int selftest(void)
 	      "only blocks that can be put go in the hand: not air, bedrock, flowing water (%d %d %d %d %d)", c2.hotbar[0], c2.hotbar[1], c2.hotbar[2], c2.hotbar[3], c2.hotbar[4]);
 	CHECK(c2.clockm == 0 && !c2.sound_on, "a clock mode of 7 and a sound setting of 5 are not taken");
 	CHECK(c2.slot == 0, "slot 99 is not a slot");
+
+	/* worlds of their own: new, save as, open */
+	{
+		static struct app w;
+		memset(&w, 0, sizeof w);
+		snprintf(w.dir, sizeof w.dir, "%s/worlds", dir);
+		w.world_size = 64;
+		w.fov = 1.2f;
+		w.sens = 0.0025f;
+		w.cli_clock = -1;
+		memcpy(w.hotbar, k_default_hotbar, sizeof w.hotbar);
+		char one[600], two[600], castle[600], got[1024], name[100];
+		snprintf(one, sizeof one, "%s/world.bl", w.dir);
+		snprintf(two, sizeof two, "%s/world-2.bl", w.dir);
+		snprintf(castle, sizeof castle, "%s/My castle.bl", w.dir);
+		CHECK(mkdirs(w.dir) == 0 && free_world_path(&w, got, sizeof got) && !strcmp(got, one), "the first world's file is world.bl");
+		CHECK(make_world(&w, 5, true), "a flat world");
+		snprintf(w.path, sizeof w.path, "%s", one);
+		world_begin(&w, false, 1, -1, -1);
+		CHECK(w.survival && w.have_keep && nworkers(&w) == 2, "it starts with a keep and two workers");
+		bl_set(w.world, 3, 20, 3, BL_LAMP);
+		w.inv[BL_COBBLE] = 7;
+		w.nights = 4;
+		w.pl.x = 20.5f;
+		w.pl.z = 22.5f;
+		w.sens = 0.004f;
+		CHECK(save_all(&w, false) && free_world_path(&w, got, sizeof got) && !strcmp(got, two), "the next free name is world-2.bl");
+		uint32_t seed1 = w.world->seed;
+		new_world(&w);
+		CHECK(!strcmp(w.path, two) && access(two, F_OK) == 0 && access(one, F_OK) == 0, "a new world has a file of its own beside the first (%s)", w.path);
+		CHECK(w.inv[BL_COBBLE] == 0 && w.nights == 0 && w.world->seed != seed1 && !w.world->kind, "and nothing of the first");
+		/* open the first again */
+		snprintf(w.field, sizeof w.field, "world");
+		CHECK(world_open(&w), "world is opened by its name (%s)", w.card_msg);
+		CHECK(!strcmp(w.path, one) && w.world->kind == 1 && bl_get(w.world, 3, 20, 3) == BL_LAMP, "its blocks are back");
+		CHECK(w.inv[BL_COBBLE] == 7 && w.nights == 4 && w.survival && w.have_keep && nworkers(&w) == 2, "and what he had, the keep and the workers (%d %d %d)", w.inv[BL_COBBLE], w.nights, nworkers(&w));
+		CHECK(fabsf(w.pl.x - 20.5f) < 0.1f && fabsf(w.pl.z - 22.5f) < 0.1f && w.sens == 0.004f, "and where he stood; the pointer's speed is the person's, not the world's");
+		/* the next start opens the one that was open */
+		static struct app s2;
+		memset(&s2, 0, sizeof s2);
+		snprintf(s2.dir, sizeof s2.dir, "%s", w.dir);
+		conf_load(&s2, false);
+		CHECK(!strcmp(s2.last_world, one), "player.conf says which world was open (%s)", s2.last_world);
+		/* save as: a copy that goes on; the old file stays */
+		w.inv[BL_COBBLE] = 11;
+		CHECK(save_all(&w, false), "saved");
+		snprintf(w.field, sizeof w.field, "My castle");
+		const char *why = NULL;
+		CHECK(field_path(&w, true, got, sizeof got, &why) && !strcmp(got, castle), "\".bl\" is added to a name (%s)", got);
+		CHECK(world_save_to(&w, got) && !strcmp(w.path, castle) && access(castle, F_OK) == 0, "saved as My castle");
+		world_name(w.path, name, sizeof name);
+		CHECK(!strcmp(name, "My castle"), "which is its name (%s)", name);
+		w.inv[BL_COBBLE] = 99;
+		CHECK(save_all(&w, false), "saved");
+		snprintf(w.field, sizeof w.field, "world.bl");
+		CHECK(world_open(&w) && w.inv[BL_COBBLE] == 11, "the first world is as it was before Save as (%d)", w.inv[BL_COBBLE]);
+		snprintf(w.field, sizeof w.field, "My castle.bl");
+		CHECK(world_open(&w) && w.inv[BL_COBBLE] == 99, "and the castle went on (%d)", w.inv[BL_COBBLE]);
+		/* what cannot be opened or written leaves the world as it is */
+		static const char *const no_world[] = { "", "nowhere", "../", "junk.bl" };
+		char junk[600];
+		snprintf(junk, sizeof junk, "%s/junk.bl", w.dir);
+		FILE *jf = fopen(junk, "w");
+		if (jf) {
+			fputs("this is no world, and long enough to be read as one if the magic were not looked at", jf);
+			fclose(jf);
+		}
+		for (int i = 0; i < 4; i++) {
+			snprintf(w.field, sizeof w.field, "%s", no_world[i]);
+			w.card_msg[0] = 0;
+			CHECK(!world_open(&w) && w.card_msg[0] && !strcmp(w.path, castle) && w.inv[BL_COBBLE] == 99, "\"%s\" does not open: %s", no_world[i], w.card_msg);
+		}
+		snprintf(w.field, sizeof w.field, "sub/");
+		CHECK(!field_path(&w, true, got, sizeof got, &why) && why, "a folder is no name to save as");
+		CHECK(!world_save_to(&w, "/nonexistent/x.bl") && !strcmp(w.path, castle) && !w.nosave, "a file that cannot be written leaves the world in its own");
+		/* a world with no file (a seed's) gets one by Save as */
+		w.path[0] = 0;
+		w.nosave = true;
+		CHECK(!save_all(&w, false), "no file, nothing saved");
+		snprintf(got, sizeof got, "%s/kept.bl", w.dir);
+		CHECK(world_save_to(&w, got) && !w.nosave, "Save as gives it a file");
+		/* a world.bl from before: the state is in player.conf */
+		snprintf(w.path, sizeof w.path, "%s", one);
+		CHECK(bl_save(w.world, one) == 0, "a bare world file");
+		char pc[600];
+		snprintf(pc, sizeof pc, "%s/player.conf", w.dir);
+		jf = fopen(pc, "w");
+		if (jf) {
+			fprintf(jf, "survival = 0\nx = 30.5\nz = 31.5\ny = 20\ninv = %d:5\n", BL_BRICK);
+			fclose(jf);
+		}
+		w.path[0] = 0;
+		CHECK(world_load(&w, one, &why, -1, -1, -1) && !w.survival && w.inv[BL_BRICK] == 5 && fabsf(w.pl.x - 30.5f) < 0.1f, "an old world.bl takes its state from player.conf");
+		bl_world_free(w.world);
+	}
 	bl_world_free(a.world);
 	char cmd[200];
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
@@ -3824,11 +4751,21 @@ static int selftest(void)
 		aim_update(&sa);
 		CHECK(sa.aimed && bl_get(sa.world, sa.aim.x, sa.aim.y, sa.aim.z) == BL_DIRT, "now he aims at dirt");
 		sa.dig_on = false;
-		for (int i = 0; i < 40; i++)                                             /* three blocks down is stone */
+		sa.dig_wait = 0.0f;
+		for (int i = 0; i < 50; i++)                                             /* three blocks down is stone */
 			dig_step(&sa, 1000, 0.1f), aim_update(&sa);
-		CHECK(sa.inv[BL_COBBLE] >= 1 && sa.inv[BL_DIRT] >= 3, "digging down 4 s: cobble from the stone (%d), dirt (%d)", sa.inv[BL_COBBLE], sa.inv[BL_DIRT]);
+		CHECK(sa.inv[BL_COBBLE] >= 1 && sa.inv[BL_DIRT] >= 3, "digging down 5 s: cobble from the stone (%d), dirt (%d)", sa.inv[BL_COBBLE], sa.inv[BL_DIRT]);
 		sa.pl.y = 17.0f;                                                         /* (he has gone down the hole: the next blocks are in reach) */
 		aim_update(&sa);
+		/* after a block gave way a held button waits a moment before the next */
+		sa.dig_on = false;
+		sa.dig_wait = DIG_PAUSE;
+		uint32_t waited = sa.world->rev;
+		dig_step(&sa, 1000, 0.2f);
+		CHECK(!sa.dig_on && sa.world->rev == waited, "0.2 s after a block: the next one is not begun");
+		dig_step(&sa, 1000, 0.2f);
+		dig_step(&sa, 1000, 0.1f);
+		CHECK(sa.dig_on && sa.dig_t > 0.0f, "after the pause it is");
 		/* looking at something else starts again */
 		sa.dig_on = true;
 		sa.dig_x = 0;
@@ -4435,82 +5372,53 @@ int main(int argc, char **argv)
 	g_dump = getenv("MELLAGUI_BLOCKS_DUMP");
 	data_dir(a.dir, sizeof a.dir);
 
-	/* the world: the saved one, unless a seed or a flat world was asked for */
+	/* the world: the one that was open the last time (else world.bl), unless a seed or a flat world was asked for */
 	bool fresh = a.have_seed || a.flat;
-	bool from_file = false;
+	bool from_file = false, bad_file = false;
+	a.cli_clock = clock_cli;
+	a.cli_no_pets = no_pets;
+	a.cli_no_mobs = no_mobs;
+	a.cli_no_save = no_save;
+	conf_load(&a, false);                                   /* the person's choices, and which world was open */
+	a.conf_read = false;
+	if (no_sound)
+		a.sound_on = false;
+	if (no_body)
+		a.body = false;
 	if (!fresh) {
-		char path[600];
-		world_path(&a, path, sizeof path);
-		if (access(path, R_OK) == 0) {
+		char deflt[600], path[1024], gone[300] = "";
+		world_path(&a, deflt, sizeof deflt);
+		snprintf(path, sizeof path, "%s", a.last_world[0] ? a.last_world : deflt);
+		if (a.last_world[0] && access(path, F_OK) != 0 && strcmp(path, deflt) != 0) {
+			world_name(path, gone, sizeof gone);
+			snprintf(path, sizeof path, "%s", deflt);
+		}
+		if (access(path, F_OK) == 0) {
 			const char *err = NULL;
-			a.world = bl_load(path, &err);
-			if (a.world) {
-				from_file = true;
-				a.saved_rev = a.world->rev;
-				bl_player_init(&a.pl, a.world);
-				conf_load(&a, true);
-			} else {
+			from_file = world_load(&a, path, &err, mode_cli, workers_cli, soldiers_cli);
+			if (!from_file) {
 				fprintf(stderr, "mellagui-blocks: %s: %s (the file is left alone and a new world is not saved)\n", path, err ? err : "cannot be read");
-				a.nosave = true;
+				bad_file = true;
 			}
 		}
+		if (gone[0])
+			say(&a, "The world %s is not there any more", gone);
 	}
-	if (!a.world) {
+	if (!from_file) {
 		if (!make_world(&a, a.have_seed ? a.seed_given : fresh_seed(), a.flat)) {
 			fprintf(stderr, "mellagui-blocks: cannot make a world\n");
 			return 1;
 		}
-		conf_load(&a, false);
-		if (fresh)
-			a.nosave = !want_save;
+		if ((fresh && !want_save) || bad_file)
+			a.nosave = true;                                    /* (no file: Save as gives it one) */
+		else
+			world_path(&a, a.path, sizeof a.path);
+		if (no_save)
+			a.nosave = true;
+		world_begin(&a, false, mode_cli, workers_cli, soldiers_cli);
 	}
-	if (no_save)
-		a.nosave = true;
-	if (clock_cli >= 0)
-		a.clockm = clock_cli;
-	if (no_sound)
-		a.sound_on = false;
-	if (no_pets)
-		a.pets_on = false;
-	if (no_body)
-		a.body = false;
-	if (no_mobs)
-		a.mobs_on = false;
 	if (pet_at >= 0.0f)
 		a.pet_t = pet_at;
-	settle_player(&a);
-	if (a.pets_on) {                                        /* (without them no yard is looked for and no pond is dug: the world is left as it is) */
-		float near[3];
-		bl_spawn(a.world, near);
-		pets_setup(&a, near, true);
-	}
-	mobs_setup(&a);
-	if (from_file && a.conf_read && !a.conf_mode && mode_cli < 0)
-		a.survival = false;                                     /* a world saved before survival was a creative world */
-	if (mode_cli >= 0)
-		a.survival = mode_cli != 0;
-	if (from_file) {
-		ensure_keep(&a, a.pl.x, a.pl.z);
-		workers_restore(&a);
-		soldiers_restore(&a);
-	} else {
-		survival_setup(&a, a.pl.x, a.pl.z);
-	}
-	if (workers_cli >= 0) {                                 /* --workers N: exactly that many, whatever the world had */
-		bl_mobs_clear_kind(&a.mobs, BL_MOB_WORKER);
-		workers_start(&a, workers_cli);
-	}
-	if (soldiers_cli >= 0) {                                /* --soldiers N: that many near the keep (no barracks needed: for the tests) */
-		bl_mobs_clear_kind(&a.mobs, BL_MOB_SOLDIER);
-		for (int i = 0; i < soldiers_cli; i++) {
-			float cx, cz, sp[3];
-			worker_home(&a, &cx, &cz);
-			if (worker_spot(&a, cx, cz, 3.0f, a.have_keep ? (float)a.keep[1] + 2.5f : 1e9f, sp))
-				bl_mobs_add(&a.mobs, a.world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]);
-		}
-	}
-	if (from_file)
-		sites_restore(&a);
 	for (char *tok = strtok(give, ","); tok; tok = strtok(NULL, ",")) {
 		char *eq = strchr(tok, '=');
 		int n = eq ? atoi(eq + 1) : 1;
@@ -4532,15 +5440,20 @@ int main(int argc, char **argv)
 		a.pl.yaw = yaw;
 	if (!isnan(pitch))
 		a.pl.pitch = pitch;
-	(void)from_file;
 	aim_update(&a);
 
 	static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .close = close_event,
-	                                      .lock = lock_event, .relative = relative_event };
+	                                      .lock = lock_event, .relative = relative_event, .menu = menu_event };
 	if (wlwin_connect(&a.win, "mellagui-blocks", &ops, &a) < 0)
 		return 1;
+	wlrail_init(&a.ran);
+	wlwin_set_inset(&a.win, WLRAIL_W);                          /* the rail: the window is that much wider than the picture */
 	if (wlwin_open(&a.win, "Blocks", "mellagui.blocks", win_w, win_h, 480, 320) < 0)
 		return 1;
+	wlclip_attach(&a.clip, &a.win);
+	wlpicker_init(&a.pk, world_file);
+	title_update(&a);
+	a.rail_hover = -1;
 	static uint32_t cur[24 * 24];
 	arrow_cursor(cur, 24, 24);
 	wlwin_cursor(&a.win, cur, 24, 24, 1, 1);
@@ -4550,7 +5463,10 @@ int main(int argc, char **argv)
 
 	int64_t last = now_ms();
 	while (a.win.running) {
-		int timeout = a.playing ? 1 : (a.msg[0] || (!a.nosave && a.world->rev != a.saved_rev)) ? 500 : -1;
+		int timeout = a.playing ? 1 : (a.msg[0] || (!a.nosave && a.path[0] && a.world->rev != a.saved_rev)) ? 500 : -1;
+		struct wlrail rail;
+		rail_build(&a, &rail);
+		timeout = wlrail_loop(&a.win, &a.ran, &rail, a.rail_hover, timeout);
 		if (!wlwin_step(&a.win, timeout))
 			break;
 		int64_t now = now_ms();

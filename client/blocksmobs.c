@@ -138,7 +138,7 @@ int bl_mobs_wave_remaining(const struct bl_mobs *m)
 static int place_mob_i(struct bl_mobs *M, const struct bl_world *w, int kind, bool brute, float x, float y, float z)
 {
 	if ((kind != BL_MOB_GOBLIN && kind != BL_MOB_WORKER && kind != BL_MOB_SOLDIER) || (brute && kind != BL_MOB_GOBLIN) || !bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) ||
-	    (kind == BL_MOB_GOBLIN ? bl_box_hits_foe : bl_box_hits)(w, x, y, z, BL_GOBLIN_HW, brute ? BL_BRUTE_H : bl_mob_h(kind)))
+	    (kind == BL_MOB_GOBLIN ? bl_box_hits_foe : bl_box_hits_unit)(w, x, y, z, BL_GOBLIN_HW, brute ? BL_BRUTE_H : bl_mob_h(kind)))
 		return -1;
 	if (kind == BL_MOB_WORKER && bl_mobs_count_kind(M, BL_MOB_WORKER) >= BL_WORKER_MAX)
 		return -1;
@@ -240,15 +240,15 @@ static void try_spawn_wave(struct bl_mobs *M, const struct bl_world *w, struct b
 	}
 }
 
-/* a goblin is stopped by a gate, the player's units are not */
+/* a goblin is stopped by a gate and by leaves, the player's units by neither */
 static bool mob_hits(const struct bl_world *w, const struct bl_mob *b, float x, float y, float z, float hw, float h)
 {
-	return b->kind == BL_MOB_GOBLIN ? bl_box_hits_foe(w, x, y, z, hw, h) : bl_box_hits(w, x, y, z, hw, h);
+	return b->kind == BL_MOB_GOBLIN ? bl_box_hits_foe(w, x, y, z, hw, h) : bl_box_hits_unit(w, x, y, z, hw, h);
 }
 
 static bool mob_move(const struct bl_world *w, struct bl_mob *b, int axis, float d, float h)
 {
-	return b->kind == BL_MOB_GOBLIN ? bl_box_move_foe(w, &b->x, &b->y, &b->z, axis, d, BL_GOBLIN_HW, h) : bl_box_move(w, &b->x, &b->y, &b->z, axis, d, BL_GOBLIN_HW, h);
+	return b->kind == BL_MOB_GOBLIN ? bl_box_move_foe(w, &b->x, &b->y, &b->z, axis, d, BL_GOBLIN_HW, h) : bl_box_move_unit(w, &b->x, &b->y, &b->z, axis, d, BL_GOBLIN_HW, h);
 }
 
 static void mob_kill(struct bl_mob *b)
@@ -266,10 +266,10 @@ static bool stand_spot(const struct bl_world *w, int gx, int gy, int gz, float f
 	bool found = false;
 	for (int k = 0; k < 8; k++) {
 		float ang = (float)k * 0.785398f, cx = (float)gx + 0.5f + sinf(ang) * 1.15f, cz = (float)gz + 0.5f + cosf(ang) * 1.15f;
-		float sy = bl_box_support(w, cx, (float)gy + 1.0f, cz, 0.0f, 4.0f);
+		float sy = bl_box_support_unit(w, cx, (float)gy + 1.0f, cz, 0.0f, 4.0f);
 		if (sy < -1e8f || fabsf(sy + 1.0f - ((float)gy + 0.5f)) > 2.1f)           /* nothing to stand on, or the block is out of reach from there */
 			continue;
-		if (bl_box_hits(w, cx, sy + 0.002f, cz, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(w, (int)floorf(cx), (int)floorf(sy), (int)floorf(cz))))
+		if (bl_box_hits_unit(w, cx, sy + 0.002f, cz, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(w, (int)floorf(cx), (int)floorf(sy), (int)floorf(cz))))
 			continue;
 		float d = hypotf(cx - fx, cz - fz);
 		if (d < best) {
@@ -297,6 +297,30 @@ static float gather_time(const struct bl_world *w, int gx, int gy, int gz, int *
 	return GATHER_FACTOR * bl_hardness(b);
 }
 
+/* The trunk of the tree a leaf belongs to: the nearest log within two blocks whose column ends under a leaf (a log somebody has put there with leaves beside it
+ * is no tree). From above it is mostly the crown that is pointed at, so a click on it means the tree. */
+static bool tree_of(const struct bl_world *w, int lx, int ly, int lz, int out[3])
+{
+	int best = 1 << 30;
+	for (int dy = -2; dy <= 2; dy++)
+		for (int dz = -2; dz <= 2; dz++)
+			for (int dx = -2; dx <= 2; dx++) {
+				int x = lx + dx, y = ly + dy, z = lz + dz, d = 8 * (dx * dx + dz * dz) + dy * dy;
+				if (d >= best || bl_get(w, x, y, z) != BL_LOG)
+					continue;
+				int top = y;
+				while (bl_get(w, x, top + 1, z) == BL_LOG)
+					top++;
+				if (bl_get(w, x, top + 1, z) != BL_LEAVES)
+					continue;
+				best = d;
+				out[0] = x;
+				out[1] = y;
+				out[2] = z;
+			}
+	return best < (1 << 30);
+}
+
 bool bl_mobs_order_gather(struct bl_mobs *m, const struct bl_world *w, int i, int bx, int by, int bz)
 {
 	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_WORKER || !bl_inside(w, bx, by, bz))
@@ -304,6 +328,13 @@ bool bl_mobs_order_gather(struct bl_mobs *m, const struct bl_world *w, int i, in
 	int blk = w->b[bl_index(w, bx, by, bz)];
 	if (!bl_breakable(blk))
 		return false;
+	int trunk[3];
+	if (blk == BL_LEAVES && tree_of(w, bx, by, bz, trunk)) {
+		bx = trunk[0];
+		by = trunk[1];
+		bz = trunk[2];
+		blk = BL_LOG;
+	}
 	if (blk == BL_LOG)
 		while (by > 0 && bl_get(w, bx, by - 1, bz) == BL_LOG)                   /* the foot of the tree */
 			by--;
@@ -422,10 +453,10 @@ static bool site_spot(const struct bl_mobs *M, const struct bl_world *w, const s
 				if (x != lo[0] - r && x != hi[0] + r && z != lo[2] - r && z != hi[2] + r)
 					continue;
 				float cx = (float)x + 0.5f, cz = (float)z + 0.5f;
-				float sy = bl_box_support(w, cx, (float)lo[1] + 2.0f, cz, 0.0f, 5.0f);
+				float sy = bl_box_support_unit(w, cx, (float)lo[1] + 2.0f, cz, 0.0f, 5.0f);
 				if (sy < -1e8f || fabsf(sy - (float)lo[1]) > 2.1f)
 					continue;
-				if (bl_box_hits(w, cx, sy + 0.002f, cz, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(w, x, (int)floorf(sy), z)))
+				if (bl_box_hits_unit(w, cx, sy + 0.002f, cz, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(w, x, (int)floorf(sy), z)))
 					continue;
 				bool taken = false;
 				for (int k = 0; k < BL_MOBS_MAX && !taken; k++) {
@@ -470,7 +501,7 @@ bool bl_mobs_order_tower(struct bl_mobs *m, const struct bl_world *w, int i, int
 	struct bl_mob *b = &m->mob[i];
 	if (b->order == BL_ORDER_TOWER && b->gx == x && b->gy == y && b->gz == z)
 		return true;
-	if (bl_box_hits(w, (float)x + 0.5f, (float)y + 1.002f, (float)z + 0.5f, BL_GOBLIN_HW, BL_SOLDIER_H))
+	if (bl_box_hits_unit(w, (float)x + 0.5f, (float)y + 1.002f, (float)z + 0.5f, BL_GOBLIN_HW, BL_SOLDIER_H))
 		return false;
 	for (int k = 0; k < BL_MOBS_MAX; k++) {
 		const struct bl_mob *o = &m->mob[k];
@@ -583,8 +614,8 @@ static void climb_down(const struct bl_world *w, struct bl_mob *b)
 	for (int r = 2; r <= 4; r++)
 		for (int k = 0; k < 8; k++) {
 			float ang = (float)k * 0.785398f, x = cx + sinf(ang) * (float)r, z = cz + cosf(ang) * (float)r;
-			float sy = bl_box_support(w, x, (float)b->gy - 2.0f, z, 0.0f, 10.0f);
-			if (sy < -1e8f || bl_box_hits(w, x, sy + 0.002f, z, BL_GOBLIN_HW, BL_SOLDIER_H))
+			float sy = bl_box_support_unit(w, x, (float)b->gy - 2.0f, z, 0.0f, 10.0f);
+			if (sy < -1e8f || bl_box_hits_unit(w, x, sy + 0.002f, z, BL_GOBLIN_HW, BL_SOLDIER_H))
 				continue;
 			if (hypotf(b->tx - cx, b->tz - cz) < 0.1f) {        /* (it has no other place to go to: it stays where it comes down) */
 				b->tx = x;

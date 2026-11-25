@@ -2904,7 +2904,7 @@ static const char *const HP_BUILDINGS[] = {
 	"# The watchtower",
 	"Choose a soldier and right-click the tower: he goes to its foot and climbs up. From there he shoots goblins within twenty blocks that he can see - four arrows kill one - and the goblins leave him alone. Send him somewhere else, or press Backspace, and he comes down. One soldier to a tower. If the block with the yellow flag is broken he falls and is on the ground again.",
 	"# Goblins and walls",
-	"A goblin that is after you, your people or the keep and finds a made block in its way - cobble, planks, brick, glass, a gate - hammers at it until it breaks. A wall holds one goblin for some twenty seconds, a gate for fifteen, a brute is quicker. Stone and earth of the land itself they leave alone. Broken blocks are not repaired by themselves: plan the wall again over the gap.",
+	"Everybody walks round what is in the way when there is a way: your people through gates. A goblin that is after you, your people or the keep and has no way there, or only a very long one, goes straight on and hammers at a made block in its path - cobble, planks, brick, glass, a gate - until it breaks: so a wall has to be closed all round to hold them. A wall holds one goblin for some twenty seconds, a gate for fifteen, a brute is quicker. Stone and earth of the land itself they leave alone. Broken blocks are not repaired by themselves: plan the wall again over the gap.",
 };
 
 static const char *const HP_KEYS[] = {

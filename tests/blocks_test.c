@@ -15,6 +15,7 @@
 #include "blocksbuild.h"
 #include "blockshero.h"
 #include "blocksmobs.h"
+#include "blockspath.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -3554,6 +3555,186 @@ static void test_raids(void)
 	bl_world_free(w);
 }
 
+/* ---- finding a way (blockspath.c) ---------------------------------------------------------------------------------------- */
+
+static void wall_x(struct bl_world *w, int x0, int x1, int z, int high, int block)
+{
+	for (int x = x0; x <= x1; x++)
+		for (int y = 20; y < 20 + high; y++)
+			bl_set(w, x, y, z, block);
+}
+
+/* every turn of a way is a place the body can be in */
+static bool way_stands(const struct bl_world *w, const struct bl_walk *k, const struct bl_way *way, int n)
+{
+	for (int i = 0; i < n; i++)
+		if (!bl_walk_stands(w, k, way[i].x, way[i].y, way[i].z))
+			return false;
+	return true;
+}
+
+/* seconds until the unit is within 1.2 of (x, z), -1 when it is not after `secs` */
+static float walk_to(struct bl_mobs *M, const struct bl_world *w, float x, float z, float secs)
+{
+	static const float nobody[3] = { 2.5f, 20.0f, 2.5f };
+	bl_mobs_order_move(M, 0, x, z);
+	for (int i = 0; i < (int)(secs * 30.0f); i++) {
+		bl_mobs_step(M, w, nobody, false, 12.0f, 1.0f / 30.0f, NULL);
+		if (hypotf(M->mob[0].x - x, M->mob[0].z - z) < 1.2f)
+			return (float)i / 30.0f;
+	}
+	return -1.0f;
+}
+
+static void test_paths(void)
+{
+	static struct bl_mobs M;
+	struct bl_world *w = bl_world_flat(96, 96, 64, 20);
+	const struct bl_walk man = { false, 2 }, gob = { true, 2 };
+	struct bl_way way[BL_PATH_MAX];
+	bool full = false;
+	int steps = 0, used = 0;
+	float from[3] = { 40.5f, 20.0f, 35.5f }, to[3] = { 40.5f, 20.0f, 45.5f };
+	CHECK(bl_walk_line(w, &man, from, to, false), "on open ground the straight line is open");
+	CHECK(bl_walk_stands(w, &man, 40, 20, 35) && !bl_walk_stands(w, &man, 40, 21, 35) && !bl_walk_stands(w, &man, 40, 19, 35), "one stands on the ground, not in the air or in it");
+
+	wall_x(w, 30, 52, 40, 3, BL_STONE);
+	CHECK(!bl_walk_line(w, &man, from, to, false), "a wall closes the line");
+	int n = bl_walk_find(w, &man, from, to, false, 0.4f, BL_PATH_NODES, way, BL_PATH_MAX, &full, &steps, &used);
+	CHECK(n > 1 && full && way_stands(w, &man, way, n) && way[n - 1].x == 40 && way[n - 1].z == 45, "a way round it (%d turns, %d steps, %d places looked at)", n, steps, used);
+	CHECK(steps > 20 && steps < 45, "no longer than it must be (%d steps)", steps);
+	bl_mobs_init(&M, 1);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 40.5f, 20.0f, 35.5f);
+	float t = walk_to(&M, w, 40.5f, 45.5f, 40.0f);
+	CHECK(t > 6.0f && t < 20.0f && M.paths >= 1, "a worker walks round the wall (%.1f s, %d searches)", t, M.paths);
+
+	/* a second wall the other way: round both */
+	wall_x(w, 20, 60, 43, 3, BL_STONE);
+	wall_x(w, 20, 20, 41, 3, BL_STONE);
+	wall_x(w, 20, 20, 42, 3, BL_STONE);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 40.5f, 20.0f, 35.5f);
+	t = walk_to(&M, w, 40.5f, 45.5f, 60.0f);
+	CHECK(t > 10.0f && t < 45.0f, "and round two (%.1f s)", t);
+
+	/* shut in: it gives up and stands */
+	wall_x(w, 20, 60, 33, 3, BL_STONE);
+	for (int z = 33; z <= 40; z++) {
+		wall_x(w, 20, 20, z, 3, BL_STONE);
+		wall_x(w, 60, 60, z, 3, BL_STONE);
+	}
+	wall_x(w, 20, 60, 40, 3, BL_STONE);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 40.5f, 20.0f, 35.5f);
+	n = bl_walk_find(w, &man, from, to, true, 0.4f, BL_PATH_NODES, way, BL_PATH_MAX, &full, NULL, NULL);
+	CHECK(!full, "there is no way out of a closed yard");
+	t = walk_to(&M, w, 40.5f, 45.5f, 50.0f);
+	CHECK(t < 0.0f && M.mob[0].order == BL_ORDER_IDLE && M.mob[0].z < 40.0f, "a worker shut in gives up (order %d)", M.mob[0].order);
+	/* a gate in the yard's wall lets him out, not a goblin */
+	bl_set(w, 40, 20, 40, BL_GATE);
+	bl_set(w, 40, 21, 40, BL_GATE);
+	n = bl_walk_find(w, &man, from, to, true, 0.4f, BL_PATH_NODES, way, BL_PATH_MAX, &full, NULL, NULL);
+	bool gate_full = full;
+	bl_walk_find(w, &gob, from, to, true, 0.4f, BL_PATH_NODES, way, BL_PATH_MAX, &full, NULL, NULL);
+	CHECK(gate_full && !full, "a way leads through a gate for the player's own, none for a goblin");
+	bl_world_free(w);
+
+	/* steps and drops */
+	w = bl_world_flat(64, 64, 64, 20);
+	for (int z = 0; z < 64; z++)
+		for (int x = 32; x < 64; x++)
+			for (int y = 20; y < 23; y++)
+				bl_set(w, x, y, z, BL_STONE);                       /* a terrace three up from x = 32 */
+	float low[3] = { 28.5f, 20.0f, 30.5f }, high[3] = { 36.5f, 23.0f, 30.5f };
+	bl_walk_find(w, &man, high, low, false, 0.4f, BL_PATH_NODES, way, BL_PATH_MAX, &full, NULL, NULL);
+	bool down = full;
+	bl_walk_find(w, &man, low, high, false, 0.4f, 3000, way, BL_PATH_MAX, &full, NULL, NULL);
+	CHECK(down && !full, "three down is a way, three up is none");
+	bl_set(w, 31, 20, 36, BL_STONE);                            /* two steps up beside it */
+	bl_set(w, 31, 20, 37, BL_STONE);
+	bl_set(w, 31, 21, 37, BL_STONE);
+	bl_set(w, 31, 20, 35, BL_AIR);
+	n = bl_walk_find(w, &man, low, high, false, 0.4f, BL_PATH_NODES, way, BL_PATH_MAX, &full, NULL, NULL);
+	CHECK(full && way_stands(w, &man, way, n), "stairs make a way up (%d turns)", n);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 28.5f, 20.0f, 30.5f);
+	t = walk_to(&M, w, 36.5f, 30.5f, 40.0f);
+	CHECK(t >= 0.0f && M.mob[0].y > 22.9f, "and he climbs them (%.1f s, y %.1f)", t, M.mob[0].y);
+	bl_world_free(w);
+
+	/* water: round a pond when that is not far, else across it and out on the other bank */
+	w = bl_world_flat(96, 96, 64, 20);
+	for (int z = 36; z <= 44; z++)
+		for (int x = 36; x <= 44; x++)
+			for (int y = 17; y < 20; y++)
+				bl_set(w, x, y, z, BL_WATER);
+	float pa[3] = { 40.5f, 20.0f, 32.5f }, pb[3] = { 40.5f, 20.0f, 48.5f };
+	n = bl_walk_find(w, &man, pa, pb, false, 0.4f, BL_PATH_NODES, way, BL_PATH_MAX, &full, NULL, NULL);
+	int wet_turns = 0;
+	for (int i = 0; i < n; i++)
+		wet_turns += bl_water(bl_get(w, way[i].x, way[i].y, way[i].z));
+	CHECK(full && wet_turns == 0, "round a small pond (%d turns in the water)", wet_turns);
+	for (int z = 36; z <= 40; z++)                              /* a river across the world */
+		for (int x = 0; x < 96; x++)
+			for (int y = 17; y < 20; y++)
+				bl_set(w, x, y, z, BL_WATER);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 60.5f, 20.0f, 32.5f);
+	t = walk_to(&M, w, 60.5f, 50.5f, 40.0f);
+	CHECK(t >= 0.0f && M.mob[0].y > 19.9f, "across a river and out of it (%.1f s, at %.1f %.1f %.1f)", t, M.mob[0].x, M.mob[0].y, M.mob[0].z);
+	bl_world_free(w);
+
+	/* a goblin walks round a wall to the player and leaves it whole; a soldier goes round one to a goblin */
+	w = bl_world_flat(96, 96, 64, 20);
+	wall_x(w, 34, 46, 40, 2, BL_COBBLE);
+	bl_mobs_init(&M, 2);
+	M.cap = 0;
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 40.5f, 20.0f, 34.5f);
+	float pl[3] = { 40.5f, 20.0f, 46.5f };
+	int hits = 0, siege = 0;
+	for (int i = 0; i < 30 * 20 && !hits; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(&M, w, pl, true, 17.9f, 1.0f / 30.0f, &R);
+		hits += R.hits;
+		siege += R.siege_hits;
+	}
+	CHECK(hits > 0 && siege == 0, "a goblin goes round a short wall and gets the player, without a blow at it (%d, %d)", hits, siege);
+	wall_x(w, 0, 95, 40, 3, BL_COBBLE);                         /* now there is no way round */
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 40.5f, 20.0f, 34.5f);
+	siege = 0;
+	for (int i = 0; i < 30 * 20; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(&M, w, pl, true, 17.9f, 1.0f / 30.0f, &R);
+		siege += R.siege_hits;
+	}
+	CHECK(siege > 3, "with no way round it breaks in (%d blows)", siege);
+	for (int y = 20; y < 23; y++)
+		for (int x = 0; x < 96; x++)
+			bl_set(w, x, y, 40, x >= 36 && x <= 46 && y < 22 ? BL_COBBLE : BL_AIR);
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 41.5f, 20.0f, 37.5f);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 41.5f, 20.0f, 43.5f);
+	M.mob[1].hp = 1.0f;
+	int slain = 0;
+	for (int i = 0; i < 30 * 20 && !slain; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(&M, w, from, false, 17.9f, 1.0f / 30.0f, &R);
+		slain += R.slain + (!M.mob[1].alive);
+	}
+	CHECK(slain > 0, "a soldier gets to a goblin behind a wall");
+	bl_world_free(w);
+
+	/* odd input */
+	w = bl_world_flat(32, 32, 48, 10);
+	float bad_to[3] = { NAN, 10.0f, 5.0f }, out[3] = { -50.0f, 10.0f, 500.0f }, in[3] = { 5.5f, 10.0f, 5.5f }, sky[3] = { 5.5f, 45.0f, 5.5f };
+	CHECK(bl_walk_find(w, &man, in, bad_to, false, 0.4f, 100, way, BL_PATH_MAX, NULL, NULL, NULL) == 0, "no way to a number that is none");
+	bl_walk_find(w, &man, in, out, false, 0.4f, 100000, way, BL_PATH_MAX, &full, NULL, &used);
+	CHECK(!full && used <= BL_PATH_NODES, "a goal outside the world: none, within the budget (%d)", used);
+	CHECK(bl_walk_find(w, &man, sky, in, false, 0.4f, 100, way, BL_PATH_MAX, NULL, NULL, NULL) == 0 && bl_walk_find(w, &man, in, in, false, 0.4f, 100, way, 0, NULL, NULL, NULL) == 0, "nor from the air, nor into no room");
+	bl_world_free(w);
+}
+
 static void test_workers(void)
 {
 	const float far_pl[3] = { 64.5f, 20.0f, 110.0f };
@@ -4184,6 +4365,7 @@ int main(int argc, char **argv)
 	test_keep();
 	printf("workers\n");
 	test_trees();
+	test_paths();
 	test_workers();
 	test_raids();
 	test_soldiers();

@@ -16,14 +16,17 @@
  * A goblin that is after somebody or the keep and finds a made block in its way (bl_siege_hp) hits it until it breaks. The engine never changes the world: what is
  * broken or put comes back in `struct bl_mobs_result` and the caller does it.
  *
- * Not done: finding a way round a wall (a goblin that cannot break what is in its way turns to one side until it is free), shooting goblins, mobs that spawn in caves
- * or by day.
+ * A mob that cannot walk straight to where it is going finds a way round (blockspath.h): workers and soldiers through gates, goblins when the way gets them there
+ * and is not much longer than the straight line - else they go straight on and break what a hand has made.
+ *
+ * Not done: shooting goblins, mobs that spawn in caves or by day.
  */
 #ifndef MELLAGUI_BLOCKSMOBS_H
 #define MELLAGUI_BLOCKSMOBS_H
 
 #include "blocks.h"
 #include "blocksbuild.h"
+#include "blockspath.h"
 
 #define BL_MOBS_MAX 40                  /* goblins, workers and soldiers together */
 #define BL_GOBLIN_HW 0.30f              /* half the width of its box, and its height */
@@ -67,6 +70,7 @@
 #define BL_ARROWS_MAX 8                 /* arrows in the air (their picture only: the hit counts at once) */
 #define BL_ARROW_TIME 0.25f
 #define BL_DAMAGED_MAX 24               /* blocks the goblins have started on */
+#define BL_PATH_BUDGET 5000             /* places that all the searches for a way may look at in one call of bl_mobs_step */
 
 enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER, BL_MOB_SOLDIER };
 enum bl_order { BL_ORDER_IDLE = 0, BL_ORDER_MOVE, BL_ORDER_GATHER, BL_ORDER_BUILD, BL_ORDER_TOWER };
@@ -114,6 +118,16 @@ struct bl_mob {
 	bool at_site;                   /* BUILD: it has got near enough and works (until it gets another site) */
 	bool posted;                    /* TOWER: it stands on the watchpost (gx, gy, gz): it does not move, goblins leave it alone, it shoots */
 	bool sieging;                   /* a goblin: it is hitting a block that is in its way */
+	/* the way to where it is going, when it cannot walk straight there (blockspath.h) */
+	struct bl_way way[BL_PATH_MAX];
+	int nway, iway;                 /* the turns of it, and the one it walks to */
+	bool pathing;                   /* it is walking along it now */
+	bool way_full;                  /* it leads to the goal (else only as near as was found) */
+	bool direct;                    /* the straight line was open when it was last looked at ... */
+	float line_t, repath_t, path_age;       /* ... seconds until it is looked at again, until a way may be looked for again, since this one was found */
+	float goal_x, goal_z;           /* what the way was found for */
+	float way_d;                    /* the nearest it has been to the turn it walks to */
+	float lost;                     /* seconds an order has not brought it nearer than ever before */
 };
 
 static inline float bl_mob_height(const struct bl_mob *b)       /* the height of this one's box (a brute is taller than a goblin) */
@@ -136,6 +150,8 @@ struct bl_mobs {
 	int wave_cap;                   /* how many may be there at a time */
 	int wave_size;                  /* how many the wave was made of */
 	int wave_brutes;                /* the last this many goblins of the wave are brutes */
+	int path_budget;                /* places that may still be looked at in this call (BL_PATH_BUDGET) */
+	int paths;                      /* ways that have been looked for since the start */
 	struct bl_site site[BL_SITES_MAX];      /* what is being built */
 	struct bl_arrow {
 		float t;                        /* seconds of flight left (0 = none) */

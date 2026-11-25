@@ -2069,8 +2069,12 @@ static bool sword_swing(struct app *a, int64_t now)
 	bl_player_eye(&a->pl, eye);
 	bl_player_look(&a->pl, look);
 	int id = bl_mobs_pick(&a->mobs, eye, look, BL_SWORD_REACH, &t);
-	if (id < 0 || (a->aimed && a->aim.t < t))
+	if (id < 0)
 		return false;
+	if (a->aimed && a->aim.t < t)                           /* a block is in the way (leaves are none: goblins stand among them) */
+		for (float s = 0.0f; s < t; s += 0.1f)
+			if (bl_solid_unit(bl_get(a->world, (int)floorf(eye[0] + look[0] * s), (int)floorf(eye[1] + look[1] * s), (int)floorf(eye[2] + look[2] * s))))
+				return false;
 	if (now < a->next_sword)
 		return true;                                         /* too soon for another blow, and the block behind it is not touched */
 	a->next_sword = now + SWORD_MS;
@@ -2569,13 +2573,15 @@ static void paint_survival(struct app *a)
 	}
 }
 
-/* where the list of what he has lies: at the right, under the lines of the top; `rows` of it show (the wood and the stone always, then whatever else there is) */
+/* where the list of what he has lies: at the right, under the lines of the top; `rows` of it show. In survival the wood and the stone always, then whatever else
+ * there is; in creative, where nothing is used up, only what has been gathered (no list when that is nothing). */
 static int stock_layout(const struct app *a, int *x, int *y, int *wd, int list[BL_COUNT])
 {
 	int n = 0;
 	static const int k_first[3] = { BL_LOG, BL_PLANKS, BL_COBBLE };
 	for (int i = 0; i < 3; i++)
-		list[n++] = k_first[i];
+		if (a->survival || a->inv[k_first[i]] > 0)
+			list[n++] = k_first[i];
 	for (int b = 1; b < BL_COUNT; b++)
 		if (a->inv[b] > 0 && b != BL_LOG && b != BL_PLANKS && b != BL_COBBLE)
 			list[n++] = b;
@@ -2745,7 +2751,7 @@ static const char *const HP_WELCOME[] = {
 	"- The picture is drawn at a smaller size and stretched, so it stays quick; it takes more pixels by itself when the machine has the time.",
 	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In survival the number under a block is how many you have.",
 	"- Ten hearts over the hotbar are your hit points. In survival the keep's bar is at the top.",
-	"- In survival the list at the right is what you have: the wood, the planks and the cobble always, then everything else you carry. It is there in the command view, too.",
+	"- The list at the right is what you have: in survival the wood, the planks and the cobble always and then everything else you carry; in creative, where nothing is used up, what you and your workers have gathered. It is there in the command view, too.",
 	"# Sounds",
 	"Blocks sound of what they are made of; the sword, the goblins, your soldiers, the builders, the keep's bell, the horn of a wave and the dawn have their own sounds. They follow Settings > Sound > Sound feedback and the chosen output; --no-sound starts without them.",
 	"# To start",
@@ -2822,7 +2828,8 @@ static const char *const HP_SURVIVAL[] = {
 
 static const char *const HP_NIGHT[] = {
 	"# Goblins",
-	"At night goblins come out of the ground fourteen to twenty-six blocks from you, in the open. They walk at you, climb a block that is one high, and hit when they are near: three of your twenty hit points a blow, once a second, and they push you away.",
+	"At night goblins come out of the ground fourteen to twenty-six blocks from you, in the open. They walk at you, climb a block that is one high, and hit when they are near: three of your twenty hit points a blow, once a second, and they push you away. Leaves do not stop them, nor your sword.",
+	"They go for your workers and soldiers too: one within ten blocks first, one within twenty-four when it is nearer than you and the keep. When your people are more than thirty blocks from you (in a wave: from the keep), some goblins come out of the ground near them (at night up to three, besides the six round you).",
 	"In daylight a goblin that stands in the open burns up in about five seconds; one under a roof or in water does not. They never come by day.",
 	"# Brutes",
 	"From the second night on the last goblins of a wave are brutes: bigger (taller than you), darker, with horns and a plate on the chest. A brute has twenty-six hit points - seven blows of the sword - walks slower than a goblin, and hits for five of your hit points, a worker's or a soldier's, and four of the keep's.",
@@ -3238,13 +3245,15 @@ static void write_dump(struct app *a)
 		if (rows)
 			wlpicker_dump(f, &a->pk, base, a->field, fx, ly, fw, rows, 0);
 	}
-	if (a->survival) {
+	{
 		int x, y, wd, list[BL_COUNT];
 		int rows = stock_layout(a, &x, &y, &wd, list);
-		fprintf(f, "stock x=%d y=%d w=%d rows=%d list=", x, y, wd, rows);
-		for (int i = 0; i < rows; i++)
-			fprintf(f, "%s%s:%d", i ? "," : "", bl_block_name(list[i]), a->inv[list[i]]);
-		fprintf(f, "\n");
+		if (rows > 0) {
+			fprintf(f, "stock x=%d y=%d w=%d rows=%d list=", x, y, wd, rows);
+			for (int i = 0; i < rows; i++)
+				fprintf(f, "%s%s:%d", i ? "," : "", bl_block_name(list[i]), a->inv[list[i]]);
+			fprintf(f, "\n");
+		}
 	}
 	fprintf(f, "inv");
 	for (int b = 1; b < BL_COUNT; b++)
@@ -3504,10 +3513,9 @@ static void paint(struct wlwin *w)
 	if (!a->cmd || a->prompt != P_NONE)
 		paint_hotbar(a, &L);
 	paint_hearts(a, &L);
-	if (a->survival) {
+	if (a->survival)
 		paint_survival(a);
-		paint_stock(a);
-	}
+	paint_stock(a);
 	if (a->cmd && a->prompt == P_NONE)
 		paint_cmd(a, &cam);
 	if (a->prompt == P_NONE && !a->cmd)
@@ -4675,6 +4683,17 @@ static int selftest(void)
 		CHECK(sword_swing(&ma, 1000 + SWORD_MS) && ma.mobs.mob[0].hp == gh - 2.0f * BL_SWORD_DAMAGE, "and one a moment later lands");
 		CHECK(sword_swing(&ma, 5000) && !ma.mobs.mob[0].alive && ma.kills == 1, "the third kills (a kill is counted)");
 		CHECK(!sword_swing(&ma, 9000), "with no goblin in front the button breaks blocks as before");
+		/* leaves are no shield to a goblin, a block is */
+		int lx = (int)floorf(ma.pl.x), lz = (int)floorf(ma.pl.z + 1.0f), ly = (int)floorf(ma.pl.y + 1.6f);
+		for (int k = 0; k < 2; k++) {
+			bl_mobs_clear(&ma.mobs);
+			bl_mobs_add(&ma.mobs, ma.world, BL_MOB_GOBLIN, ma.pl.x, ma.pl.y, ma.pl.z + 2.0f);
+			bl_set(ma.world, lx, ly, lz, k ? BL_STONE : BL_LEAVES);
+			aim_update(&ma);
+			CHECK(ma.aimed && bl_get(ma.world, ma.aim.x, ma.aim.y, ma.aim.z) == (k ? BL_STONE : BL_LEAVES), "a block stands before his eyes");
+			CHECK(sword_swing(&ma, 20000 + 1000 * k) == !k, "%s", k ? "a goblin behind stone is not reached" : "the sword goes through leaves to a goblin");
+		}
+		bl_set(ma.world, lx, ly, lz, BL_AIR);
 		ma.mobs_on = false;
 		bl_mobs_add(&ma.mobs, ma.world, BL_MOB_GOBLIN, ma.pl.x, ma.pl.y, ma.pl.z + 2.0f);
 		CHECK(!sword_swing(&ma, 20000), "with the goblins switched off there is no sword");

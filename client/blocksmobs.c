@@ -27,7 +27,8 @@
 #define SOLDIER_SCALE 1.15f
 #define WAVE_MIN 20.0f                  /* a wave's goblins come out of the ground this far from the keep, at least ... */
 #define WAVE_MAX 32.0f                  /* ... and at most */
-#define WORKER_SEE 10.0f                /* how far a goblin sees a worker */
+#define RAID_MIN 10.0f                  /* goblins that come for units that are apart come out this near one of them, near enough to see it ... */
+#define RAID_MAX 20.0f                  /* ... and at most this far */
 #define GATHER_FACTOR 1.5f              /* a worker takes this many times the player's time */
 #define GATHER_RADIUS 6                 /* it goes on to the next block of the kind within this many blocks */
 
@@ -199,44 +200,94 @@ static bool surface_at(const struct bl_world *w, int x, int z, float *y)
 	return true;
 }
 
-static void try_spawn(struct bl_mobs *M, const struct bl_world *w, const float pl[3], struct bl_mobs_result *R)
+/* One goblin (a brute) out of the ground `dmin` .. `dmax` from c, in the open, and no nearer than SPAWN_MIN to `away` (the player) when that is given. */
+static bool spawn_round(struct bl_mobs *M, const struct bl_world *w, const float c[3], float dmin, float dmax, const float *away, bool brute, int ntries,
+                        struct bl_mobs_result *R)
 {
-	for (int tries = 0; tries < 10; tries++) {
-		float a = rf(&M->rng) * 6.2831853f, d = SPAWN_MIN + rf(&M->rng) * (SPAWN_MAX - SPAWN_MIN);
-		int x = (int)floorf(pl[0] + sinf(a) * d), z = (int)floorf(pl[2] + cosf(a) * d);
+	for (int tries = 0; tries < ntries; tries++) {
+		float a = rf(&M->rng) * 6.2831853f, d = dmin + rf(&M->rng) * (dmax - dmin);
+		int x = (int)floorf(c[0] + sinf(a) * d), z = (int)floorf(c[2] + cosf(a) * d);
 		float y;
-		if (!surface_at(w, x, z, &y) || fabsf(y - pl[1]) > 14.0f)
+		if (!surface_at(w, x, z, &y) || fabsf(y - c[1]) > 14.0f || bl_water(bl_get(w, x, (int)y, z)))
 			continue;
-		if (bl_water(bl_get(w, x, (int)y, z)))
+		if (away && hypotf((float)x + 0.5f - away[0], (float)z + 0.5f - away[2]) < SPAWN_MIN)
 			continue;
-		if (place_mob(M, w, BL_MOB_GOBLIN, (float)x + 0.5f, y, (float)z + 0.5f)) {
-			M->spawned++;
-			R->born++;
-			return;
-		}
-	}
-}
-
-/* a goblin of a wave: out of the ground 20 to 32 blocks from the keep, in the open, anywhere round it */
-static void try_spawn_wave(struct bl_mobs *M, const struct bl_world *w, struct bl_mobs_result *R)
-{
-	for (int tries = 0; tries < 16; tries++) {
-		float a = rf(&M->rng) * 6.2831853f, d = WAVE_MIN + rf(&M->rng) * (WAVE_MAX - WAVE_MIN);
-		int x = (int)floorf(M->keep[0] + sinf(a) * d), z = (int)floorf(M->keep[2] + cosf(a) * d);
-		float y;
-		if (!surface_at(w, x, z, &y) || fabsf(y - M->keep[1]) > 14.0f || bl_water(bl_get(w, x, (int)y, z)))
-			continue;
-		bool brute = M->wave_brutes > 0 && M->wave_left <= M->wave_brutes;           /* the brutes come last */
 		if (place_mob_i(M, w, BL_MOB_GOBLIN, brute, (float)x + 0.5f, y, (float)z + 0.5f) >= 0) {
 			M->spawned++;
-			M->wave_left--;
 			R->born++;
-			if (brute) {
-				M->wave_brutes--;
+			if (brute)
 				R->born_brutes++;
-			}
-			return;
+			return true;
 		}
+	}
+	return false;
+}
+
+/* one of the player's units (not one up on a watchtower) that is more than BL_UNIT_APART from `from`, picked by chance; NULL when there is none */
+static const struct bl_mob *unit_apart(struct bl_mobs *M, const float from[3])
+{
+	const struct bl_mob *out[BL_MOBS_MAX];
+	int n = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *o = &M->mob[i];
+		if (o->alive && bl_mob_is_unit(o->kind) && !o->posted && hypotf(o->x - from[0], o->z - from[2]) > BL_UNIT_APART)
+			out[n++] = o;
+	}
+	return n ? out[(int)(rf(&M->rng) * (float)n) % n] : NULL;
+}
+
+/* the goblins that are out among units that are away from `from` */
+static int goblins_raiding(const struct bl_mobs *M, const float from[3])
+{
+	int n = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *g = &M->mob[i];
+		if (!g->alive || g->kind != BL_MOB_GOBLIN)
+			continue;
+		for (int k = 0; k < BL_MOBS_MAX; k++) {
+			const struct bl_mob *o = &M->mob[k];
+			if (o->alive && bl_mob_is_unit(o->kind) && !o->posted && hypotf(o->x - from[0], o->z - from[2]) > BL_UNIT_APART &&
+			    hypotf(o->x - g->x, o->z - g->z) < BL_UNIT_APART) {
+				n++;
+				break;
+			}
+		}
+	}
+	return n;
+}
+
+/* At night, with no wave: round the player, at most `cap` of them; and round units that are away from him BL_RAID_CAP more, which the ones that crowd round
+ * the player do not use up. */
+static void try_spawn(struct bl_mobs *M, const struct bl_world *w, const float pl[3], int cap, struct bl_mobs_result *R)
+{
+	int raiding = goblins_raiding(M, pl);
+	bool home = bl_mobs_count_kind(M, BL_MOB_GOBLIN) - raiding < cap;
+	const struct bl_mob *u = raiding < BL_RAID_CAP ? unit_apart(M, pl) : NULL;
+	if (u && (!home || rf(&M->rng) < 0.5f)) {
+		float at[3] = { u->x, u->y, u->z };
+		if (spawn_round(M, w, at, RAID_MIN, RAID_MAX, pl, false, 10, R))
+			return;
+	}
+	if (home)
+		spawn_round(M, w, pl, SPAWN_MIN, SPAWN_MAX, NULL, false, 10, R);
+}
+
+/* a goblin of a wave: out of the ground 20 to 32 blocks from the keep, in the open, anywhere round it; every third one goes for units that are away from it */
+static void try_spawn_wave(struct bl_mobs *M, const struct bl_world *w, const float pl[3], struct bl_mobs_result *R)
+{
+	bool brute = M->wave_brutes > 0 && M->wave_left <= M->wave_brutes;           /* the brutes come last */
+	const struct bl_mob *u = unit_apart(M, M->keep);
+	bool born = false;
+	if (u && rf(&M->rng) < 0.3333f) {
+		float at[3] = { u->x, u->y, u->z };
+		born = spawn_round(M, w, at, RAID_MIN, RAID_MAX, pl, brute, 10, R);
+	}
+	if (!born)
+		born = spawn_round(M, w, M->keep, WAVE_MIN, WAVE_MAX, NULL, brute, 16, R);
+	if (born) {
+		M->wave_left--;
+		if (brute)
+			M->wave_brutes--;
 	}
 }
 
@@ -988,21 +1039,23 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 			}
 		}
 		bool near_pl = pl_alive && d < BL_GOBLIN_NEAR && fabsf(pl[1] - b->y) < 8.0f;
-		if (!near_pl)                                                           /* a worker in sight: the nearest */
+		if (!near_pl)                                                           /* a worker or a soldier in sight: the nearest */
 			for (int k = 0; k < BL_MOBS_MAX; k++) {
 				const struct bl_mob *o = &M->mob[k];
-				if (!o->alive || !bl_mob_is_unit(o->kind) || o->posted || fabsf(o->y - b->y) > 6.0f)
+				if (!o->alive || !bl_mob_is_unit(o->kind) || o->posted || fabsf(o->y - b->y) > 10.0f)
 					continue;
 				float ex = o->x - b->x, ez = o->z - b->z, e = hypotf(ex, ez);
-				if (e < WORKER_SEE && e < wd) {
+				if (e < BL_UNIT_SEE && e < wd) {
 					wd = e;
 					wi = k;
 					wdx = ex;
 					wdz = ez;
 				}
 			}
-		to_worker = wi >= 0;
-		to_keep = M->keep_on && !near_pl && !to_worker && dk < BL_GOBLIN_KEEP_SEE && fabsf(M->keep[1] - b->y) < 14.0f;
+		bool keep_there = M->keep_on && dk < BL_GOBLIN_KEEP_SEE && fabsf(M->keep[1] - b->y) < 14.0f;
+		/* one that is close comes first; one farther off only when it is nearer than the player and the keep */
+		to_worker = wi >= 0 && (wd < BL_UNIT_NEAR || ((!pl_alive || wd < d) && (!keep_there || wd < dk)));
+		to_keep = keep_there && !near_pl && !to_worker;
 		chase = !to_keep && !to_worker && pl_alive && d < AGGRO && fabsf(pl[1] - b->y) < 12.0f;
 		if (to_worker) {
 			want = atan2f(wdx, wdz);
@@ -1077,7 +1130,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	/* a wanderer does not walk off an edge */
 	if (goblin && !chase && !to_keep && !to_worker && b->ground && b->speed > 0.05f) {
 		float ax = b->x + b->ysin * 0.55f, az = b->z + b->ycos * 0.55f;
-		if (bl_box_support(w, ax, b->y, az, 0.0f, 2.2f) < -1e8f) {
+		if (bl_box_support_unit(w, ax, b->y, az, 0.0f, 2.2f) < -1e8f) {
 			b->wyaw += 1.7f + rf(&b->rng);
 			b->speed = 0.0f;
 		}
@@ -1191,6 +1244,9 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 						if (dkk < dd)
 							dd = dkk;
 					}
+					for (int k = 0; k < BL_MOBS_MAX; k++)
+						if (M->mob[k].alive && bl_mob_is_unit(M->mob[k].kind))
+							dd = fminf(dd, hypotf(M->mob[k].x - b->x, M->mob[k].z - b->z));
 					if (!M->enabled || dd > DESPAWN_FAR || (bl_daylight(time_h) > 0.55f && dd > 16.0f && rf(&M->rng) < 0.5f * STEP))
 						mob_kill(b);
 				}
@@ -1216,9 +1272,9 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 				if (M->enabled && M->wave_on && M->keep_on) {              /* a wave: round the keep, whatever the player does */
 					M->spawn_t = 1.0f + 1.5f * rf(&M->rng);
 					if (M->wave_left > 0 && bl_daylight(time_h) < 0.55f && bl_mobs_count_kind(M, BL_MOB_GOBLIN) < M->wave_cap)
-						try_spawn_wave(M, w, &R);
-				} else if (M->enabled && pl_alive && bl_daylight(time_h) < 0.3f && bl_mobs_count_kind(M, BL_MOB_GOBLIN) < cap) {
-					try_spawn(M, w, pl, &R);
+						try_spawn_wave(M, w, pl, &R);
+				} else if (M->enabled && pl_alive && bl_daylight(time_h) < 0.3f) {
+					try_spawn(M, w, pl, cap, &R);
 				}
 			}
 		}

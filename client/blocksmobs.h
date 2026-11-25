@@ -34,6 +34,10 @@
 #define BL_GOBLIN_HIT 3.0f              /* hit points of the player's 20 that one blow takes */
 #define BL_GOBLIN_KEEP_HIT 2.0f         /* hit points one blow takes from the keep (the game gives it 60) */
 #define BL_GOBLIN_NEAR 8.0f             /* a goblin this near the player goes for him, not for the keep */
+#define BL_UNIT_NEAR 10.0f              /* a worker or a soldier this near a goblin is gone for before the keep or a player farther off ... */
+#define BL_UNIT_SEE 24.0f               /* ... and one this near when it is nearer than both of them */
+#define BL_UNIT_APART 30.0f             /* units this far from the player (in a wave: from the keep) have goblins come out of the ground round them, too */
+#define BL_RAID_CAP 3                   /* at night with no wave: how many may be out among such units, on top of the `cap` round the player */
 #define BL_GOBLIN_KEEP_SEE 48.0f        /* how far from the keep a goblin goes for it */
 
 #define BL_WORKER_H 1.56f               /* a worker is a box of the same width, a little shorter (the model is 1.1 times its boxes) */
@@ -183,7 +187,9 @@ int bl_mobs_wave_remaining(const struct bl_mobs *m);        /* goblins still to 
 void bl_mobs_clear_kind(struct bl_mobs *m, int kind);       /* only that kind (the player died: the goblins go, the workers stay) */
 
 /* One step of every mob. `player` = the feet of the player; `pl_alive` false = nobody to hunt. `time_h` is the hour of the day (blocksview.h): goblins appear
- * when `bl_daylight` is under 0.3 (14 to 26 blocks from the player, on the surface in the open), burn in the sun and thin out in the day. */
+ * when `bl_daylight` is under 0.3 (14 to 26 blocks from the player, on the surface in the open; when workers or soldiers are more than BL_UNIT_APART from him,
+ * up to BL_RAID_CAP more 10 to 20 blocks from those; in a wave every third comes to units that far from the keep), burn in the sun and thin out in the
+ * day. A goblin is dropped when it is far from the player, the keep and every unit. */
 void bl_mobs_step(struct bl_mobs *m, const struct bl_world *w, const float player[3], bool pl_alive, float time_h, float dt, struct bl_mobs_result *out);
 
 /* the goblin the ray hits first within `reach` (-1 = none, *t = the distance); a box a little bigger than the body, so that a blow does not miss by a hair. Workers are not hit. */

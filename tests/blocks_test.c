@@ -1350,6 +1350,17 @@ static bool box_in_solid(const struct bl_world *w, float x, float y, float z, fl
 	return false;
 }
 
+/* the same for a goblin, a worker or a soldier: leaves are no block to them */
+static bool mob_in_solid(const struct bl_world *w, float x, float y, float z, float hw, float h)
+{
+	for (int yy = (int)floorf(y + 1e-3f); yy <= (int)floorf(y + h - 1e-3f); yy++)
+		for (int zz = (int)floorf(z - hw + 1e-3f); zz <= (int)floorf(z + hw - 1e-3f); zz++)
+			for (int xx = (int)floorf(x - hw + 1e-3f); xx <= (int)floorf(x + hw - 1e-3f); xx++)
+				if (bl_solid_unit(bl_get(w, xx, yy, zz)))
+					return true;
+	return false;
+}
+
 static bool wet(const struct bl_world *w, float x, float y, float z)
 {
 	return bl_water(bl_get(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)));
@@ -2095,7 +2106,7 @@ static void test_mobs(void)
 			if (i % 40 == 0)
 				for (int k = 0; k < BL_MOBS_MAX; k++)
 					if (S.mob[k].alive) {
-						bad += box_in_solid(wt, S.mob[k].x, S.mob[k].y, S.mob[k].z, BL_GOBLIN_HW, BL_GOBLIN_H);
+						bad += mob_in_solid(wt, S.mob[k].x, S.mob[k].y, S.mob[k].z, BL_GOBLIN_HW, BL_GOBLIN_H);
 						nan += !isfinite(S.mob[k].x + S.mob[k].y + S.mob[k].z + S.mob[k].hp);
 					}
 			if (i % 1000 == 0) {                                        /* the world changes under them */
@@ -2549,7 +2560,7 @@ static void test_soldiers(void)
 	/* a goblin far from the post (past the leash) is left alone */
 	{
 		bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 50.5f);
-		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 66.5f);
+		bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 76.5f);                  /* (26 m: past what a goblin sees of a soldier, too) */
 		M.mob[1].wander_t = 1e9f;
 		M.mob[1].widle = true;
 		int slain = 0;
@@ -2558,7 +2569,7 @@ static void test_soldiers(void)
 			bl_mobs_step(&M, w, far_pl, false, dusk, 1.0f / 30.0f, &R);
 			slain += R.slain;
 		}
-		CHECK(slain == 0 && M.mob[1].alive && hypotf(M.mob[0].x - 50.5f, M.mob[0].z - 50.5f) < 1.5f, "a goblin 16 m away is not seen (the soldier stays at its post)");
+		CHECK(slain == 0 && M.mob[1].alive && hypotf(M.mob[0].x - 50.5f, M.mob[0].z - 50.5f) < 1.5f, "a goblin 26 m away is not seen (the soldier stays at its post)");
 	}
 	bl_mobs_clear(&M);
 
@@ -3472,9 +3483,74 @@ static void test_trees(void)
 	for (int i = 0; i < 30 * 10; i++)
 		bl_mobs_step(&M, w, far_pl, true, 12.0f, 1.0f / 30.0f, &R);
 	CHECK(M.mob[0].z > 65.5f && M.mob[0].y < 20.1f, "a worker goes through a hedge four high (z %.1f y %.1f)", M.mob[0].z, M.mob[0].y);
-	CHECK(bl_box_hits(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f) && bl_box_hits_foe(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f) && !bl_box_hits_unit(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f),
-	      "it stops the player and a goblin still");
-	CHECK(bl_mobs_add(&M, w, BL_MOB_SOLDIER, 20.5f, 20.0f, 60.5f) && !bl_mobs_add(&M, w, BL_MOB_GOBLIN, 30.5f, 20.0f, 60.5f), "a soldier may stand in leaves, a goblin does not appear there");
+	CHECK(bl_box_hits(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f) && !bl_box_hits_foe(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f) && !bl_box_hits_unit(w, 50.5f, 20.0f, 60.5f, 0.3f, 1.8f),
+	      "it stops the player still, not a goblin and not a unit");
+	/* and a goblin comes through it after a worker */
+	bl_mobs_clear(&M);
+	M.enabled = true;
+	M.cap = 1;
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f, 20.0f, 64.5f);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 56.5f);
+	int lost = 0;
+	for (int i = 0; i < 30 * 15 && !lost; i++) {
+		bl_mobs_step(&M, w, far_pl, true, 17.9f, 1.0f / 30.0f, &R);
+		lost += R.workers_lost;
+	}
+	CHECK(lost == 1, "a goblin gets through the hedge to a worker and kills it");
+	bl_world_free(w);
+}
+
+/* units that are away from the player (in a wave: from the keep) have goblins come out of the ground round them */
+static void test_raids(void)
+{
+	static struct bl_mobs M;
+	struct bl_world *w = bl_world_flat(256, 256, 64, 20);
+	float pl[3] = { 60.5f, 20.0f, 60.5f };
+	for (int wave = 0; wave < 2; wave++) {
+		bl_mobs_init(&M, 11);
+		M.cap = wave ? 12 : 2;                          /* (the two round the player stay: the ones for the unit are on top of them) */
+		if (wave) {
+			bl_mobs_set_keep(&M, true, 60.5f, 20.0f, 70.5f);
+			bl_mobs_start_wave(&M, 18, 12, 0);
+		}
+		bl_mobs_add(&M, w, BL_MOB_WORKER, 190.5f, 20.0f, 190.5f);          /* some 180 blocks from the player and the keep */
+		bool seen[BL_MOBS_MAX] = { false };
+		int near_unit = 0, near_home = 0, lost = 0;
+		for (int i = 0; i < 30 * 70; i++) {
+			struct bl_mobs_result R;
+			bl_mobs_step(&M, w, pl, false || !wave, 0.0f, 1.0f / 30.0f, &R);
+			lost += R.workers_lost;
+			for (int k = 0; k < BL_MOBS_MAX; k++) {
+				const struct bl_mob *m = &M.mob[k];
+				if (!m->alive || m->kind != BL_MOB_GOBLIN) {
+					seen[k] = false;
+					continue;
+				}
+				if (seen[k])
+					continue;
+				seen[k] = true;
+				if (hypotf(m->x - 190.5f, m->z - 190.5f) < 30.0f)
+					near_unit++;
+				else if (hypotf(m->x - 60.5f, m->z - (wave ? 70.5f : 60.5f)) < 34.0f)
+					near_home++;
+			}
+		}
+		CHECK(near_unit >= 1 && near_home >= 2 && lost == 1, "%s: goblins come out round a unit far away (%d) as well as at home (%d), and get it (%d)", wave ? "in a wave" : "at night", near_unit, near_home, lost);
+		if (wave)
+			CHECK(near_home > near_unit, "most of a wave comes for the keep (%d at the keep, %d at the unit)", near_home, near_unit);
+	}
+	/* no unit away from him: nobody else is raided, and a unit near the player changes nothing */
+	bl_mobs_init(&M, 11);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 80.5f, 20.0f, 60.5f);
+	M.mob[0].hp = 1e9f;
+	int far_born = 0;
+	for (int i = 0; i < 30 * 40; i++) {
+		bl_mobs_step(&M, w, pl, true, 0.0f, 1.0f / 30.0f, NULL);
+		for (int k = 1; k < BL_MOBS_MAX; k++)
+			if (M.mob[k].alive && M.mob[k].age < 0.04f && hypotf(M.mob[k].x - 60.5f, M.mob[k].z - 60.5f) < 13.9f)
+				far_born++;
+	}
+	CHECK(far_born == 0, "with the unit near him the goblins appear 14 blocks and more from the player, as before (%d nearer)", far_born);
 	bl_world_free(w);
 }
 
@@ -3647,9 +3723,28 @@ static void test_workers(void)
 			wl += R.workers_lost;
 		}
 		CHECK(pd >= 3.0f && wl == 0, "with the player within 8 blocks the goblin goes for him (%.0f to him, %d workers lost)", pd, wl);
-		/* a worker far from the goblin is not seen */
+		/* 20 blocks off: gone for when it is nearer than the player and the keep */
+		static const struct { float wx, gx, px, kx; bool taken; const char *what; } k_far[4] = {
+			{ 40.5f, 60.5f, 5.5f, 100.5f, true, "a worker 20 blocks off, nearer than the player and the keep, is gone for" },
+			{ 40.5f, 60.5f, 75.5f, 100.5f, false, "not when the player is nearer" },
+			{ 40.5f, 60.5f, 5.5f, 75.5f, false, "not when the keep is nearer" },
+			{ 30.5f, 60.5f, 120.5f, 120.5f, false, "30 blocks away it is not seen" },
+		};
+		for (int k = 0; k < 4; k++) {
+			bl_mobs_clear(&M);
+			bl_mobs_set_keep(&M, true, k_far[k].kx, 20.0f, 64.5f);
+			bl_mobs_add(&M, w2, BL_MOB_WORKER, k_far[k].wx, 20.0f, 64.5f);
+			bl_mobs_add(&M, w2, BL_MOB_GOBLIN, k_far[k].gx, 20.0f, 64.5f);
+			float pp[3] = { k_far[k].px, 20.0f, 64.5f };
+			float x0 = M.mob[1].x;
+			for (int i = 0; i < 30 * 2; i++)
+				bl_mobs_step(&M, w2, pp, true, 17.9f, 1.0f / 30.0f, NULL);
+			bool toward = x0 - M.mob[1].x > 3.0f;
+			CHECK(toward == k_far[k].taken, "%s (it went %.1f m towards the worker)", k_far[k].what, x0 - M.mob[1].x);
+		}
+		bl_mobs_set_keep(&M, true, 100.5f, 20.0f, 64.5f);
 		bl_mobs_clear(&M);
-		bl_mobs_add(&M, w2, BL_MOB_WORKER, 40.5f, 20.0f, 64.5f);
+		bl_mobs_add(&M, w2, BL_MOB_WORKER, 30.5f, 20.0f, 64.5f);
 		bl_mobs_add(&M, w2, BL_MOB_GOBLIN, 60.5f, 20.0f, 64.5f);
 		int wl2 = 0;
 		for (int i = 0; i < 30 * 4; i++) {
@@ -3657,7 +3752,7 @@ static void test_workers(void)
 			bl_mobs_step(&M, w2, far_pl, true, 0.0f, 1.0f / 30.0f, &R);
 			wl2 += R.workers_lost;
 		}
-		CHECK(wl2 == 0 && bl_mobs_count_kind(&M, BL_MOB_WORKER) == 1, "20 blocks away it is not seen");
+		CHECK(wl2 == 0 && bl_mobs_count_kind(&M, BL_MOB_WORKER) == 1, "30 blocks away it is left alone");
 		bl_world_free(w2);
 	}
 
@@ -3746,7 +3841,7 @@ static void test_workers(void)
 			if (i % 30 == 0)
 				for (int k = 0; k < BL_MOBS_MAX; k++)
 					if (S.mob[k].alive) {
-						bad += box_in_solid(wt, S.mob[k].x, S.mob[k].y, S.mob[k].z, BL_GOBLIN_HW, bl_mob_h(S.mob[k].kind));
+						bad += mob_in_solid(wt, S.mob[k].x, S.mob[k].y, S.mob[k].z, BL_GOBLIN_HW, bl_mob_h(S.mob[k].kind));
 						nan += !isfinite(S.mob[k].x + S.mob[k].y + S.mob[k].z + S.mob[k].hp);
 					}
 		}
@@ -4090,6 +4185,7 @@ int main(int argc, char **argv)
 	printf("workers\n");
 	test_trees();
 	test_workers();
+	test_raids();
 	test_soldiers();
 	test_brutes();
 	printf("building\n");

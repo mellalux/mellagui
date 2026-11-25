@@ -54,8 +54,8 @@ static inline bool bl_water(int b)        { return b == BL_WATER || (b >= BL_FLO
 static inline int  bl_water_level(int b)  { return b == BL_WATER ? 0 : b - BL_FLOW1 + 1; }                /* 0 for a source, 1 .. 7 for flowing water (b must be water) */
 static inline bool bl_solid(int b)        { return b != BL_AIR && !bl_water(b) && b != BL_TORCH && b != BL_GATE; }   /* stops the player */
 static inline bool bl_opaque(int b)       { return b != BL_AIR && !bl_water(b) && b != BL_GLASS && b != BL_TORCH && b != BL_GATE; }   /* stops light and sight */
-static inline bool bl_solid_foe(int b)    { return bl_solid(b) || b == BL_GATE; }                           /* stops a goblin */
 static inline bool bl_solid_unit(int b)   { return bl_solid(b) && b != BL_LEAVES; }                         /* stops a worker or a soldier: they push through leaves */
+static inline bool bl_solid_foe(int b)    { return bl_solid_unit(b) || b == BL_GATE; }                      /* stops a goblin: it pushes through leaves, too */
 static inline bool bl_targetable(int b)   { return b != BL_AIR && !bl_water(b); }                           /* can be aimed at and broken */
 static inline bool bl_blocks_light(int b) { return bl_opaque(b) && b != BL_LEAVES; }                       /* shades the cells below it from the sky (leaves let most light through) */
 static inline int  bl_emission(int b)     { return b == BL_LAMP ? 15 : b == BL_TORCH ? 14 : 0; }            /* the light a block gives (0 .. 15) */
@@ -196,10 +196,10 @@ bool bl_place(struct bl_world *w, const struct bl_hit *h, int block, const struc
 
 /* does the box (hw half width, h height, feet at (x, y, z)) touch a solid block? */
 bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h);
-/* the same for a goblin: a gate stops it, too */
+/* the same for a goblin: a gate stops it, too, and leaves do not */
 bool bl_box_hits_foe(const struct bl_world *w, float x, float y, float z, float hw, float h);
 bool bl_box_move_foe(const struct bl_world *w, float *x, float *y, float *z, int axis, float d, float hw, float h);
-/* the same for the player's workers and soldiers: leaves do not stop them, nor do they stand on them */
+/* the same for the player's workers and soldiers: neither leaves nor a gate stops them, and they do not stand on leaves */
 bool bl_box_hits_unit(const struct bl_world *w, float x, float y, float z, float hw, float h);
 bool bl_box_move_unit(const struct bl_world *w, float *x, float *y, float *z, int axis, float d, float hw, float h);
 float bl_box_support_unit(const struct bl_world *w, float x, float y, float z, float hw, float down);

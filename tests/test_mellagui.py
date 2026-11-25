@@ -20050,7 +20050,12 @@ class TestBlocks(Base):
         x, y = self.win['x'] + int(st['stock']['x']), self.win['y'] + int(st['stock']['y'])
         self.assertEqual(pic.px(x + 4, y + 20), (43, 48, 59), 'the panel is there, in the colour of the bars')
         self.tap('g')                                           # (a key of the game, not of the view: creative)
-        self.wait(lambda s: s['game']['survival'] == '0' and 'stock' not in s)
+        st = self.wait(lambda s: s['game']['survival'] == '0')
+        self.assertEqual(st['stock']['list'], 'cobble:7,sand:3', 'in creative: what has been gathered')
+
+    def test_creative_with_nothing_gathered_has_no_list(self):
+        self.start()
+        self.assertNotIn('stock', self.state())
 
     def test_a_slow_click_breaks_or_puts_one_block_only(self):
         self.start('--pitch', '-45')

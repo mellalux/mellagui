@@ -138,7 +138,7 @@ int bl_mobs_wave_remaining(const struct bl_mobs *m)
 static int place_mob_i(struct bl_mobs *M, const struct bl_world *w, int kind, bool brute, float x, float y, float z)
 {
 	if ((kind != BL_MOB_GOBLIN && kind != BL_MOB_WORKER && kind != BL_MOB_SOLDIER) || (brute && kind != BL_MOB_GOBLIN) || !bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) ||
-	    bl_box_hits(w, x, y, z, BL_GOBLIN_HW, brute ? BL_BRUTE_H : bl_mob_h(kind)))
+	    (kind == BL_MOB_GOBLIN ? bl_box_hits_foe : bl_box_hits)(w, x, y, z, BL_GOBLIN_HW, brute ? BL_BRUTE_H : bl_mob_h(kind)))
 		return -1;
 	if (kind == BL_MOB_WORKER && bl_mobs_count_kind(M, BL_MOB_WORKER) >= BL_WORKER_MAX)
 		return -1;
@@ -240,6 +240,17 @@ static void try_spawn_wave(struct bl_mobs *M, const struct bl_world *w, struct b
 	}
 }
 
+/* a goblin is stopped by a gate, the player's units are not */
+static bool mob_hits(const struct bl_world *w, const struct bl_mob *b, float x, float y, float z, float hw, float h)
+{
+	return b->kind == BL_MOB_GOBLIN ? bl_box_hits_foe(w, x, y, z, hw, h) : bl_box_hits(w, x, y, z, hw, h);
+}
+
+static bool mob_move(const struct bl_world *w, struct bl_mob *b, int axis, float d, float h)
+{
+	return b->kind == BL_MOB_GOBLIN ? bl_box_move_foe(w, &b->x, &b->y, &b->z, axis, d, BL_GOBLIN_HW, h) : bl_box_move(w, &b->x, &b->y, &b->z, axis, d, BL_GOBLIN_HW, h);
+}
+
 static void mob_kill(struct bl_mob *b)
 {
 	b->alive = false;
@@ -301,6 +312,7 @@ bool bl_mobs_order_gather(struct bl_mobs *m, const struct bl_world *w, int i, in
 	if (!stand_spot(w, bx, by, bz, b->x, b->z, spot))
 		return false;
 	b->order = BL_ORDER_GATHER;
+	b->at_site = false;
 	b->best_d = 1e9f;
 	b->gx = bx;
 	b->gy = by;
@@ -320,12 +332,14 @@ void bl_mobs_order_move(struct bl_mobs *m, int i, float x, float z)
 		return;
 	struct bl_mob *b = &m->mob[i];
 	if (b->kind == BL_MOB_SOLDIER) {                    /* a soldier's post */
+		b->order = BL_ORDER_IDLE;                           /* (one on a watchtower comes down: mob_step) */
 		b->tx = x;
 		b->tz = z;
 		b->stuck = 0.0f;
 		return;
 	}
 	b->order = BL_ORDER_MOVE;
+	b->at_site = false;
 	b->best_d = 1e9f;
 	b->tx = x;
 	b->tz = z;
@@ -342,6 +356,354 @@ void bl_mobs_order_stop(struct bl_mobs *m, int i)
 	if (m->mob[i].kind == BL_MOB_SOLDIER) {             /* it stands where it is */
 		m->mob[i].tx = m->mob[i].x;
 		m->mob[i].tz = m->mob[i].z;
+	}
+}
+
+/* ---- building ------------------------------------------------------------------------------------------------------------ */
+
+#define BUILD_NEAR 3.5f                 /* a worker that cannot get to its spot builds from this near the building */
+#define BUILD_SEARCH 48.0f              /* how far a worker looks for the next building */
+
+int bl_mobs_count_sites(const struct bl_mobs *m)
+{
+	int n = 0;
+	for (int i = 0; i < BL_SITES_MAX; i++)
+		n += m->site[i].on;
+	return n;
+}
+
+int bl_mobs_add_site(struct bl_mobs *m, const struct bl_site *s)
+{
+	if (s->n <= 0 || s->n > BL_SITE_CELLS)
+		return -1;
+	for (int i = 0; i < BL_SITES_MAX; i++)
+		if (!m->site[i].on) {
+			m->site[i] = *s;
+			m->site[i].on = true;
+			for (int k = 0; k < BL_MOBS_MAX; k++)          /* (one that was on the site that was here looks again) */
+				if (m->mob[k].order == BL_ORDER_BUILD && m->mob[k].site == i)
+					m->mob[k].site = -1;
+			return i;
+		}
+	return -1;
+}
+
+void bl_mobs_remove_site(struct bl_mobs *m, int site)
+{
+	if (site < 0 || site >= BL_SITES_MAX)
+		return;
+	m->site[site].on = false;
+	for (int k = 0; k < BL_MOBS_MAX; k++)
+		if (m->mob[k].order == BL_ORDER_BUILD && m->mob[k].site == site) {
+			m->mob[k].order = BL_ORDER_IDLE;
+			m->mob[k].work = 0.0f;
+		}
+}
+
+/* how far a point is, along the ground, from the box round a site */
+static float site_dist(const struct bl_site *s, float x, float z)
+{
+	int lo[3], hi[3];
+	bl_site_box(s, lo, hi);
+	float dx = fmaxf(fmaxf((float)lo[0] - x, x - (float)(hi[0] + 1)), 0.0f), dz = fmaxf(fmaxf((float)lo[2] - z, z - (float)(hi[2] + 1)), 0.0f);
+	return hypotf(dx, dz);
+}
+
+/* a place to stand beside a site: the free one nearest the worker in the two rings round it that no other builder is going to */
+static bool site_spot(const struct bl_mobs *M, const struct bl_world *w, const struct bl_site *s, const struct bl_mob *b, float out[2])
+{
+	int lo[3], hi[3];
+	bl_site_box(s, lo, hi);
+	float best = 1e9f;
+	bool found = false;
+	for (int r = 1; r <= 2; r++)
+		for (int z = lo[2] - r; z <= hi[2] + r; z++)
+			for (int x = lo[0] - r; x <= hi[0] + r; x++) {
+				if (x != lo[0] - r && x != hi[0] + r && z != lo[2] - r && z != hi[2] + r)
+					continue;
+				float cx = (float)x + 0.5f, cz = (float)z + 0.5f;
+				float sy = bl_box_support(w, cx, (float)lo[1] + 2.0f, cz, 0.0f, 5.0f);
+				if (sy < -1e8f || fabsf(sy - (float)lo[1]) > 2.1f)
+					continue;
+				if (bl_box_hits(w, cx, sy + 0.002f, cz, BL_GOBLIN_HW, BL_WORKER_H) || bl_water(bl_get(w, x, (int)floorf(sy), z)))
+					continue;
+				bool taken = false;
+				for (int k = 0; k < BL_MOBS_MAX && !taken; k++) {
+					const struct bl_mob *o = &M->mob[k];
+					taken = o != b && o->alive && o->order == BL_ORDER_BUILD && hypotf(o->tx - cx, o->tz - cz) < 0.8f;
+				}
+				float d = hypotf(cx - b->x, cz - b->z) + 1.5f * (float)(r - 1) + (taken ? 100.0f : 0.0f);
+				if (d < best) {
+					best = d;
+					found = true;
+					out[0] = cx;
+					out[1] = cz;
+				}
+			}
+	return found;
+}
+
+bool bl_mobs_order_build(struct bl_mobs *m, const struct bl_world *w, int i, int site)
+{
+	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_WORKER || site < 0 || site >= BL_SITES_MAX || !m->site[site].on)
+		return false;
+	struct bl_mob *b = &m->mob[i];
+	float spot[2];
+	if (!site_spot(m, w, &m->site[site], b, spot))
+		return false;
+	b->order = BL_ORDER_BUILD;
+	b->site = site;
+	b->at_site = false;
+	b->tx = spot[0];
+	b->tz = spot[1];
+	b->work = 0.0f;
+	b->wait = 0.0f;
+	b->stuck = 0.0f;
+	b->best_d = 1e9f;
+	return true;
+}
+
+bool bl_mobs_order_tower(struct bl_mobs *m, const struct bl_world *w, int i, int x, int y, int z)
+{
+	if (i < 0 || i >= BL_MOBS_MAX || !m->mob[i].alive || m->mob[i].kind != BL_MOB_SOLDIER || bl_get(w, x, y, z) != BL_TOWERPOST)
+		return false;
+	struct bl_mob *b = &m->mob[i];
+	if (b->order == BL_ORDER_TOWER && b->gx == x && b->gy == y && b->gz == z)
+		return true;
+	if (bl_box_hits(w, (float)x + 0.5f, (float)y + 1.002f, (float)z + 0.5f, BL_GOBLIN_HW, BL_SOLDIER_H))
+		return false;
+	for (int k = 0; k < BL_MOBS_MAX; k++) {
+		const struct bl_mob *o = &m->mob[k];
+		if (k != i && o->alive && o->order == BL_ORDER_TOWER && o->gx == x && o->gy == y && o->gz == z)
+			return false;
+	}
+	b->order = BL_ORDER_TOWER;
+	b->gx = x;
+	b->gy = y;
+	b->gz = z;
+	b->tx = (float)x + 0.5f;
+	b->tz = (float)z + 0.5f;
+	b->stuck = 0.0f;
+	b->best_d = 1e9f;
+	return true;                    /* (one that stands on another tower comes down first: mob_step) */
+}
+
+/* is there somebody in the cell (a block is not put into a body)? */
+static bool cell_busy(const struct bl_mobs *M, const float pl[3], bool pl_alive, const struct bl_cell *c)
+{
+	if (pl_alive && pl[0] + 0.3f > (float)c->x && pl[0] - 0.3f < (float)c->x + 1.0f && pl[2] + 0.3f > (float)c->z && pl[2] - 0.3f < (float)c->z + 1.0f &&
+	    pl[1] + 1.8f > (float)c->y && pl[1] < (float)c->y + 1.0f)
+		return true;
+	return bl_mobs_hit_cell(M, c->x, c->y, c->z);
+}
+
+static float build_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_world *w, const float pl[3], bool pl_alive, struct bl_mobs_result *R, float *want)
+{
+	const float dt = STEP;
+	if (b->site < 0 || b->site >= BL_SITES_MAX || !M->site[b->site].on || bl_site_missing(w, &M->site[b->site]) == 0) {
+		int best = -1;                                          /* that one is done: the nearest other one */
+		float bd = BUILD_SEARCH;
+		for (int k = 0; k < BL_SITES_MAX; k++)
+			if (M->site[k].on && bl_site_missing(w, &M->site[k]) > 0) {
+				float d = site_dist(&M->site[k], b->x, b->z);
+				if (d < bd) {
+					bd = d;
+					best = k;
+				}
+			}
+		if (best < 0 || !bl_mobs_order_build(M, w, (int)(b - M->mob), best)) {
+			b->order = BL_ORDER_IDLE;
+			b->work = 0.0f;
+			return 0.0f;
+		}
+	}
+	const struct bl_site *s = &M->site[b->site];
+	float dx = b->tx - b->x, dz = b->tz - b->z, d = hypotf(dx, dz);
+	if (!b->at_site && (d <= 0.5f || (b->stuck > 1.0f && site_dist(s, b->x, b->z) < BUILD_NEAR)))
+		b->at_site = true;
+	if (!b->at_site) {
+		*want = atan2f(dx, dz);
+		return clampf(3.0f * (d - 0.3f), 0.0f, BL_WORKER_SPEED);
+	}
+	int lo[3], hi[3];
+	bl_site_box(s, lo, hi);
+	*want = atan2f(0.5f * (float)(lo[0] + hi[0] + 1) - b->x, 0.5f * (float)(lo[2] + hi[2] + 1) - b->z);
+	b->work += dt;
+	if (fmodf(b->work, 0.55f) < dt)
+		b->swing = 1.0f;
+	if (b->work < BL_BUILD_TIME || R->nplace >= (int)(sizeof R->place / sizeof R->place[0]))
+		return 0.0f;
+	int pick = -1;
+	float pd = 1e9f;
+	bool in_my_way = false;
+	for (int k = 0; k < s->n; k++) {
+		const struct bl_cell *c = &s->c[k];
+		if (!bl_cell_missing(w, c))
+			continue;
+		bool placed = false;                                    /* (another worker has just put it) */
+		for (int j = 0; j < R->nplace && !placed; j++)
+			placed = R->place[j].x == c->x && R->place[j].y == c->y && R->place[j].z == c->z;
+		if (placed)
+			continue;
+		if (cell_busy(M, pl, pl_alive, c)) {
+			in_my_way |= b->x + BL_GOBLIN_HW > (float)c->x && b->x - BL_GOBLIN_HW < (float)c->x + 1.0f && b->z + BL_GOBLIN_HW > (float)c->z && b->z - BL_GOBLIN_HW < (float)c->z + 1.0f;
+			continue;
+		}
+		float score = (float)c->y * 1000.0f + hypotf((float)c->x + 0.5f - b->x, (float)c->z + 0.5f - b->z);
+		if (score < pd) {
+			pd = score;
+			pick = k;
+		}
+	}
+	if (pick >= 0) {
+		R->place[R->nplace++] = s->c[pick];
+		b->work = 0.001f;                                       /* (more than nothing: it is at work, not stuck) */
+	} else if (in_my_way) {                                     /* it stands where a block goes: out to its spot again */
+		b->at_site = false;
+		b->work = 0.0f;
+		float spot[2];
+		if (site_spot(M, w, s, b, spot)) {
+			b->tx = spot[0];
+			b->tz = spot[1];
+			b->best_d = 1e9f;
+		}
+	} else {
+		b->work = 0.001f;                                       /* somebody stands there: it waits */
+	}
+	return 0.0f;
+}
+
+/* ---- the watchtower ------------------------------------------------------------------------------------------------------ */
+
+/* off the post: onto the ground beside the tower (or it just falls when there is no room) */
+static void climb_down(const struct bl_world *w, struct bl_mob *b)
+{
+	const float cx = (float)b->gx + 0.5f, cz = (float)b->gz + 0.5f;
+	b->posted = false;
+	for (int r = 2; r <= 4; r++)
+		for (int k = 0; k < 8; k++) {
+			float ang = (float)k * 0.785398f, x = cx + sinf(ang) * (float)r, z = cz + cosf(ang) * (float)r;
+			float sy = bl_box_support(w, x, (float)b->gy - 2.0f, z, 0.0f, 10.0f);
+			if (sy < -1e8f || bl_box_hits(w, x, sy + 0.002f, z, BL_GOBLIN_HW, BL_SOLDIER_H))
+				continue;
+			if (hypotf(b->tx - cx, b->tz - cz) < 0.1f) {        /* (it has no other place to go to: it stays where it comes down) */
+				b->tx = x;
+				b->tz = z;
+			}
+			b->x = x;
+			b->y = sy + 0.002f;
+			b->z = z;
+			b->vy = 0.0f;
+			return;
+		}
+}
+
+/* a soldier on a watchtower: the nearest goblin it can see gets an arrow */
+static void archer(struct bl_mobs *M, const struct bl_world *w, struct bl_mob *b, struct bl_mobs_result *R)
+{
+	int best = -1;
+	float bd = BL_BOW_RANGE, from[3] = { 0 }, to[3] = { 0 };
+	for (int k = 0; k < BL_MOBS_MAX; k++) {
+		const struct bl_mob *o = &M->mob[k];
+		if (!o->alive || o->kind != BL_MOB_GOBLIN)
+			continue;
+		float ex = o->x - b->x, ez = o->z - b->z, e = hypotf(ex, ez);
+		if (e >= bd)
+			continue;
+		/* from the edge of the platform towards it, at the eyes */
+		float out = e > 1.6f ? 1.6f : 0.0f, inv = e > 0.01f ? 1.0f / e : 0.0f;
+		float a[3] = { b->x + ex * inv * out, b->y + 1.5f, b->z + ez * inv * out };
+		float t[3] = { o->x, o->y + 1.0f, o->z };
+		float dir[3] = { t[0] - a[0], t[1] - a[1], t[2] - a[2] };
+		float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+		struct bl_hit h;
+		if (len > 0.6f && bl_pick(w, a, dir, len - 0.4f, &h))
+			continue;
+		bd = e;
+		best = k;
+		memcpy(from, a, sizeof from);
+		memcpy(to, t, sizeof to);
+	}
+	b->speed = 0.0f;
+	if (best < 0)
+		return;
+	struct bl_mob *o = &M->mob[best];
+	b->yaw = atan2f(o->x - b->x, o->z - b->z);
+	b->ycos = cosf(b->yaw);
+	b->ysin = sinf(b->yaw);
+	if (b->attack_cd > 0.0f)
+		return;
+	b->attack_cd = BL_BOW_COOLDOWN;
+	b->swing = 1.0f;
+	R->shots++;
+	int ai = 0;
+	for (int k = 1; k < BL_ARROWS_MAX; k++)
+		if (M->arrow[k].t < M->arrow[ai].t)
+			ai = k;
+	M->arrow[ai].t = BL_ARROW_TIME;
+	memcpy(M->arrow[ai].a, from, sizeof from);
+	memcpy(M->arrow[ai].b, to, sizeof to);
+	o->hp -= BL_BOW_DAMAGE;
+	o->hurt = 0.35f;
+	if (o->hp <= 0.0f) {
+		o->alive = false;
+		M->kills++;
+		R->slain++;
+	}
+}
+
+/* ---- the goblins and what is in their way ------------------------------------------------------------------------------ */
+
+/* The made block that stops a goblin walking towards `dir` (a yaw): something above one block high in front of it (what is one high it climbs). */
+static bool siege_cell(const struct bl_world *w, const struct bl_mob *b, float dir, float H, int out[3])
+{
+	float px = b->x + sinf(dir) * 0.55f, pz = b->z + cosf(dir) * 0.55f;
+	if (!bl_box_hits_foe(w, px, b->y + 1.05f, pz, 0.25f, H))
+		return false;
+	const int x0 = (int)floorf(b->x), z0 = (int)floorf(b->z), feet = (int)floorf(b->y + 0.05f);
+	/* the columns the probe touches, the one straight ahead first; from one up to the head, then the feet */
+	const int cx[3] = { (int)floorf(px), (int)floorf(px + (sinf(dir) > 0 ? 0.25f : -0.25f)), (int)floorf(px) };
+	const int cz[3] = { (int)floorf(pz), (int)floorf(pz), (int)floorf(pz + (cosf(dir) > 0 ? 0.25f : -0.25f)) };
+	const int top = (int)floorf(b->y + 1.05f + H - 0.01f);
+	for (int pass = 0; pass < 2; pass++)
+		for (int i = 0; i < 3; i++) {
+			if (cx[i] == x0 && cz[i] == z0)
+				continue;
+			for (int y = pass ? feet : feet + 1; y <= (pass ? feet : top); y++) {
+				int blk = bl_get(w, cx[i], y, cz[i]);
+				if (bl_solid_foe(blk) && bl_siege_hp(blk) > 0) {
+					out[0] = cx[i];
+					out[1] = y;
+					out[2] = cz[i];
+					return true;
+				}
+			}
+		}
+	return false;
+}
+
+static void damage_block(struct bl_mobs *M, const struct bl_world *w, const int c[3], float dmg, struct bl_mobs_result *R)
+{
+	int e = -1, spare = 0;
+	for (int i = 0; i < BL_DAMAGED_MAX; i++) {
+		const struct bl_damaged *d = &M->damaged[i];
+		if (d->dmg > 0.0f && d->x == c[0] && d->y == c[1] && d->z == c[2]) {
+			e = i;
+			break;
+		}
+		if (M->damaged[spare].dmg > 0.0f && (d->dmg <= 0.0f || d->age > M->damaged[spare].age))
+			spare = i;
+	}
+	if (e < 0) {
+		e = spare;
+		M->damaged[e] = (struct bl_damaged){ c[0], c[1], c[2], 0.0f, 0.0f };
+	}
+	M->damaged[e].dmg += dmg;
+	M->damaged[e].age = 0.0f;
+	R->siege_hits++;
+	if (M->damaged[e].dmg >= (float)bl_siege_hp(bl_get(w, c[0], c[1], c[2])) && R->nsmash < (int)(sizeof R->smash / sizeof R->smash[0])) {
+		R->smash[R->nsmash++] = (struct bl_break){ c[0], c[1], c[2] };
+		M->damaged[e].dmg = 0.0f;
 	}
 }
 
@@ -373,7 +735,7 @@ static bool next_block(const struct bl_world *w, const struct bl_mob *b, int *ox
 }
 
 /* what a worker does with the time: nothing, walks to a point, or works on a block. Fills in where it wants to go and how fast; returns the speed it asks for. */
-static float worker_think(struct bl_mob *b, const struct bl_world *w, struct bl_mobs_result *R, float *want)
+static float worker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_world *w, const float pl[3], bool pl_alive, struct bl_mobs_result *R, float *want)
 {
 	const float dt = STEP;
 	if (b->order == BL_ORDER_MOVE) {
@@ -385,6 +747,8 @@ static float worker_think(struct bl_mob *b, const struct bl_world *w, struct bl_
 		*want = atan2f(dx, dz);
 		return clampf(3.0f * (d - 0.3f), 0.0f, BL_WORKER_SPEED);
 	}
+	if (b->order == BL_ORDER_BUILD)
+		return build_think(M, b, w, pl, pl_alive, R, want);
 	if (b->order != BL_ORDER_GATHER)
 		return 0.0f;
 	b->wait = fmaxf(0.0f, b->wait - dt);
@@ -440,8 +804,26 @@ static float worker_think(struct bl_mob *b, const struct bl_world *w, struct bl_
 /* ---- one step --------------------------------------------------------------------------------------------------------- */
 
 /* a soldier: it goes after the nearest goblin that is near it and near its post, hits it when it is there, and otherwise goes back to its post and stands */
-static float soldier_think(struct bl_mobs *M, struct bl_mob *b, struct bl_mobs_result *R, float *want)
+static float soldier_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_world *w, struct bl_mobs_result *R, float *want)
 {
+	if (b->order == BL_ORDER_TOWER) {                           /* to the foot of the tower, then up */
+		if (bl_get(w, b->gx, b->gy, b->gz) != BL_TOWERPOST) {
+			b->order = BL_ORDER_IDLE;
+		} else {
+			float dx = (float)b->gx + 0.5f - b->x, dz = (float)b->gz + 0.5f - b->z, d = hypotf(dx, dz);
+			if (d < 2.4f) {
+				b->posted = true;
+				b->x = (float)b->gx + 0.5f;
+				b->y = (float)b->gy + 1.002f;
+				b->z = (float)b->gz + 0.5f;
+				b->vy = b->kx = b->kz = b->speed = b->blocked = b->stuck = 0.0f;
+				b->ground = true;
+				return 0.0f;
+			}
+			*want = atan2f(dx, dz);
+			return BL_SOLDIER_SPEED;
+		}
+	}
 	int gi = -1;
 	float gd = 1e9f, gdx = 0.0f, gdz = 0.0f;
 	for (int k = 0; k < BL_MOBS_MAX; k++) {
@@ -500,10 +882,31 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	b->swing = fmaxf(0.0f, b->swing - dt * 2.5f);
 	b->jump_cd = fmaxf(0.0f, b->jump_cd - dt);
 
-	if (bl_box_hits(w, b->x, b->y, b->z, BL_GOBLIN_HW, H)) {                    /* inside a block (one was made round it): up through it, or it is gone */
+	if (b->posted) {
+		if (b->order == BL_ORDER_TOWER && bl_get(w, b->gx, b->gy, b->gz) == BL_TOWERPOST && hypotf((float)b->gx + 0.5f - b->x, (float)b->gz + 0.5f - b->z) < 0.1f) {
+			archer(M, w, b, R);
+			return;
+		}
+		int gx = b->gx, gy = b->gy, gz = b->gz;
+		if (b->order == BL_ORDER_TOWER) {                       /* (sent to another tower: down from this one first) */
+			b->gx = (int)floorf(b->x);
+			b->gy = (int)floorf(b->y) - 1;
+			b->gz = (int)floorf(b->z);
+		}
+		climb_down(w, b);
+		if (b->order == BL_ORDER_TOWER) {
+			b->gx = gx;
+			b->gy = gy;
+			b->gz = gz;
+		} else {
+			b->order = BL_ORDER_IDLE;
+		}
+	}
+
+	if (mob_hits(w, b, b->x, b->y, b->z, BL_GOBLIN_HW, H)) {                    /* inside a block (one was made round it): up through it, or it is gone */
 		bool free = false;
 		for (int i = 1; i <= 8 && !free; i++)
-			if (!bl_box_hits(w, b->x, b->y + 0.25f * (float)i, b->z, BL_GOBLIN_HW, H)) {
+			if (!mob_hits(w, b, b->x, b->y + 0.25f * (float)i, b->z, BL_GOBLIN_HW, H)) {
 				b->y += 0.25f * (float)i;
 				free = true;
 			}
@@ -522,14 +925,14 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	else
 		b->vy = fmaxf(b->vy - GRAV * dt, -40.0f);
 	float vy0 = b->vy;
-	bool hit = bl_box_move(w, &b->x, &b->y, &b->z, 1, b->vy * dt, BL_GOBLIN_HW, H);
+	bool hit = mob_move(w, b, 1, b->vy * dt, H);
 	if (hit) {
 		b->ground = vy0 < 0;
 		b->vy = 0;
 	} else {
 		b->ground = false;
 	}
-	if (!hit && b->vy <= 0 && bl_box_hits(w, b->x, b->y - 0.02f, b->z, BL_GOBLIN_HW, H))
+	if (!hit && b->vy <= 0 && mob_hits(w, b, b->x, b->y - 0.02f, b->z, BL_GOBLIN_HW, H))
 		b->ground = true;
 
 	/* what it wants */
@@ -556,7 +959,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		if (!near_pl)                                                           /* a worker in sight: the nearest */
 			for (int k = 0; k < BL_MOBS_MAX; k++) {
 				const struct bl_mob *o = &M->mob[k];
-				if (!o->alive || !bl_mob_is_unit(o->kind) || fabsf(o->y - b->y) > 6.0f)
+				if (!o->alive || !bl_mob_is_unit(o->kind) || o->posted || fabsf(o->y - b->y) > 6.0f)
 					continue;
 				float ex = o->x - b->x, ez = o->z - b->z, e = hypotf(ex, ez);
 				if (e < WORKER_SEE && e < wd) {
@@ -589,9 +992,34 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 			vmax = b->widle ? 0.0f : WANDER_SPEED;
 		}
 	} else if (b->kind == BL_MOB_SOLDIER) {
-		vmax = soldier_think(M, b, R, &want);
+		vmax = soldier_think(M, b, w, R, &want);
+		if (b->posted)
+			return;
 	} else {
-		vmax = worker_think(b, w, R, &want);
+		vmax = worker_think(M, b, w, pl, pl_alive, R, &want);
+	}
+	b->sieging = false;
+	if (goblin && (to_worker || to_keep || chase) && (to_worker ? wd : to_keep ? dk : d) > (to_keep ? 1.6f : reach)) {
+		int c[3];
+		bool found = siege_cell(w, b, want, H, c);
+		for (int k = 0; k < 4 && !found && b->blocked > 0.1f; k++) {        /* slid along it: the side of the world's axes that leads towards the target */
+			float ax = (float)k * 1.5707963f;
+			if (cosf(ax - want) > 0.3f && siege_cell(w, b, ax, H, c)) {
+				found = true;
+				want = ax;
+			}
+		}
+		if (found) {
+			b->sieging = true;
+			vmax = 0.0f;
+			b->blocked = 0.0f;
+			want = atan2f((float)c[0] + 0.5f - b->x, (float)c[2] + 0.5f - b->z);
+			if (b->attack_cd <= 0.0f) {
+				b->attack_cd = cool;
+				b->swing = 1.0f;
+				damage_block(M, w, c, hit_p, R);
+			}
+		}
 	}
 	float da = angdiff(want, b->yaw);
 	if (b->blocked > 0.1f) {                                                    /* something in the way: turn to one side until it is clear */
@@ -628,11 +1056,11 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	b->kx *= kd;
 	b->kz *= kd;
 	float ox = b->x, oz = b->z;
-	bool bx = bl_box_move(w, &b->x, &b->y, &b->z, 0, sx, BL_GOBLIN_HW, H);
-	bool bz = bl_box_move(w, &b->x, &b->y, &b->z, 2, sz, BL_GOBLIN_HW, H);
+	bool bx = mob_move(w, b, 0, sx, H);
+	bool bz = mob_move(w, b, 2, sz, H);
 	if ((bx || bz) && b->ground && b->jump_cd <= 0.0f && b->speed > 0.1f) {    /* a block one high in the way is climbed, two high is a wall */
 		float nx = b->x + b->ysin * 0.4f, nz = b->z + b->ycos * 0.4f;
-		if (bl_box_hits(w, nx, b->y, nz, BL_GOBLIN_HW, H) && !bl_box_hits(w, nx, b->y + 1.05f, nz, BL_GOBLIN_HW, H) && !bl_box_hits(w, b->x, b->y + 1.05f, b->z, BL_GOBLIN_HW, H)) {
+		if (mob_hits(w, b, nx, b->y, nz, BL_GOBLIN_HW, H) && !mob_hits(w, b, nx, b->y + 1.05f, nz, BL_GOBLIN_HW, H) && !mob_hits(w, b, b->x, b->y + 1.05f, b->z, BL_GOBLIN_HW, H)) {
 			b->vy = 8.4f;
 			b->ground = false;
 			b->jump_cd = 0.5f;
@@ -705,8 +1133,20 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 	struct bl_mobs_result R = { 0 };
 	if (dt > 0.0f && isfinite(dt)) {
 		M->acc += dt > 0.25f ? 0.25f : dt;
+		for (int i = 0; i < BL_SITES_MAX; i++)                  /* the buildings that are done */
+			if (M->site[i].on && bl_site_missing(w, &M->site[i]) == 0) {
+				M->site[i].on = false;
+				R.built[R.nbuilt++] = M->site[i].plan;
+			}
 		while (M->acc >= STEP) {
 			M->acc -= STEP;
+			for (int i = 0; i < BL_ARROWS_MAX; i++)
+				M->arrow[i].t = fmaxf(0.0f, M->arrow[i].t - STEP);
+			for (int i = 0; i < BL_DAMAGED_MAX; i++) {          /* a block that has been left alone for half a minute is whole again */
+				M->damaged[i].age += STEP;
+				if (M->damaged[i].age > 30.0f)
+					M->damaged[i].dmg = 0.0f;
+			}
 			for (int i = 0; i < BL_MOBS_MAX; i++)
 				if (M->mob[i].alive) {
 					struct bl_mob *b = &M->mob[i];
@@ -726,16 +1166,16 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 			for (int i = 0; i < BL_MOBS_MAX; i++)
 				for (int j = i + 1; j < BL_MOBS_MAX; j++) {
 					struct bl_mob *p = &M->mob[i], *q = &M->mob[j];
-					if (!p->alive || !q->alive)
+					if (!p->alive || !q->alive || p->posted || q->posted)
 						continue;
 					float ex = q->x - p->x, ez = q->z - p->z, e = hypotf(ex, ez);
 					if (e >= 0.55f || fabsf(p->y - q->y) > 1.2f)
 						continue;
 					float push = (0.55f - e) * 0.5f, nx = e > 0.001f ? ex / e : 1.0f, nz = e > 0.001f ? ez / e : 0.0f;
-					bl_box_move(w, &p->x, &p->y, &p->z, 0, -nx * push, BL_GOBLIN_HW, bl_mob_height(p));
-					bl_box_move(w, &p->x, &p->y, &p->z, 2, -nz * push, BL_GOBLIN_HW, bl_mob_height(p));
-					bl_box_move(w, &q->x, &q->y, &q->z, 0, nx * push, BL_GOBLIN_HW, bl_mob_height(q));
-					bl_box_move(w, &q->x, &q->y, &q->z, 2, nz * push, BL_GOBLIN_HW, bl_mob_height(q));
+					mob_move(w, p, 0, -nx * push, bl_mob_height(p));
+					mob_move(w, p, 2, -nz * push, bl_mob_height(p));
+					mob_move(w, q, 0, nx * push, bl_mob_height(q));
+					mob_move(w, q, 2, nz * push, bl_mob_height(q));
 				}
 			M->spawn_t -= STEP;
 			if (M->spawn_t <= 0.0f) {
@@ -1035,6 +1475,31 @@ bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], fl
 				if (b->selected && !bx->glow)                                   /* chosen by the player: lighter, towards a pale green */
 					v = v * 0.6f + (ch == 0 ? 0.45f : ch == 1 ? 1.0f : 0.7f) * 0.4f;
 				hit->rgb[ch] = clampf(v, 0.0f, 1.0f);
+			}
+		}
+	}
+	for (int i = 0; i < BL_ARROWS_MAX; i++) {                   /* an arrow: three small pale boxes one behind the other */
+		const struct bl_arrow *ar = &m->arrow[i];
+		if (ar->t <= 0.0f)
+			continue;
+		float f = 1.0f - ar->t / BL_ARROW_TIME;
+		for (int k = 0; k < 3; k++) {
+			float u = clampf(f + 0.2f - 0.07f * (float)k, 0.0f, 1.0f);
+			float lo[3], hi[3];
+			for (int a = 0; a < 3; a++) {
+				float c = ar->a[a] + (ar->b[a] - ar->a[a]) * u;
+				lo[a] = c - 0.08f;
+				hi[a] = c + 0.08f;
+			}
+			float t = ray_box(o, d, lo, hi, best);
+			if (t >= 0.0f && t < best) {
+				best = t;
+				found = true;
+				hit->t = t;
+				hit->id = -1;
+				hit->rgb[0] = 1.0f - 0.15f * (float)k;
+				hit->rgb[1] = 0.93f - 0.2f * (float)k;
+				hit->rgb[2] = 0.55f - 0.15f * (float)k;
 			}
 		}
 	}

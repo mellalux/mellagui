@@ -37,6 +37,8 @@ enum bl_block {
 	BL_FLOW1, BL_FLOW2, BL_FLOW3, BL_FLOW4, BL_FLOW5, BL_FLOW6, BL_FLOW7,   /* water that flows: how far it has come from a source (1 = just left it, 7 = the last cell) */
 	BL_KEEP,                /* the keep: a tower of three of them (made by the game, never put by hand, never broken by the player): what the goblins attack */
 	BL_BARRACKS,            /* a block of brick and timber with a banner: soldiers are trained where one stands (the game counts them) */
+	BL_GATE,                /* a wooden lattice: the player and his units walk through it, the goblins do not (bl_box_hits_foe) */
+	BL_TOWERPOST,           /* the post at the top of a watchtower: a soldier stands on it and shoots */
 	BL_COUNT
 };
 
@@ -50,11 +52,17 @@ const char *bl_block_name(int block);                 /* "grass"; "?" for a numb
 /* what a block is (the renderer and the physics both read it). WATER is the source (the sea, a block put by hand); FLOW1..7 is water that has flowed. */
 static inline bool bl_water(int b)        { return b == BL_WATER || (b >= BL_FLOW1 && b <= BL_FLOW7); }
 static inline int  bl_water_level(int b)  { return b == BL_WATER ? 0 : b - BL_FLOW1 + 1; }                /* 0 for a source, 1 .. 7 for flowing water (b must be water) */
-static inline bool bl_solid(int b)        { return b != BL_AIR && !bl_water(b) && b != BL_TORCH; }          /* stops the player */
-static inline bool bl_opaque(int b)       { return b != BL_AIR && !bl_water(b) && b != BL_GLASS && b != BL_TORCH; }   /* stops light and sight */
+static inline bool bl_solid(int b)        { return b != BL_AIR && !bl_water(b) && b != BL_TORCH && b != BL_GATE; }   /* stops the player and his units */
+static inline bool bl_opaque(int b)       { return b != BL_AIR && !bl_water(b) && b != BL_GLASS && b != BL_TORCH && b != BL_GATE; }   /* stops light and sight */
+static inline bool bl_solid_foe(int b)    { return bl_solid(b) || b == BL_GATE; }                           /* stops a goblin */
 static inline bool bl_targetable(int b)   { return b != BL_AIR && !bl_water(b); }                           /* can be aimed at and broken */
 static inline bool bl_blocks_light(int b) { return bl_opaque(b) && b != BL_LEAVES; }                       /* shades the cells below it from the sky (leaves let most light through) */
 static inline int  bl_emission(int b)     { return b == BL_LAMP ? 15 : b == BL_TORCH ? 14 : 0; }            /* the light a block gives (0 .. 15) */
+/* The made things a goblin can smash when they are in its way, and what each takes (the keep and the ground are not among them: 0). */
+static inline int  bl_siege_hp(int b)
+{
+	return b == BL_GLASS ? 6 : b == BL_LAMP ? 12 : b == BL_PLANKS ? 24 : b == BL_GATE ? 45 : b == BL_COBBLE ? 60 : b == BL_BRICK || b == BL_BARRACKS || b == BL_TOWERPOST ? 75 : 0;
+}
 static inline bool bl_breakable(int b)    { return b != BL_AIR && !bl_water(b) && b != BL_BEDROCK && b != BL_KEEP && b < BL_COUNT; }   /* what the player's hand can take away */
 
 /* How long it takes to break a block by hand, in seconds (survival; creative breaks at once), and what it leaves behind (0 = nothing; grass leaves dirt, stone leaves
@@ -187,6 +195,9 @@ bool bl_place(struct bl_world *w, const struct bl_hit *h, int block, const struc
 
 /* does the box (hw half width, h height, feet at (x, y, z)) touch a solid block? */
 bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h);
+/* the same for a goblin: a gate stops it, too */
+bool bl_box_hits_foe(const struct bl_world *w, float x, float y, float z, float hw, float h);
+bool bl_box_move_foe(const struct bl_world *w, float *x, float *y, float *z, int axis, float d, float hw, float h);
 /* The top of the highest solid block under the feet (the middle of the box and four points inside its corners) within `down` below them: its height, -1e9 when
  * there is none. */
 float bl_box_support(const struct bl_world *w, float x, float y, float z, float hw, float down);

@@ -12,6 +12,7 @@
 #include "blocks.h"
 #include "blocksview.h"
 #include "blockspets.h"
+#include "blocksbuild.h"
 #include "blocksmobs.h"
 
 #include <math.h>
@@ -119,9 +120,9 @@ static void test_world(void)
 	}
 	CHECK(bad == 0, "%d cells hold a number that is no block", bad);
 	for (int k = BL_GRASS; k < BL_COUNT; k++)
-		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && k != BL_BARRACKS && !(k >= BL_FLOW1 && k <= BL_FLOW7))
+		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && k != BL_BARRACKS && k != BL_GATE && k != BL_TOWERPOST && !(k >= BL_FLOW1 && k <= BL_FLOW7))
 			CHECK(count[k] > 0, "the world has no %s", bl_block_name(k));
-	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0 && count[BL_KEEP] == 0 && count[BL_BARRACKS] == 0, "glass / planks / torches / lamps are only for the player to put, the keep for the game");
+	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0 && count[BL_KEEP] == 0 && count[BL_BARRACKS] == 0 && count[BL_GATE] == 0 && count[BL_TOWERPOST] == 0, "glass / planks / torches / lamps are only for the player to put, the keep for the game");
 	long flowing = 0;
 	for (int k = BL_FLOW1; k <= BL_FLOW7; k++)
 		flowing += count[k];
@@ -1049,6 +1050,8 @@ static void test_textures(void)
 				CHECK(clear > 100 && partial + solid > 20, "glass: a clear middle and a frame (%d clear)", clear);
 			} else if (bl_water(b)) {
 				CHECK(solid == 0 && clear == 0, "water is see-through everywhere");
+			} else if (b == BL_GATE) {
+				CHECK(clear > 40 && solid > 100 && partial == 0, "a gate is bars with gaps between them (%d clear, %d solid)", clear, solid);
 			} else if (b == BL_TORCH) {
 				CHECK(clear > 150 && solid > 8, "a torch is a stick and a flame on a clear background (%d clear, %d solid)", clear, solid);
 			} else {
@@ -2687,6 +2690,393 @@ static void test_soldiers(void)
 	bl_world_free(w);
 }
 
+/* ---- building: plans, builders, gates and walls, the watchtower ---------------------------------------------------------- */
+
+/* one step as the game does it: what the workers put goes into the world, what the goblins broke goes out */
+static void build_step(struct bl_mobs *M, struct bl_world *w, const float pl[3], bool alive, float hour, struct bl_mobs_result *sum, int *bad)
+{
+	struct bl_mobs_result R;
+	bl_mobs_step(M, w, pl, alive, hour, 1.0f / 30.0f, &R);
+	for (int i = 0; i < R.nplace; i++) {
+		if (bl_mobs_hit_cell(M, R.place[i].x, R.place[i].y, R.place[i].z) || !bl_cell_missing(w, &R.place[i]))
+			(*bad)++;
+		else
+			bl_set(w, R.place[i].x, R.place[i].y, R.place[i].z, R.place[i].block);
+	}
+	for (int i = 0; i < R.nsmash; i++)
+		bl_set(w, R.smash[i].x, R.smash[i].y, R.smash[i].z, BL_AIR);
+	sum->nbuilt += R.nbuilt;
+	sum->nsmash += R.nsmash;
+	sum->siege_hits += R.siege_hits;
+	sum->keep_damage += R.keep_damage;
+	sum->shots += R.shots;
+	sum->slain += R.slain;
+	sum->soldiers_lost += R.soldiers_lost;
+}
+
+static int count_block(const struct bl_site *s, int block)
+{
+	int n = 0;
+	for (int i = 0; i < s->n; i++)
+		n += s->c[i].block == block;
+	return n;
+}
+
+static void test_plans(void)
+{
+	struct bl_world *w = bl_world_flat(96, 96, 64, 20);
+	struct bl_site s, t;
+	const char *why = NULL;
+	int cob, pl;
+	bl_plan_cost(BL_PLAN_BARRACKS, &cob, &pl);
+	CHECK(cob == 20 && pl == 16 && !strcmp(bl_plan_name(BL_PLAN_TOWER), "watchtower") && !strcmp(bl_plan_name(9), "?"), "the plans have names and a price");
+	CHECK(bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 40, 20, 40, NULL, 0, &s, &why) && s.n == 60 && count_block(&s, BL_BARRACKS) == 1, "a barracks is 60 blocks with one banner (%d, %s)", s.n, why ? why : "-");
+	int lo[3], hi[3];
+	bl_site_box(&s, lo, hi);
+	CHECK(lo[0] == 38 && hi[0] == 42 && lo[2] == 39 && hi[2] == 42 && lo[1] == 20 && hi[1] == 23, "5 wide, 4 deep, 4 high (%d..%d, %d..%d, %d..%d)", lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+	bool door = true;
+	for (int i = 0; i < s.n; i++)
+		door &= !(s.c[i].x == 40 && s.c[i].z == 39 && s.c[i].y < 22);
+	CHECK(door, "there is a door in the front, two high");
+	CHECK(bl_plan_lay(w, BL_PLAN_BARRACKS, 1, 40, 20, 40, NULL, 0, &t, NULL), "turned once");
+	bl_site_box(&t, lo, hi);
+	CHECK(hi[0] - lo[0] == 3 && hi[2] - lo[2] == 4 && lo[0] == 39, "it is 4 wide and 5 deep, its front towards -x (%d..%d, %d..%d)", lo[0], hi[0], lo[2], hi[2]);
+	CHECK(bl_plan_lay(w, BL_PLAN_TOWER, 0, 60, 20, 60, NULL, 0, &t, NULL) && t.n == 29 && count_block(&t, BL_TOWERPOST) == 1, "a watchtower is 29 blocks with one post");
+	CHECK(bl_plan_lay(w, BL_PLAN_GATE, 0, 60, 20, 70, NULL, 0, &t, NULL) && t.n == 8 && count_block(&t, BL_GATE) == 2, "a gate: two posts and two blocks of gate");
+	CHECK(!bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 42, 20, 41, &s, 1, &t, &why) && t.n > 0 && why, "not over a planned building (%s), the cells are there for the red preview", why ? why : "-");
+	CHECK(!bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 1, 20, 40, NULL, 0, &t, &why), "not at the edge of the world");
+	bl_set(w, 20, 20, 20, BL_LOG);
+	CHECK(!bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 20, 20, 21, NULL, 0, &t, &why) && strstr(why, "way"), "not where something stands (%s)", why);
+	bl_set(w, 30, 19, 60, BL_AIR);
+	CHECK(!bl_plan_lay(w, BL_PLAN_TOWER, 0, 30, 20, 60, NULL, 0, &t, &why) && strstr(why, "flat"), "not over a hole (%s)", why);
+	/* a wall follows the ground */
+	bl_set(w, 51, 20, 30, BL_STONE);
+	CHECK(bl_plan_lay(w, BL_PLAN_WALL, 0, 50, 20, 30, NULL, 0, &t, &why) && t.n == 6, "a wall over a step (%s)", why ? why : "-");
+	int ys[2] = { 0, 0 };
+	for (int i = 0; i < t.n; i++)
+		if (t.c[i].x == 51)
+			ys[t.c[i].y >= 22] = t.c[i].y;
+	CHECK(ys[0] == 21 && ys[1] == 22, "the column on the step stands one higher (%d %d)", ys[0], ys[1]);
+	/* a corner: the second wall shares a column that wants the same block */
+	struct bl_site a, b;
+	CHECK(bl_plan_lay(w, BL_PLAN_WALL, 0, 70, 20, 30, NULL, 0, &a, NULL), "one wall");
+	CHECK(bl_plan_lay(w, BL_PLAN_WALL, 1, 71, 20, 29, &a, 1, &b, &why) && b.n == 4, "a second one round the corner leaves out the shared column (%d, %s)", b.n, why ? why : "-");
+	CHECK(!bl_plan_lay(w, BL_PLAN_WALL, 0, 70, 20, 30, &a, 1, &b, &why), "not the same wall twice (%s)", why ? why : "-");
+	/* the same with the first one built: the shared column is not stacked on, and a gap broken in a wall is planned again */
+	for (int i = 0; i < a.n; i++)
+		bl_set(w, a.c[i].x, a.c[i].y, a.c[i].z, a.c[i].block);
+	CHECK(bl_plan_lay(w, BL_PLAN_WALL, 1, 71, 20, 29, NULL, 0, &b, &why) && b.n == 4, "round the corner of a wall that stands (%d, %s)", b.n, why ? why : "-");
+	bl_set(w, 70, 21, 30, BL_AIR);
+	CHECK(bl_plan_lay(w, BL_PLAN_WALL, 0, 70, 20, 30, NULL, 0, &b, &why) && b.n == 1 && b.c[0].x == 70 && b.c[0].y == 21, "a hole in a wall is planned again (%d, %s)", b.n, why ? why : "-");
+	bl_world_free(w);
+}
+
+static void test_builders(void)
+{
+	const float pl[3] = { 40.5f, 20.0f, 20.5f };
+	struct bl_world *w = bl_world_flat(96, 96, 64, 20);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 5);
+	M.enabled = false;
+	struct bl_site s;
+	bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 40, 20, 40, NULL, 0, &s, NULL);
+	int si = bl_mobs_add_site(&M, &s);
+	CHECK(si == 0 && bl_mobs_count_sites(&M) == 1, "a site");
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 40.5f, 20.0f, 33.5f);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 43.5f, 20.0f, 33.5f);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 30.5f, 20.0f, 30.5f);
+	CHECK(bl_mobs_order_build(&M, w, 0, si) && bl_mobs_order_build(&M, w, 1, si) && !bl_mobs_order_build(&M, w, 2, si) && !bl_mobs_order_build(&M, w, 0, 3), "workers build, soldiers and no site do not");
+	CHECK(hypotf(M.mob[0].tx - M.mob[1].tx, M.mob[0].tz - M.mob[1].tz) > 0.7f, "they take different places to stand");
+	struct bl_mobs_result sum = { 0 };
+	int bad = 0, in_block = 0;
+	float t = 0, done_t = 0;
+	for (int i = 0; i < 30 * 60; i++) {
+		build_step(&M, w, pl, true, 12.0f, &sum, &bad);
+		t += 1.0f / 30.0f;
+		for (int k = 0; k < 2; k++)
+			in_block += box_in_solid(w, M.mob[k].x, M.mob[k].y, M.mob[k].z, BL_GOBLIN_HW, BL_WORKER_H);
+		if (!done_t && sum.nbuilt)
+			done_t = t;
+	}
+	CHECK(bl_site_missing(w, &s) == 0 && sum.nbuilt == 1 && bl_mobs_count_sites(&M) == 0, "two workers build the barracks (%d missing, %d reports)", bl_site_missing(w, &s), sum.nbuilt);
+	CHECK(done_t > 14.0f && done_t < 35.0f, "60 blocks, two builders, half a second a block: %.1f s", done_t);
+	CHECK(bad == 0 && in_block == 0, "no block is put into a body, no worker ends up inside one (%d, %d)", bad, in_block);
+	CHECK(M.mob[0].order == BL_ORDER_IDLE && M.mob[1].order == BL_ORDER_IDLE, "then they are idle");
+
+	/* one worker and three plans: it goes on to the next by itself */
+	struct bl_site tw, wl, gt;
+	bl_plan_lay(w, BL_PLAN_TOWER, 0, 55, 20, 40, NULL, 0, &tw, NULL);
+	bl_plan_lay(w, BL_PLAN_WALL, 0, 48, 20, 30, NULL, 0, &wl, NULL);
+	bl_plan_lay(w, BL_PLAN_GATE, 0, 52, 20, 30, NULL, 0, &gt, NULL);
+	int i1 = bl_mobs_add_site(&M, &wl);
+	bl_mobs_add_site(&M, &gt);
+	bl_mobs_add_site(&M, &tw);
+	CHECK(bl_mobs_order_build(&M, w, 0, i1), "the first of three");
+	sum = (struct bl_mobs_result){ 0 };
+	for (int i = 0; i < 30 * 70; i++)
+		build_step(&M, w, pl, true, 12.0f, &sum, &bad);
+	CHECK(sum.nbuilt == 3 && bl_site_missing(w, &wl) + bl_site_missing(w, &gt) + bl_site_missing(w, &tw) == 0 && bad == 0, "one worker builds a wall, a gate and a tower in turn (%d done, %d %d %d missing)",
+	      sum.nbuilt, bl_site_missing(w, &wl), bl_site_missing(w, &gt), bl_site_missing(w, &tw));
+
+	/* a site taken away lets the builder go; a cell somebody filled is not waited for */
+	bl_plan_lay(w, BL_PLAN_WALL, 0, 40, 20, 60, NULL, 0, &wl, NULL);
+	int i2 = bl_mobs_add_site(&M, &wl);
+	bl_mobs_order_build(&M, w, 0, i2);
+	bl_mobs_remove_site(&M, i2);
+	CHECK(M.mob[0].order == BL_ORDER_IDLE && bl_mobs_count_sites(&M) == 0, "a plan taken away");
+	i2 = bl_mobs_add_site(&M, &wl);
+	bl_set(w, wl.c[0].x, wl.c[0].y, wl.c[0].z, BL_DIRT);
+	bl_mobs_order_build(&M, w, 0, i2);
+	sum = (struct bl_mobs_result){ 0 };
+	for (int i = 0; i < 30 * 30; i++)
+		build_step(&M, w, pl, true, 12.0f, &sum, &bad);
+	CHECK(sum.nbuilt == 1 && bl_get(w, wl.c[0].x, wl.c[0].y, wl.c[0].z) == BL_DIRT, "a cell filled by someone else stays and the site is done");
+
+	/* the player standing where a block goes: it waits, and finishes when he moves */
+	bl_plan_lay(w, BL_PLAN_WALL, 0, 40, 20, 70, NULL, 0, &wl, NULL);
+	i2 = bl_mobs_add_site(&M, &wl);
+	bl_mobs_order_build(&M, w, 0, i2);
+	const float in_way[3] = { 40.5f, 20.0f, 70.5f };
+	sum = (struct bl_mobs_result){ 0 };
+	for (int i = 0; i < 30 * 30; i++)
+		build_step(&M, w, in_way, true, 12.0f, &sum, &bad);
+	CHECK(sum.nbuilt == 0 && bl_site_missing(w, &wl) == 2 && M.mob[0].order == BL_ORDER_BUILD, "no block into the player: two are left and the worker waits (%d missing)", bl_site_missing(w, &wl));
+	for (int i = 0; i < 30 * 6; i++)
+		build_step(&M, w, pl, true, 12.0f, &sum, &bad);
+	CHECK(sum.nbuilt == 1, "he steps away and it is finished");
+	bl_world_free(w);
+}
+
+static void test_gates_and_siege(void)
+{
+	const float far_pl[3] = { 50.5f, 20.0f, 100.0f };
+	const float dusk = 17.9f;
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	bl_set(w, 50, 20, 50, BL_GATE);
+	CHECK(!bl_box_hits(w, 50.5f, 20.0f, 50.5f, 0.3f, 1.7f) && bl_box_hits_foe(w, 50.5f, 20.0f, 50.5f, 0.3f, 1.7f) && !bl_solid(BL_GATE) && bl_targetable(BL_GATE) && !bl_opaque(BL_GATE),
+	      "a gate lets the player's people through and stops a goblin; it can be aimed at and does not shut out the light");
+	CHECK(bl_siege_hp(BL_STONE) == 0 && bl_siege_hp(BL_DIRT) == 0 && bl_siege_hp(BL_KEEP) == 0 && bl_siege_hp(BL_LOG) == 0 && bl_siege_hp(BL_COBBLE) > bl_siege_hp(BL_GATE) && bl_siege_hp(BL_GATE) > bl_siege_hp(BL_PLANKS),
+	      "goblins smash made things only, a wall holds longer than a gate");
+	bl_set(w, 50, 20, 50, BL_AIR);
+
+	/* a wall right across the world with a gate in it: a worker walks through, a goblin has to break it */
+	for (int x = 0; x < 128; x++)
+		for (int y = 20; y < 23; y++)
+			bl_set(w, x, y, 50, x == 50 && y < 22 ? BL_GATE : BL_STONE);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 31);
+	M.spawn_t = 1e9f;
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 50.5f, 20.0f, 46.5f);
+	bl_mobs_order_move(&M, 0, 50.5f, 55.5f);
+	struct bl_mobs_result sum = { 0 };
+	int bad = 0;
+	for (int i = 0; i < 30 * 8; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(M.mob[0].z > 55.0f, "a worker walks through the gate (z %.1f)", M.mob[0].z);
+	bl_mobs_clear(&M);
+
+	bl_mobs_set_keep(&M, true, 50.5f, 20.0f, 58.5f);
+	for (int y = 20; y < 23; y++)
+		bl_set(w, 50, y, 58, BL_KEEP);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 42.5f);
+	float t = 0, through = 0, first_smash = 0, keep_t = 0;
+	bool early = false;
+	sum = (struct bl_mobs_result){ 0 };
+	for (int i = 0; i < 30 * 60; i++) {
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+		t += 1.0f / 30.0f;
+		if (!first_smash && sum.nsmash)
+			first_smash = t;
+		early |= !sum.nsmash && M.mob[0].z > 50.0f;
+		if (!through && M.mob[0].z > 51.5f)
+			through = t;
+		if (!keep_t && sum.keep_damage > 0)
+			keep_t = t;
+	}
+	CHECK(!early && first_smash > 10.0f && first_smash < 30.0f, "the gate holds the goblin until it has broken it (%.1f s, %d blows)", first_smash, sum.siege_hits);
+	CHECK(through > first_smash && keep_t > through, "then it comes through and hits the keep (%.1f, %.1f s)", through, keep_t);
+	CHECK(bl_get(w, 50, 22, 50) == BL_STONE && bl_get(w, 49, 20, 50) == BL_STONE, "the stone round it is untouched");
+
+	/* a cobble wall two high takes longer; a brute is quicker at it */
+	float tw[2];
+	for (int brute = 0; brute < 2; brute++) {
+		bl_mobs_clear(&M);
+		memset(M.damaged, 0, sizeof M.damaged);
+		for (int x = 0; x < 128; x++)
+			for (int y = 20; y < 23; y++)
+				bl_set(w, x, y, 50, y < 22 ? BL_COBBLE : BL_AIR);
+		if (brute)
+			bl_mobs_add_brute(&M, w, 50.5f, 20.0f, 46.5f);
+		else
+			bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 46.5f);
+		sum = (struct bl_mobs_result){ 0 };
+		t = 0;
+		tw[brute] = 0;
+		for (int i = 0; i < 30 * 90; i++) {
+			build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+			t += 1.0f / 30.0f;
+			if (!tw[brute] && M.mob[0].z > 51.5f)
+				tw[brute] = t;
+		}
+		CHECK(tw[brute] > 8.0f && sum.nsmash >= 1, "%s gets through a cobble wall after %.1f s (%d broken)", brute ? "a brute" : "a goblin", tw[brute], sum.nsmash);
+	}
+	CHECK(tw[0] > 14.0f && tw[1] < tw[0], "a wall is worth building (%.1f s), a brute is quicker (%.1f s)", tw[0], tw[1]);
+
+	/* the player behind his wall: the goblin comes for him through it; a goblin with nobody to go for leaves walls alone */
+	bl_mobs_clear(&M);
+	bl_mobs_set_keep(&M, false, 0, 0, 0);
+	for (int x = 0; x < 128; x++)
+		for (int y = 20; y < 22; y++)
+			bl_set(w, x, y, 50, BL_PLANKS);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 47.5f);
+	sum = (struct bl_mobs_result){ 0 };
+	for (int i = 0; i < 30 * 40; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(sum.siege_hits == 0, "a wandering goblin smashes nothing");
+	const float behind[3] = { 50.5f, 20.0f, 55.5f };
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 47.5f);
+	for (int i = 0; i < 30 * 20; i++)
+		build_step(&M, w, behind, true, dusk, &sum, &bad);
+	CHECK(sum.nsmash >= 1, "one that is after the player breaks through (%d)", sum.nsmash);
+	bl_world_free(w);
+}
+
+static void test_tower(void)
+{
+	const float far_pl[3] = { 50.5f, 20.0f, 100.0f };
+	const float dusk = 17.9f;
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	struct bl_site s;
+	bl_plan_lay(w, BL_PLAN_TOWER, 0, 50, 20, 50, NULL, 0, &s, NULL);
+	for (int i = 0; i < s.n; i++)
+		bl_set(w, s.c[i].x, s.c[i].y, s.c[i].z, s.c[i].block);
+	struct bl_mobs M;
+	bl_mobs_init(&M, 41);
+	M.spawn_t = 1e9f;
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 50.5f, 20.0f, 40.5f);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 46.5f, 20.0f, 40.5f);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, 54.5f, 20.0f, 40.5f);
+	CHECK(!bl_mobs_order_tower(&M, w, 2, 50, 24, 50) && !bl_mobs_order_tower(&M, w, 0, 50, 23, 50), "only a soldier, only on a watchpost");
+	CHECK(bl_mobs_order_tower(&M, w, 0, 50, 24, 50) && !bl_mobs_order_tower(&M, w, 1, 50, 24, 50), "one soldier to a tower");
+	struct bl_mobs_result sum = { 0 };
+	int bad = 0;
+	for (int i = 0; i < 30 * 8; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(M.mob[0].posted && fabsf(M.mob[0].y - 25.0f) < 0.05f && fabsf(M.mob[0].x - 50.5f) < 0.01f, "he walks there and climbs up (y %.2f)", M.mob[0].y);
+	bl_mobs_clear_kind(&M, BL_MOB_WORKER);
+	M.mob[1].alive = false;
+
+	/* a goblin 15 m away is shot dead from up there; one 24 m away is left alone */
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 65.5f);
+	sum = (struct bl_mobs_result){ 0 };
+	float t = 0, dead = 0;
+	bool arrow_seen = false;
+	for (int i = 0; i < 30 * 12; i++) {
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+		t += 1.0f / 30.0f;
+		for (int k = 0; k < BL_ARROWS_MAX; k++)
+			if (M.arrow[k].t > 0.1f && !arrow_seen) {
+				float f = 1.0f - M.arrow[k].t / BL_ARROW_TIME + 0.2f, c[3], o[3], d[3];
+				for (int a = 0; a < 3; a++)
+					c[a] = M.arrow[k].a[a] + (M.arrow[k].b[a] - M.arrow[k].a[a]) * f;
+				o[0] = c[0] + 3.0f;
+				o[1] = c[1];
+				o[2] = c[2];
+				d[0] = -1.0f;
+				d[1] = d[2] = 0.0f;
+				struct bl_mob_hit h;
+				arrow_seen = bl_mobs_ray(&M, o, d, 10.0f, &h) && h.id == -1;
+			}
+		if (!dead && sum.slain)
+			dead = t;
+	}
+	CHECK(sum.slain == 1 && sum.shots == 4 && dead > 4.0f && dead < 8.0f && M.mob[0].posted && M.mob[0].hp == BL_SOLDIER_HP, "four arrows kill it (%d shots, %.1f s)", sum.shots, dead);
+	CHECK(arrow_seen, "an arrow can be seen on its way");
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 75.5f);
+	M.mob[1].widle = true;
+	M.mob[1].wander_t = 1e9f;
+	sum = (struct bl_mobs_result){ 0 };
+	for (int i = 0; i < 30 * 4; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(sum.shots == 0, "one 25 m away is out of range");
+	M.mob[1].alive = false;
+
+	/* one at the foot of the tower: it does not go for the man up there; a stone screen stops the arrows */
+	for (int x = 40; x <= 60; x++)
+		for (int y = 20; y < 30; y++)
+			bl_set(w, x, y, 56, BL_STONE);
+	bl_mobs_add(&M, w, BL_MOB_GOBLIN, 50.5f, 20.0f, 60.5f);
+	M.mob[1].widle = true;
+	M.mob[1].wander_t = 1e9f;
+	sum = (struct bl_mobs_result){ 0 };
+	for (int i = 0; i < 30 * 4; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(sum.shots == 0 && sum.siege_hits == 0 && sum.soldiers_lost == 0, "no shot through a wall, and the goblin takes no notice of the man up there (%d shots)", sum.shots);
+	for (int x = 40; x <= 60; x++)
+		for (int y = 20; y < 30; y++)
+			bl_set(w, x, y, 56, BL_AIR);
+	M.mob[1].alive = false;
+
+	/* sent away he comes down; the post broken he falls */
+	bl_mobs_order_move(&M, 0, 42.5f, 50.5f);
+	for (int i = 0; i < 30 * 8; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(!M.mob[0].posted && M.mob[0].y < 20.1f && hypotf(M.mob[0].x - 42.5f, M.mob[0].z - 50.5f) < 1.6f, "a new post: he comes down and walks there (%.1f %.1f %.1f)", M.mob[0].x, M.mob[0].y, M.mob[0].z);
+	bl_mobs_order_tower(&M, w, 0, 50, 24, 50);
+	for (int i = 0; i < 30 * 8; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(M.mob[0].posted, "up again");
+	bl_mobs_order_stop(&M, 0);
+	for (int i = 0; i < 30 * 3; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(!M.mob[0].posted && M.mob[0].y < 20.1f && hypotf(M.mob[0].x - 50.5f, M.mob[0].z - 50.5f) > 1.5f && hypotf(M.mob[0].tx - M.mob[0].x, M.mob[0].tz - M.mob[0].z) < 1.1f,
+	      "stop: down beside the tower, and that is his post now");
+	bl_mobs_order_tower(&M, w, 0, 50, 24, 50);
+	for (int i = 0; i < 30 * 8; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	bl_set(w, 50, 24, 50, BL_AIR);
+	for (int i = 0; i < 30 * 4; i++)
+		build_step(&M, w, far_pl, false, dusk, &sum, &bad);
+	CHECK(M.mob[0].alive && !M.mob[0].posted && M.mob[0].y < 21.0f && M.mob[0].order == BL_ORDER_IDLE, "the post gone: he is on the ground again (y %.1f)", M.mob[0].y);
+	bl_world_free(w);
+}
+
+static void test_ghosts(void)
+{
+	struct bl_world *w = bl_world_flat(96, 96, 64, 20);
+	struct bl_site s;
+	bl_plan_lay(w, BL_PLAN_WALL, 0, 48, 20, 52, NULL, 0, &s, NULL);
+	static struct bl_ghosts g;
+	bl_ghosts_clear(&g);
+	bl_ghosts_add(&g, w, &s, 0x80c0ffu);
+	float o[3] = { 48.5f, 20.5f, 48.0f }, d[3] = { 0, 0, 1 }, rgb[3], a = 0, t = 0;
+	CHECK(g.n == 6 && bl_ghosts_ray(&g, o, d, 50.0f, rgb, &a, &t) && fabsf(t - 4.02f) < 0.01f && a < 0.5f && rgb[2] > rgb[0], "a planned block is met by a ray, see-through in the middle of a face (%.2f at %.2f)", a, t);
+	float o2[3] = { 48.04f, 20.5f, 48.0f };
+	CHECK(bl_ghosts_ray(&g, o2, d, 50.0f, rgb, &a, &t) && a > 0.7f, "and solid at its edges");
+	CHECK(!bl_ghosts_ray(&g, o, d, 3.0f, rgb, &a, &t), "not beyond the reach");
+	enum { W = 160, H = 100 };
+	static uint32_t p0[W * H], p1[W * H];
+	struct bl_camera cam = { 48.5f, 22.0f, 46.0f, 0.0f, -0.15f, 1.2f };
+	struct bl_view v;
+	bl_view_init(&v);
+	bl_render(w, &cam, &v, p0, W, H, W, 2);
+	v.ghosts = &g;
+	bl_render(w, &cam, &v, p1, W, H, W, 2);
+	int diff = 0, blue = 0;
+	for (int i = 0; i < W * H; i++)
+		if (p0[i] != p1[i]) {
+			diff++;
+			blue += (int)(p1[i] & 255) - (int)(p0[i] & 255) > 10;
+		}
+	CHECK(diff > 600 && blue > 300, "the picture shows them (%d pixels, %d bluer)", diff, blue);
+	bl_set(w, s.c[0].x, s.c[0].y, s.c[0].z, BL_COBBLE);
+	bl_ghosts_clear(&g);
+	bl_ghosts_add(&g, w, &s, 0x80c0ffu);
+	CHECK(g.n == 5, "a block that is there is no ghost");
+	bl_world_free(w);
+}
+
 static void test_brutes(void)
 {
 	const float dusk = 17.9f;
@@ -3416,6 +3806,12 @@ int main(int argc, char **argv)
 	test_workers();
 	test_soldiers();
 	test_brutes();
+	printf("building\n");
+	test_plans();
+	test_builders();
+	test_gates_and_siege();
+	test_tower();
+	test_ghosts();
 	if (g_dir[0]) {
 		char cmd[400];
 		snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);

@@ -19615,7 +19615,7 @@ class TestBlocks(Base):
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
     K = dict(esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
-             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, **{str(i): 1 + i for i in range(1, 10)})
+             f1=59, f3=61, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, r=19, delete=111, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
         super().setUp()
@@ -19683,6 +19683,10 @@ class TestBlocks(Base):
                 st['workers'][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'soldier':
                 st.setdefault('soldiers', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'site':
+                st.setdefault('sites', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'bar':
+                st.setdefault('bar', {})[int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
             elif f[0] == 'mob':
                 st['mobs'][int(f[1])] = {k: float(v) for k, v in (x.split('=', 1) for x in f[2:])}
             elif f[0] == 'hist':
@@ -20131,7 +20135,7 @@ class TestBlocks(Base):
     def put_in_hand(self, block):
         """E opens the palette, a click on the block puts it in the slot in the hand, E goes back to the game."""
         self.tap('e')
-        st = self.wait(lambda s: s['state']['prompt'] == '4' and len(s['pal']) == 15)
+        st = self.wait(lambda s: s['state']['prompt'] == '4' and len(s['pal']) == 17)
         cell = [c for c in st['pal'].values() if c['block'] == block][0]
         ctl.abs(self.win['x'] + cell['x'] + cell['w'] // 2, self.win['y'] + cell['y'] + cell['h'] // 2)
         time.sleep(0.1)
@@ -20150,7 +20154,7 @@ class TestBlocks(Base):
         self.assertEqual(st['state']['playing'], '0')
         self.assertEqual(self.pconstraint()['active'], 'none', 'the pointer is free while the palette is up')
         self.assertEqual([c['block'] for _, c in sorted(st['pal'].items())],
-                         ['grass', 'dirt', 'stone', 'sand', 'log', 'leaves', 'planks', 'glass', 'water', 'brick', 'snow', 'cobble', 'torch', 'lamp', 'barracks'])
+                         ['grass', 'dirt', 'stone', 'sand', 'log', 'leaves', 'planks', 'glass', 'water', 'brick', 'snow', 'cobble', 'torch', 'lamp', 'barracks', 'gate', 'watchpost'])
         torch = st['pal'][12]
         ctl.abs(self.win['x'] + torch['x'] + torch['w'] // 2, self.win['y'] + torch['y'] + torch['h'] // 2)
         time.sleep(0.1)
@@ -20816,7 +20820,7 @@ class TestBlocks(Base):
         i = chosen[0]
         before = (float(st['workers'][i]['x']), float(st['workers'][i]['z']))
         # a click on the ground, a good way off: the right button sends it there
-        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 40)
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 80)
         time.sleep(0.1)
         ctl.button(273, True)
         ctl.button(273, False)
@@ -20904,32 +20908,154 @@ class TestBlocks(Base):
         self.assertEqual(self.state()['cmd']['workers'], '3', 'the same three, not two new ones')
 
     # ---- barracks, soldiers and waves ----
-    def test_four_bricks_make_a_barracks_that_is_put_and_v_trains_a_soldier_for_its_price(self):
-        self.start('--give', 'brick=9,cobble=20,planks=10', '--pitch', '-60', '--soldiers', '0', survival=True)
+    def click_at(self, dx, dy, button=272):
+        """A click at a place of the window, counted from its middle."""
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + dx, self.win['y'] + self.win['h'] // 2 + dy)
+        time.sleep(0.15)
+        ctl.button(button, True)
+        ctl.button(button, False)
+        time.sleep(0.1)
+
+    def quit_game(self):
+        self.ctrl_tap('q')
+        for _ in range(60):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.proc = None
+        for _ in range(40):
+            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
+                break
+            time.sleep(0.05)
+
+    def test_a_barracks_is_built_by_the_workers_for_its_price_and_v_trains_a_soldier(self):
+        self.start('--give', 'cobble=40,planks=26', '--soldiers', '0', survival=True)
         self.play()
-        self.tap('7')                                          # the hotbar's brick
-        self.tap('x')
-        st = self.wait(lambda s: s['inv'].get('barracks') == 1)
-        self.assertEqual(st['inv']['brick'], 5)
-        slot = [i for i, b in enumerate(st['hotbar']) if b == 'barracks'][0] + 1
-        self.tap(str(slot))
-        ctl.button(273, True)
-        ctl.button(273, False)
-        st = self.wait(lambda s: int(s['game']['barracks']) == 1)
-        self.assertNotIn('barracks', st['inv'], 'the block was used up')
-        self.cmd_open()
+        st = self.cmd_open()
+        self.assertEqual((st['cmd']['plan'], st['cmd']['sites'], len(st['bar'])), ('-1', '0', 4))
+        self.tap('v')
+        time.sleep(0.2)
+        self.assertEqual(self.state()['cmd']['soldiers'], '0', 'no barracks yet')
+        self.tap('3')
+        self.wait(lambda s: s['cmd']['plan'] == '0')
+        self.click_at(170, 20)
+        st = self.wait(lambda s: s['cmd']['sites'] == '1')
+        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (20, 10), 'twenty cobble and sixteen planks')
+        self.assertEqual(st['cmd']['plan'], '-1', 'one barracks at a time')
+        site = list(st['sites'].values())[0]
+        self.assertEqual((site['plan'], site['n']), ('barracks', '60'))
+        self.assertEqual([w['order'] for w in st['workers'].values()], ['3', '3'], 'both idle workers go to build')
+        st = self.wait(lambda s: int(s['sites'][0]['missing']) < 50 if s.get('sites') else True, timeout=30.0)
+        st = self.wait(lambda s: s['cmd']['sites'] == '0', timeout=60.0)
+        self.assertEqual(st['game']['barracks'], '1')
+        self.assertEqual(st['hist']['barracks'], 1)
+        self.assertEqual([w['order'] for w in st['workers'].values()], ['0', '0'])
         self.tap('v')
         st = self.wait(lambda s: s['cmd']['soldiers'] == '1')
         self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (14, 6), 'six cobble and four planks')
-        self.assertEqual(len(st['soldiers']), 1)
-        self.tap('v')
-        st = self.wait(lambda s: s['cmd']['soldiers'] == '2')
-        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (8, 2))
-        self.tap('v')
+
+    def test_the_bar_and_the_keys_choose_a_plan_and_esc_puts_it_aside_before_it_leaves(self):
+        self.start('--workers', '1')
+        self.play()
+        st = self.cmd_open()
+        b = st['bar'][2]
+        ctl.abs(self.win['x'] + b['x'] + b['w'] // 2, self.win['y'] + b['y'] + 6)        # (the dock of the test screen covers the window's last rows)
+        time.sleep(0.15)
+        ctl.button(272, True)
+        ctl.button(272, False)
+        self.wait(lambda s: s['cmd']['plan'] == '2')
+        self.tap('r')
+        self.wait(lambda s: s['cmd']['rot'] == '1')
+        self.tap('6')
+        self.wait(lambda s: s['cmd']['plan'] == '3')
+        self.tap('esc')
+        st = self.wait(lambda s: s['cmd']['plan'] == '-1')
+        self.assertEqual(st['cmd']['on'], '1', 'the first Esc puts the plan aside')
+        self.tap('4')
+        self.wait(lambda s: s['cmd']['plan'] == '1')
+        self.click_at(170, 20, button=273)
+        st = self.wait(lambda s: s['cmd']['plan'] == '-1')
+        self.assertEqual(st['cmd']['sites'], '0', 'the right button builds nothing')
+        self.tap('esc')
+        self.wait(lambda s: s['cmd']['on'] == '0')
+
+    def test_a_plan_too_dear_is_refused_and_walls_stay_in_hand_until_delete_gives_them_back(self):
+        self.start('--give', 'cobble=14', '--workers', '0', survival=True)
+        self.play()
+        self.cmd_open()
+        self.tap('3')
+        self.click_at(170, 20)
         time.sleep(0.3)
         st = self.state()
-        self.assertEqual(st['cmd']['soldiers'], '2', 'two planks are not enough for another one')
-        self.assertEqual(st['inv']['planks'], 2)
+        self.assertEqual((st['cmd']['sites'], st['inv']['cobble']), ('0', 14), 'a barracks costs more than that')
+        self.tap('5')
+        self.click_at(170, 20)
+        st = self.wait(lambda s: s['cmd']['sites'] == '1')
+        self.assertEqual((st['cmd']['plan'], st['inv']['cobble']), ('2', 8), 'a wall costs six and stays in hand')
+        self.click_at(-170, 20)
+        st = self.wait(lambda s: s['cmd']['sites'] == '2')
+        self.assertEqual(st['inv']['cobble'], 2)
+        self.click_at(170, 90)
+        time.sleep(0.3)
+        self.assertEqual(self.state()['cmd']['sites'], '2', 'two cobble are not enough for a third')
+        self.tap('esc')
+        site = self.state()['sites'][0]
+        ctl.abs(self.win['x'] + int(float(site['sx'])), self.win['y'] + int(float(site['sy'])) + 6)
+        time.sleep(0.2)
+        self.tap('delete')
+        st = self.wait(lambda s: s['cmd']['sites'] == '1')
+        self.assertEqual(st['inv']['cobble'], 8, 'nothing of it was built: all six come back')
+
+    def test_a_soldier_mans_a_watchtower_that_a_worker_built(self):
+        self.start('--workers', '2', '--soldiers', '1')       # (creative: free)
+        self.play()
+        self.cmd_open()
+        self.tap('4')
+        self.click_at(170, 20)
+        st = self.wait(lambda s: s['cmd']['sites'] == '1')
+        site = list(st['sites'].values())[0]
+        self.assertEqual((site['plan'], site['n']), ('watchtower', '29'))
+        st = self.wait(lambda s: s['cmd']['sites'] == '0', timeout=60.0)
+        self.assertEqual(st['hist']['watchpost'], 1)
+        self.ctrl_tap('a')
+        self.wait(lambda s: s['cmd']['sel'] == '3')
+        ctl.abs(self.win['x'] + int(float(site['sx'])), self.win['y'] + int(float(site['sy'])) + 4)
+        time.sleep(0.2)
+        ctl.button(273, True)
+        ctl.button(273, False)
+        st = self.wait(lambda s: list(s['soldiers'].values())[0]['posted'] == '1', timeout=30.0)
+        sol = list(st['soldiers'].values())[0]
+        post_y = float(sol['y'])
+        self.assertGreater(post_y, float(site['hi'].split(',')[1]) - 1.5, 'he stands up on the tower')
+        self.tap('backspace')
+        st = self.wait(lambda s: list(s['soldiers'].values())[0]['posted'] == '0', timeout=10.0)
+        self.assertLess(float(list(st['soldiers'].values())[0]['y']), post_y - 3.0, 'and comes down again')
+
+    def test_a_building_under_way_is_saved_and_the_workers_go_on_with_it(self):
+        self.start('--save', '--workers', '1')
+        self.play()
+        self.cmd_open()
+        self.tap('3')
+        self.click_at(170, 20)
+        self.wait(lambda s: s['cmd']['sites'] == '1')
+        st = self.wait(lambda s: int(s['sites'][0]['missing']) <= 55, timeout=30.0)
+        self.tap('tab')
+        self.wait(lambda s: s['cmd']['on'] == '0')
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '0')
+        missing = int(self.state()['sites'][0]['missing'])
+        self.ctrl_tap('s')
+        self.wait(lambda s: s['state']['saved'] == '1')
+        self.quit_game()
+        with open(os.path.join(self.data, 'player.conf')) as f:
+            self.assertEqual(len([l for l in f.read().splitlines() if l.startswith('site = 0 60 ')]), 1)
+        self.start(flat=False, data=self.data)
+        st = self.state()
+        self.assertEqual(st['cmd']['sites'], '1')
+        self.assertEqual(int(st['sites'][0]['missing']), missing, 'what was built is there, the rest is planned')
+        self.assertEqual(list(st['workers'].values())[0]['order'], '3', 'the worker goes on with it')
+        self.play()
+        self.wait(lambda s: int(s['sites'][0]['missing']) < missing, timeout=30.0)
 
     def test_a_soldier_needs_a_barracks(self):
         self.start('--give', 'cobble=20,planks=10', '--soldiers', '0', survival=True)
@@ -20955,7 +21081,7 @@ class TestBlocks(Base):
         ctl.button(272, False)
         st = self.wait(lambda s: s['cmd']['sel'] == '1')
         post0 = st['soldiers'][i]['post']
-        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 40)
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 80)
         time.sleep(0.1)
         ctl.button(273, True)
         ctl.button(273, False)

@@ -13,7 +13,7 @@ const int8_t bl_face_n[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1
 
 static const char *const k_names[BL_COUNT] = {
 	"air", "grass", "dirt", "stone", "sand", "log", "leaves", "planks", "glass", "water", "bedrock", "brick", "snow", "cobble", "torch", "lamp",
-	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep", "barracks",
+	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep", "barracks", "gate", "watchpost",
 };
 
 const char *bl_block_name(int block)
@@ -36,6 +36,8 @@ float bl_hardness(int block)
 	case BL_STONE: case BL_COBBLE: return 2.0f;
 	case BL_BRICK: return 2.2f;
 	case BL_BARRACKS: return 2.4f;
+	case BL_GATE: return 1.5f;
+	case BL_TOWERPOST: return 2.0f;
 	default: return 0.0f;
 	}
 }
@@ -46,7 +48,7 @@ int bl_drop(int block)
 	case BL_GRASS: return BL_DIRT;
 	case BL_STONE: return BL_COBBLE;
 	case BL_LEAVES: case BL_GLASS: return BL_AIR;
-	case BL_DIRT: case BL_SAND: case BL_LOG: case BL_PLANKS: case BL_BRICK: case BL_SNOW: case BL_COBBLE: case BL_TORCH: case BL_LAMP: case BL_BARRACKS: return block;
+	case BL_DIRT: case BL_SAND: case BL_LOG: case BL_PLANKS: case BL_BRICK: case BL_SNOW: case BL_COBBLE: case BL_TORCH: case BL_LAMP: case BL_BARRACKS: case BL_GATE: case BL_TOWERPOST: return block;
 	default: return BL_AIR;
 	}
 }
@@ -1247,15 +1249,27 @@ out:
 
 /* ---- bodies that are not the player ------------------------------------------------------------------------------------ */
 
-bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h)
+static bool box_hits_as(const struct bl_world *w, float x, float y, float z, float hw, float h, bool foe)
 {
 	int x0 = (int)floorf(x - hw), x1 = (int)ceilf(x + hw) - 1, y0 = (int)floorf(y), y1 = (int)ceilf(y + h) - 1, z0 = (int)floorf(z - hw), z1 = (int)ceilf(z + hw) - 1;
 	for (int yy = y0; yy <= y1; yy++)
 		for (int zz = z0; zz <= z1; zz++)
-			for (int xx = x0; xx <= x1; xx++)
-				if (bl_solid(bl_get(w, xx, yy, zz)))
+			for (int xx = x0; xx <= x1; xx++) {
+				int b = bl_get(w, xx, yy, zz);
+				if (foe ? bl_solid_foe(b) : bl_solid(b))
 					return true;
+			}
 	return false;
+}
+
+bool bl_box_hits(const struct bl_world *w, float x, float y, float z, float hw, float h)
+{
+	return box_hits_as(w, x, y, z, hw, h, false);
+}
+
+bool bl_box_hits_foe(const struct bl_world *w, float x, float y, float z, float hw, float h)
+{
+	return box_hits_as(w, x, y, z, hw, h, true);
 }
 
 float bl_box_support(const struct bl_world *w, float x, float y, float z, float hw, float down)
@@ -1269,14 +1283,14 @@ float bl_box_support(const struct bl_world *w, float x, float y, float z, float 
 	return -1e9f;
 }
 
-bool bl_box_move(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
+static bool box_move_as(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h, bool foe)
 {
 	float *c = axis == 0 ? px : axis == 1 ? py : pz;
 	while (d != 0.0f) {
 		float s = d > 0.25f ? 0.25f : d < -0.25f ? -0.25f : d, old = *c;
 		d -= s;
 		*c = old + s;
-		if (!bl_box_hits(w, *px, *py, *pz, hw, h))
+		if (!box_hits_as(w, *px, *py, *pz, hw, h, foe))
 			continue;
 		float n = *c;
 		if (axis == 1) {
@@ -1285,9 +1299,19 @@ bool bl_box_move(const struct bl_world *w, float *px, float *py, float *pz, int 
 			n = s > 0 ? (float)(int)floorf(n + hw) - hw - 0.001f : (float)(int)floorf(n - hw) + 1.0f + hw + 0.001f;
 		}
 		*c = n;
-		if (bl_box_hits(w, *px, *py, *pz, hw, h))
+		if (box_hits_as(w, *px, *py, *pz, hw, h, foe))
 			*c = old;
 		return true;
 	}
 	return false;
+}
+
+bool bl_box_move(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
+{
+	return box_move_as(w, px, py, pz, axis, d, hw, h, false);
+}
+
+bool bl_box_move_foe(const struct bl_world *w, float *px, float *py, float *pz, int axis, float d, float hw, float h)
+{
+	return box_move_as(w, px, py, pz, axis, d, hw, h, true);
 }

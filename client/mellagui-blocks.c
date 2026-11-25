@@ -21,6 +21,9 @@
  * where you stand, the hand and the settings in player.conf. It is saved a minute after a change, when you pause, and when the window closes. `--seed` and
  * `--flat` make a new world that is NOT saved (so a look at a seed never replaces yours) unless `--save` is given.
  *
+ * Survival has a keep to defend, workers and soldiers commanded from above (Tab), and buildings the workers put up there: a barracks, a watchtower, walls and a
+ * gate (3 .. 6; client/blocksbuild.c). F1 in the game explains it all.
+ *
  * $MELLAGUI_BLOCKS_DUMP=FILE writes the state after every paint for the tests: where the player is, where he looks, the block aimed at, the hand, the
  * render size, the number of blocks of each kind, the boxes of the hotbar and of the buttons of a card.
  */
@@ -36,6 +39,7 @@
 #include <unistd.h>
 
 #include "blocks.h"
+#include "blocksbuild.h"
 #include "blockspets.h"
 #include "blocksmobs.h"
 #include "blocksview.h"
@@ -59,7 +63,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_PGUP = 104, K_PGDN = 109, K_V = 47,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111,
 };
 
 #define SLOTS 9
@@ -159,6 +163,12 @@ struct app {
 	int order_mode;                                         /* what the right button orders: 0 go there, 1 break that block and its kind */
 	bool hover;                                             /* the pointer is over a block of the world */
 	int hover_b[3];
+	int plan;                                               /* what is being placed (enum bl_plan), -1 = nothing: the buttons act on the units */
+	int plan_rot;                                           /* quarter turns on top of the way the camera looks (R) */
+	struct bl_ghosts ghosts;                                /* the planned blocks and the preview, for this frame */
+	float siege_msg_t;                                      /* seconds until "the goblins are breaking through" may be said again */
+	int nsites_conf;                                        /* `site` lines of player.conf */
+	struct bl_site site_conf[BL_SITES_MAX];
 	bool workers_saved;                                     /* player.conf had a `workers` line */
 	int nworkers_conf;
 	float worker_conf[BL_WORKER_MAX][3];
@@ -221,9 +231,9 @@ static bool hand_ok(int b)
 	return b > BL_AIR && b < BL_COUNT && b != BL_BEDROCK && !(b >= BL_FLOW1 && b <= BL_FLOW7);
 }
 
-#define PAL_N 15
+#define PAL_N 17
 #define PAL_COLS 7
-static const int k_palette[PAL_N] = { BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS, BL_WATER, BL_BRICK, BL_SNOW, BL_COBBLE, BL_TORCH, BL_LAMP, BL_BARRACKS };
+static const int k_palette[PAL_N] = { BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS, BL_WATER, BL_BRICK, BL_SNOW, BL_COBBLE, BL_TORCH, BL_LAMP, BL_BARRACKS, BL_GATE, BL_TOWERPOST };
 
 static int hand_block(const struct app *a)
 {
@@ -334,6 +344,27 @@ static int parse_units(const char *v, float out[][3], int max)
 	return n;
 }
 
+/* "plan n x:y:z:block,...": a building under way */
+static bool parse_site(const char *v, struct bl_site *s)
+{
+	int plan, n, used = 0;
+	memset(s, 0, sizeof *s);
+	if (sscanf(v, "%d %d %n", &plan, &n, &used) != 2 || plan < 0 || plan >= BL_PLAN_COUNT || n < 1 || n > BL_SITE_CELLS || used <= 0)
+		return false;
+	s->plan = plan;
+	for (const char *p = v + used; s->n < n;) {
+		int x, y, z, b, m = 0;
+		if (sscanf(p, "%d:%d:%d:%d%n", &x, &y, &z, &b, &m) != 4 || m <= 0 || x < 0 || x >= BL_MAX_SIZE || z < 0 || z >= BL_MAX_SIZE || y < 1 || y >= BL_MAX_H || !bl_siege_hp(b))
+			return false;
+		s->c[s->n++] = (struct bl_cell){ (int16_t)x, (int16_t)y, (int16_t)z, (uint8_t)b };
+		p += m;
+		while (*p == ',' || *p == ' ')
+			p++;
+	}
+	s->on = true;
+	return true;
+}
+
 /* x y z yaw pitch time slot hotbar fov sens flying */
 static void conf_load(struct app *a, bool with_player)
 {
@@ -398,7 +429,10 @@ static void conf_load(struct app *a, bool with_player)
 					p++;
 			}
 		}
-		else if (with_player && !strcmp(k, "workers")) {
+		else if (with_player && !strcmp(k, "site")) {
+			if (a->nsites_conf < BL_SITES_MAX && parse_site(v, &a->site_conf[a->nsites_conf]))
+				a->nsites_conf++;
+		} else if (with_player && !strcmp(k, "workers")) {
 			a->workers_saved = true;
 			a->nworkers_conf = parse_units(v, a->worker_conf, BL_WORKER_MAX);
 		} else if (with_player && !strcmp(k, "soldiers")) {
@@ -481,6 +515,13 @@ static void conf_save(const struct app *a)
 				first = false;
 			}
 	}
+	for (int i = 0; i < BL_SITES_MAX; i++)
+		if (a->mobs.site[i].on) {
+			const struct bl_site *st = &a->mobs.site[i];
+			fprintf(f, "\nsite = %d %d ", st->plan, st->n);
+			for (int k = 0; k < st->n; k++)
+				fprintf(f, "%s%d:%d:%d:%d", k ? "," : "", st->c[k].x, st->c[k].y, st->c[k].z, st->c[k].block);
+		}
 	fprintf(f, "\ninv = ");
 	{
 		bool first = true;
@@ -628,6 +669,8 @@ static void mobs_setup(struct app *a)
 	a->hurt_t = a->hit_t = 0.0f;
 	a->regen_t = 0.0f;
 	a->warned = false;
+	a->plan = -1;
+	a->siege_msg_t = 0.0f;
 }
 
 /* ================================================================ survival: what he has, what he makes, the keep ================================================================ */
@@ -653,10 +696,9 @@ static void inv_add(struct app *a, int block, int n)
 /* what a block can be made into by hand: one of it gives `n_out` of the other (X) */
 struct recipe {
 	int from, to, n_out;
-	int n_in;                                               /* how many of `from` it takes (0 = one) */
 };
 static const struct recipe k_recipes[] = {
-	{ BL_LOG, BL_PLANKS, 4, 1 }, { BL_PLANKS, BL_TORCH, 2, 1 }, { BL_SAND, BL_GLASS, 1, 1 }, { BL_COBBLE, BL_STONE, 1, 1 }, { BL_STONE, BL_BRICK, 1, 1 }, { BL_BRICK, BL_BARRACKS, 1, 4 },
+	{ BL_LOG, BL_PLANKS, 4 }, { BL_PLANKS, BL_TORCH, 2 }, { BL_SAND, BL_GLASS, 1 }, { BL_COBBLE, BL_STONE, 1 }, { BL_STONE, BL_BRICK, 1 },
 };
 #define N_RECIPES ((int)(sizeof k_recipes / sizeof k_recipes[0]))
 
@@ -677,15 +719,11 @@ static bool craft_hand(struct app *a)
 		say(a, "A %s cannot be made into anything", bl_block_name(b));
 		return false;
 	}
-	int need = r->n_in > 0 ? r->n_in : 1;
-	if (a->inv[b] < need) {
-		if (a->inv[b] < 1)
-			say(a, "You have no %s", bl_block_name(b));
-		else
-			say(a, "%d %s are needed for a %s", need, bl_block_name(b), bl_block_name(r->to));
+	if (a->inv[b] < 1) {
+		say(a, "You have no %s", bl_block_name(b));
 		return false;
 	}
-	a->inv[b] -= need;
+	a->inv[b]--;
 	inv_add(a, r->to, r->n_out);
 	say(a, "Made %d %s", r->n_out, bl_block_name(r->to));
 	return true;
@@ -765,8 +803,8 @@ static int nworkers(const struct app *a)
 	return bl_mobs_count_kind(&a->mobs, BL_MOB_WORKER);
 }
 
-/* a free place on the ground near (cx, cz): three rings of eight round it */
-static bool worker_spot(const struct app *a, float cx, float cz, float r0, float out[3])
+/* a free place on the ground near (cx, cz): three rings of eight round it, none higher than `maxy` (so nobody appears on a roof) */
+static bool worker_spot(const struct app *a, float cx, float cz, float r0, float maxy, float out[3])
 {
 	for (int ri = 0; ri < 3; ri++)
 		for (int k = 0; k < 8; k++) {
@@ -775,7 +813,7 @@ static bool worker_spot(const struct app *a, float cx, float cz, float r0, float
 			if (top < 1)
 				continue;
 			float y = (float)top + 1.0f;
-			if (bl_box_hits(a->world, x, y, z, BL_GOBLIN_HW, BL_SOLDIER_H) || bl_water(bl_get(a->world, (int)floorf(x), (int)y, (int)floorf(z))))
+			if (y > maxy || bl_box_hits(a->world, x, y, z, BL_GOBLIN_HW, BL_SOLDIER_H) || bl_water(bl_get(a->world, (int)floorf(x), (int)y, (int)floorf(z))))
 				continue;
 			bool crowded = false;
 			for (int i = 0; i < BL_MOBS_MAX; i++) {
@@ -804,7 +842,7 @@ static bool worker_add(struct app *a)
 {
 	float cx, cz, p[3];
 	worker_home(a, &cx, &cz);
-	if (nworkers(a) >= BL_WORKER_MAX || !worker_spot(a, cx, cz, 2.2f, p))
+	if (nworkers(a) >= BL_WORKER_MAX || !worker_spot(a, cx, cz, 2.2f, a->have_keep ? (float)a->keep[1] + 2.5f : 1e9f, p))
 		return false;
 	return bl_mobs_add(&a->mobs, a->world, BL_MOB_WORKER, p[0], p[1], p[2]);
 }
@@ -899,7 +937,7 @@ static bool train_soldier(struct app *a)
 	int nb = barracks_find(a, where);
 	if (nb == 0) {
 		sound(a, "no");
-		say(a, "A barracks is needed: X makes one of four bricks, put it near the keep");
+		say(a, "A barracks is needed: Tab, then 3, and a worker builds it near the keep");
 		return false;
 	}
 	if (nsoldiers(a) >= BL_SOLDIER_MAX || nsoldiers(a) >= nb * SOLDIERS_PER_BARRACKS) {
@@ -913,7 +951,7 @@ static bool train_soldier(struct app *a)
 		return false;
 	}
 	float p[3];
-	if (!worker_spot(a, where[0], where[2], 2.0f, p) || !bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, p[0], p[1], p[2])) {
+	if (!worker_spot(a, where[0], where[2], 2.0f, where[1] + 1.5f, p) || !bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, p[0], p[1], p[2])) {
 		say(a, "There is no room for a soldier by the barracks");
 		return false;
 	}
@@ -926,11 +964,36 @@ static bool train_soldier(struct app *a)
 	return true;
 }
 
-/* a saved world: the soldiers where they stood (and at their posts) */
+/* a saved world: the soldiers where they stood (and at their posts; one that stood on a watchtower goes back onto it) */
 static void soldiers_restore(struct app *a)
 {
-	for (int i = 0; a->soldiers_saved && i < a->nsoldiers_conf; i++)
-		bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, a->soldier_conf[i][0], a->soldier_conf[i][1], a->soldier_conf[i][2]);
+	for (int i = 0; a->soldiers_saved && i < a->nsoldiers_conf; i++) {
+		const float *p = a->soldier_conf[i];
+		if (!bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, p[0], p[1], p[2]))
+			continue;
+		int x = (int)floorf(p[0]), y = (int)floorf(p[1] - 0.5f), z = (int)floorf(p[2]);
+		if (bl_get(a->world, x, y, z) != BL_TOWERPOST)
+			continue;
+		for (int k = 0; k < BL_MOBS_MAX; k++) {
+			const struct bl_mob *m = &a->mobs.mob[k];
+			if (m->alive && m->kind == BL_MOB_SOLDIER && m->x == p[0] && m->y == p[1] && m->z == p[2])
+				bl_mobs_order_tower(&a->mobs, a->world, k, x, y, z);
+		}
+	}
+}
+
+/* the buildings that were under way: back, and the workers that are free go on with them */
+static void sites_restore(struct app *a)
+{
+	for (int i = 0; i < a->nsites_conf; i++) {
+		bool inside = true;
+		for (int k = 0; k < a->site_conf[i].n; k++)
+			inside &= bl_inside(a->world, a->site_conf[i].c[k].x, a->site_conf[i].c[k].y, a->site_conf[i].c[k].z);
+		int si = inside ? bl_mobs_add_site(&a->mobs, &a->site_conf[i]) : -1;
+		for (int k = 0; si >= 0 && k < BL_MOBS_MAX; k++)
+			if (a->mobs.mob[k].alive && a->mobs.mob[k].kind == BL_MOB_WORKER && a->mobs.mob[k].order == BL_ORDER_IDLE)
+				bl_mobs_order_build(&a->mobs, a->world, k, si);
+	}
 }
 
 /* what the workers have finished: the blocks go, what they leave goes into the pockets */
@@ -943,6 +1006,35 @@ static void apply_breaks(struct app *a, const struct bl_mobs_result *R)
 		int d = bl_drop(b);
 		if (d != BL_AIR)
 			inv_add(a, d, 1);
+	}
+}
+
+/* what the builders put and the goblins broke goes into the world */
+static void apply_build(struct app *a, const struct bl_mobs_result *R, float dt)
+{
+	a->siege_msg_t = fmaxf(0.0f, a->siege_msg_t - dt);
+	for (int k = 0; k < R->nplace; k++)
+		if (bl_cell_missing(a->world, &R->place[k]))
+			bl_set(a->world, R->place[k].x, R->place[k].y, R->place[k].z, R->place[k].block);
+	int smashed = 0;
+	for (int k = 0; k < R->nsmash; k++) {
+		const struct bl_break *c = &R->smash[k];
+		if (bl_siege_hp(bl_get(a->world, c->x, c->y, c->z)) > 0)
+			smashed += bl_set(a->world, c->x, c->y, c->z, BL_AIR);
+	}
+	if (smashed) {
+		say(a, "The goblins have broken through a wall!");
+		sound(a, "no");
+		a->siege_msg_t = 8.0f;
+	} else if (R->siege_hits > 0 && a->siege_msg_t <= 0.0f) {
+		say(a, "The goblins are hammering at your walls");
+		a->siege_msg_t = 12.0f;
+	}
+	for (int k = 0; k < R->nbuilt; k++) {
+		static const char *const k_done[BL_PLAN_COUNT] = { "The barracks is ready: V trains a soldier", "The watchtower is ready: right-click it with a soldier chosen", "A wall is finished", "A gate is finished" };
+		if (R->built[k] >= 0 && R->built[k] < BL_PLAN_COUNT)
+			say(a, "%s", k_done[R->built[k]]);
+		sound(a, "win");
 	}
 }
 
@@ -1057,6 +1149,197 @@ static void cmd_select_box(struct app *a, double x0, double y0, double x1, doubl
 	}
 }
 
+/* ---- building: pick a plan (3 .. 6 or the bar), point at the ground, a worker builds it ---- */
+
+#define KEY_PLAN0 (K_1 + 2)                                     /* 3 barracks, 4 watchtower, 5 wall, 6 gate */
+
+static const char *plan_title(int plan)
+{
+	static const char *const k[BL_PLAN_COUNT] = { "Barracks", "Watchtower", "Wall", "Gate" };
+	return plan >= 0 && plan < BL_PLAN_COUNT ? k[plan] : "?";
+}
+
+static bool plan_affordable(const struct app *a, int plan)
+{
+	int cob, pl;
+	bl_plan_cost(plan, &cob, &pl);
+	return !a->survival || (a->inv[BL_COBBLE] >= cob && a->inv[BL_PLANKS] >= pl);
+}
+
+/* The plan at the block under the pointer, as it would be built: false with *why when it cannot be. `*any` = there is something to show. */
+static bool plan_at_pointer(const struct app *a, struct bl_site *s, const char **why, bool *any)
+{
+	struct bl_camera cam;
+	cmd_camera(a, &cam);
+	float dir[3], eye[3] = { cam.x, cam.y, cam.z };
+	cmd_ray(a, &cam, a->px, a->py, dir);
+	struct bl_hit h;
+	*any = false;
+	*why = "Point at the ground";
+	if (!bl_pick(a->world, eye, dir, 200.0f, &h))
+		return false;
+	int x = h.face == BL_PY ? h.x : h.px, y = h.face == BL_PY ? h.y + 1 : h.py, z = h.face == BL_PY ? h.z : h.pz;
+	int quarter = (((int)lroundf(a->cam_yaw / (float)(M_PI * 0.5)) + a->plan_rot) % 4 + 4) % 4;
+	bool ok = bl_plan_lay(a->world, a->plan, quarter, x, y, z, a->mobs.site, BL_SITES_MAX, s, why);
+	*any = s->n > 0;
+	if (ok && bl_mobs_count_sites(&a->mobs) >= BL_SITES_MAX) {
+		*why = "Too many buildings are under way: wait for one to be finished";
+		ok = false;
+	}
+	if (ok && a->plan == BL_PLAN_BARRACKS) {
+		float cx = a->have_keep ? (float)a->keep[0] : a->pl.x, cz = a->have_keep ? (float)a->keep[2] : a->pl.z, cy = a->have_keep ? (float)a->keep[1] : a->pl.y;
+		if (fabsf((float)x - cx) > (float)(BARRACKS_RANGE - 3) || fabsf((float)z - cz) > (float)(BARRACKS_RANGE - 3) || fabsf((float)y - cy) > 11.0f) {
+			*why = a->have_keep ? "Too far from the keep for a barracks" : "Too far from you for a barracks";
+			ok = false;
+		}
+	}
+	if (ok && !plan_affordable(a, a->plan)) {
+		static char msg[80];
+		int cob, pl;
+		bl_plan_cost(a->plan, &cob, &pl);
+		if (pl)
+			snprintf(msg, sizeof msg, "A %s costs %d cobble and %d planks", bl_plan_name(a->plan), cob, pl);
+		else
+			snprintf(msg, sizeof msg, "A %s costs %d cobble", bl_plan_name(a->plan), cob);
+		*why = msg;
+		ok = false;
+	}
+	return ok;
+}
+
+/* the left button with a plan in hand: pay, lay the site, send the builders (the chosen workers, else every idle one) */
+static bool build_place(struct app *a)
+{
+	struct bl_site s;
+	const char *why = NULL;
+	bool any;
+	if (a->plan < 0)
+		return false;
+	if (!plan_at_pointer(a, &s, &why, &any)) {
+		sound(a, "no");
+		say(a, "%s", why ? why : "It cannot be built there");
+		return false;
+	}
+	int si = bl_mobs_add_site(&a->mobs, &s);
+	if (si < 0)
+		return false;
+	if (a->survival) {
+		int cob, pl;
+		bl_plan_cost(a->plan, &cob, &pl);
+		a->inv[BL_COBBLE] -= cob;
+		a->inv[BL_PLANKS] -= pl;
+	}
+	bool chosen = false;
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		chosen |= a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_WORKER && a->mobs.mob[i].selected;
+	int sent = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *m = &a->mobs.mob[i];
+		if (m->alive && m->kind == BL_MOB_WORKER && (chosen ? m->selected : m->order == BL_ORDER_IDLE))
+			sent += bl_mobs_order_build(&a->mobs, a->world, i, si);
+	}
+	sound(a, "place");
+	if (sent)
+		say(a, "%s: %d worker%s to build it", plan_title(a->plan), sent, sent == 1 ? "" : "s");
+	else
+		say(a, "%s planned. No worker is free: choose one and right-click the plan", plan_title(a->plan));
+	if (a->plan != BL_PLAN_WALL && a->plan != BL_PLAN_GATE)     /* (walls and gates come in rows: the plan stays in hand) */
+		a->plan = -1;
+	return true;
+}
+
+/* the building under way that the pointer is on (a planned block, or one of its blocks that is there already), or -1 */
+static int site_at_pointer(const struct app *a)
+{
+	struct bl_camera cam;
+	cmd_camera(a, &cam);
+	float dir[3], eye[3] = { cam.x, cam.y, cam.z };
+	cmd_ray(a, &cam, a->px, a->py, dir);
+	struct bl_hit h;
+	float best = bl_pick(a->world, eye, dir, 200.0f, &h) ? h.t + 0.1f : 200.0f;
+	int found = -1;
+	for (int i = 0; i < BL_SITES_MAX; i++) {
+		if (!a->mobs.site[i].on)
+			continue;
+		static struct bl_ghosts g;
+		float rgb[3], al, t;
+		bl_ghosts_clear(&g);
+		bl_ghosts_add(&g, NULL, &a->mobs.site[i], 0);
+		if (bl_ghosts_ray(&g, eye, dir, best, rgb, &al, &t)) {
+			best = t;
+			found = i;
+		}
+	}
+	return found;
+}
+
+/* Delete: the building under the pointer is given up; the part of its price that is not built yet comes back */
+static bool build_cancel(struct app *a)
+{
+	int si = site_at_pointer(a);
+	if (si < 0) {
+		say(a, "Point at a planned building to take it away");
+		return false;
+	}
+	const struct bl_site *s = &a->mobs.site[si];
+	int plan = s->plan, left = bl_site_missing(a->world, s), cob, pl;
+	bl_plan_cost(plan, &cob, &pl);
+	cob = cob * left / s->n;
+	pl = pl * left / s->n;
+	bl_mobs_remove_site(&a->mobs, si);
+	if (a->survival) {
+		inv_add(a, BL_COBBLE, cob);
+		inv_add(a, BL_PLANKS, pl);
+		say(a, "The %s is given up: %d cobble and %d planks come back", bl_plan_name(plan), cob, pl);
+	} else {
+		say(a, "The %s is given up", bl_plan_name(plan));
+	}
+	return true;
+}
+
+/* the watchpost of the tower that the block is a part of (or stands under), if any */
+static bool tower_at(const struct app *a, const struct bl_hit *h, int post[3])
+{
+	for (int y = h->y - 1; y <= h->y + 6; y++)
+		for (int z = h->z - 1; z <= h->z + 1; z++)
+			for (int x = h->x - 1; x <= h->x + 1; x++)
+				if (bl_get(a->world, x, y, z) == BL_TOWERPOST) {
+					post[0] = x;
+					post[1] = y;
+					post[2] = z;
+					return true;
+				}
+	return false;
+}
+
+/* the bar of the plans at the bottom of the command view (it takes the hotbar's place) */
+static void bar_rect(const struct app *a, int i, int *x, int *y, int *bw, int *bh)
+{
+	*bw = LM_CLAMP((a->win.bw - 24) / BL_PLAN_COUNT - 6, 70, 170);
+	*bh = 42;
+	*x = (a->win.bw - (BL_PLAN_COUNT * (*bw + 6) - 6)) / 2 + i * (*bw + 6);
+	*y = a->win.bh - *bh - 12;
+}
+
+static int bar_at(const struct app *a, double px, double py)
+{
+	for (int i = 0; i < BL_PLAN_COUNT; i++) {
+		int x, y, bw, bh;
+		bar_rect(a, i, &x, &y, &bw, &bh);
+		if (px >= x && px < x + bw && py >= y && py < y + bh)
+			return i;
+	}
+	return -1;
+}
+
+static void choose_plan(struct app *a, int plan)
+{
+	a->plan = a->plan == plan ? -1 : plan;
+	a->drag_sel = false;
+	if (a->plan >= 0)
+		say(a, "%s: left click builds it, R turns it, right click puts it aside", plan_title(plan));
+}
+
 /* the right button: the chosen workers go there, or break the block under the pointer and then the next of its kind */
 static void cmd_order(struct app *a)
 {
@@ -1064,6 +1347,21 @@ static void cmd_order(struct app *a)
 	if (n == 0) {
 		say(a, "Choose workers or soldiers first: the left button");
 		return;
+	}
+	if (a->order_mode == 0) {                                   /* a planned building: the chosen workers build it */
+		int si = site_at_pointer(a), sent = 0, workers = 0;
+		for (int i = 0; si >= 0 && i < BL_MOBS_MAX; i++) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			if (m->alive && m->kind == BL_MOB_WORKER && m->selected) {
+				workers++;
+				sent += bl_mobs_order_build(&a->mobs, a->world, i, si);
+			}
+		}
+		if (si >= 0 && workers) {
+			say(a, sent ? "%d worker%s: build the %s" : "They cannot reach it", sent, sent == 1 ? "" : "s", bl_plan_name(a->mobs.site[si].plan));
+			sound(a, sent ? "place" : "no");
+			return;
+		}
 	}
 	struct bl_camera cam;
 	cmd_camera(a, &cam);
@@ -1074,10 +1372,16 @@ static void cmd_order(struct app *a)
 		say(a, "Nothing there");
 		return;
 	}
-	int ok = 0, k = 0, soldiers = 0;
+	int ok = 0, k = 0, soldiers = 0, manned = -1, post[3];
+	if (a->order_mode == 0 && tower_at(a, &h, post))            /* a watchtower: one chosen soldier goes up (one that is not on it already) */
+		for (int i = 0; i < BL_MOBS_MAX && manned < 0; i++) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			if (m->alive && m->kind == BL_MOB_SOLDIER && m->selected && bl_mobs_order_tower(&a->mobs, a->world, i, post[0], post[1], post[2]))
+				manned = i;
+		}
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		struct bl_mob *m = &a->mobs.mob[i];
-		if (!m->alive || !bl_mob_is_unit(m->kind) || !m->selected)
+		if (!m->alive || !bl_mob_is_unit(m->kind) || !m->selected || i == manned)
 			continue;
 		if (a->order_mode == 1 && m->kind == BL_MOB_WORKER) {
 			ok += bl_mobs_order_gather(&a->mobs, a->world, i, h.x, h.y, h.z);
@@ -1089,7 +1393,10 @@ static void cmd_order(struct app *a)
 		}
 		k++;
 	}
-	if (a->order_mode == 1 && ok > soldiers)
+	if (manned >= 0) {
+		say(a, ok ? "A soldier goes up the watchtower, %d unit%s there" : "A soldier goes up the watchtower", ok, ok == 1 ? " goes" : "s go");
+		ok++;
+	} else if (a->order_mode == 1 && ok > soldiers)
 		say(a, "%d unit%s: break %s%s", ok - soldiers, ok - soldiers == 1 ? "" : "s", bl_block_name(bl_get(a->world, h.x, h.y, h.z)), soldiers ? " (the soldiers go and stand guard there)" : "");
 	else if (a->order_mode == 1 && ok == 0)
 		say(a, "They cannot reach that");
@@ -1111,6 +1418,7 @@ static void enter_cmd(struct app *a)
 	a->cam_f[1] = (float)bl_top(a->world, (int)floorf(a->pl.x), (int)floorf(a->pl.z)) + 1.0f;
 	a->cam_f[2] = a->pl.z;
 	a->cam_yaw = a->pl.yaw;
+	a->plan = -1;
 	if (a->cam_dist < 7.0f)
 		a->cam_dist = 16.0f;
 	wlwin_lock_pointer(&a->win, false);
@@ -1466,6 +1774,7 @@ static void mobs_advance(struct app *a, float dt)
 	bl_mobs_step(&a->mobs, a->world, feet, a->hp > 0.0f, a->time_h, dt, &R);
 	if (R.nbreak > 0)
 		apply_breaks(a, &R);
+	apply_build(a, &R, dt);
 	if (R.workers_lost > 0) {
 		say(a, R.workers_lost == 1 ? "A goblin killed a worker!" : "Goblins killed workers!");
 		sound(a, "no");
@@ -1791,7 +2100,12 @@ static const char *order_text(const struct app *a, const struct bl_mob *m, char 
 		snprintf(buf, n, "%s %s", m->work > 0.0f ? "breaking" : "going to", bl_block_name(m->gblock));
 		return buf;
 	}
-	(void)a;
+	if (m->order == BL_ORDER_BUILD && m->site >= 0 && m->site < BL_SITES_MAX && a->mobs.site[m->site].on) {
+		snprintf(buf, n, "%s %s", m->at_site ? "building the" : "going to the", bl_plan_name(a->mobs.site[m->site].plan));
+		return buf;
+	}
+	if (m->order == BL_ORDER_TOWER)
+		return m->posted ? "on the watchtower" : "going to the tower";
 	if (m->kind == BL_MOB_SOLDIER)
 		return hypotf(m->tx - m->x, m->tz - m->z) > 1.2f ? "going to its post" : "on guard";
 	return m->order == BL_ORDER_MOVE ? "going" : "idle";
@@ -1844,11 +2158,42 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 	shadow_text(w, 8, y0, "COMMAND VIEW", 0xffe080u);
 	snprintf(l, sizeof l, "Left: choose (drag a box, Shift adds)   Right: %s   1 go there, 2 break blocks", a->order_mode == 1 ? "break that block and the rest of its kind" : "go there");
 	shadow_text(w, 8, y0 + LM_FONT_H + 2, l, 0xffffffu);
+	shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), "Build: 3 to 6 or the bar below, R turns it, Delete takes a plan away", 0xffffffu);
 	snprintf(l, sizeof l, "B: a worker (%d planks)   V: a soldier (a barracks, %d cobble, %d planks)", WORKER_COST, SOLDIER_COBBLE, SOLDIER_PLANKS);
-	shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), l, 0xffffffu);
-	shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
-	snprintf(l, sizeof l, "Workers %d, soldiers %d, chosen %d", nworkers(a), nsoldiers(a), cmd_selected(a));
-	shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), l, 0xc8e8ffu);
+	shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), l, 0xffffffu);
+	shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
+	snprintf(l, sizeof l, "Workers %d, soldiers %d, chosen %d, being built %d", nworkers(a), nsoldiers(a), cmd_selected(a), bl_mobs_count_sites(&a->mobs));
+	shadow_text(w, 8, y0 + 5 * (LM_FONT_H + 2), l, 0xc8e8ffu);
+	for (int i = 0; i < BL_PLAN_COUNT; i++) {                                /* the plans */
+		int x, y, bw, bh, cob, pl;
+		bar_rect(a, i, &x, &y, &bw, &bh);
+		bl_plan_cost(i, &cob, &pl);
+		if (a->plan == i) {
+			wlwin_round_fill(w, x - 3, y - 3, bw + 6, bh + 6, 8, 0xf0f0f0u);
+			wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, 7, 0x2b3039u);
+		} else {
+			wlwin_round_fill(w, x, y, bw, bh, 7, 0x2b3039u);
+		}
+		snprintf(l, sizeof l, "%d %s", i + 3, plan_title(i));
+		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 3, l, 1, 0xffffffu, bw - 6);
+		if (!a->survival)
+			snprintf(l, sizeof l, "free");
+		else if (pl)
+			snprintf(l, sizeof l, "%d cobble %d planks", cob, pl);
+		else
+			snprintf(l, sizeof l, "%d cobble", cob);
+		if (lm_font_text_width(l) > bw - 6)
+			snprintf(l, sizeof l, "%dc %dp", cob, pl);
+		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 5 + LM_FONT_H, l, 1, plan_affordable(a, i) ? 0xa8b0bcu : 0xff6a5au, bw - 6);
+	}
+	if (a->plan >= 0 && a->has_pointer && bar_at(a, a->px, a->py) < 0) {     /* what a click would do, by the pointer */
+		struct bl_site s;
+		const char *why = NULL;
+		bool any, ok = plan_at_pointer(a, &s, &why, &any);
+		const char *t = ok ? "Click to build" : why ? why : "";
+		int tw = lm_font_text_width(t);
+		shadow_text(w, LM_CLAMP((int)a->px - tw / 2, 4, LM_MAX(4, w->bw - tw - 4)), (int)a->py + 18, t, ok ? 0x90ff90u : 0xff9080u);
+	}
 }
 
 static void paint_debug(struct app *a)
@@ -1923,7 +2268,7 @@ static const char *const HP_BUILDING[] = {
 	"- A torch gives light and stands on a block; it goes if the block under it goes. A lamp is a block that shines.",
 	"- Water you put by hand is a source and flows: down first, then out as far as seven blocks. Take the source away and the flow dries up.",
 	"- Bedrock at the bottom cannot be broken. The keep (a tower of three grey blocks) cannot be broken by hand either.",
-	"- A barracks (red brick, blue banner) is where soldiers are trained.",
+	"- A barracks, a watchtower, a wall and a gate are built by workers (see Buildings). A gate lets you and your people through and stops the goblins.",
 	"# Light",
 	"Torches and lamps light the blocks round them; a cave without one is dim. The light goes round corners and through glass and water, and goes when the torch does.",
 };
@@ -1947,7 +2292,6 @@ static const char *const HP_SURVIVAL[] = {
 	"|Sand|Glass.",
 	"|Cobble|Stone.",
 	"|Stone|Brick.",
-	"|Brick (four)|A barracks.",
 };
 
 static const char *const HP_NIGHT[] = {
@@ -1978,7 +2322,7 @@ static const char *const HP_KEEP[] = {
 
 static const char *const HP_SOLDIERS[] = {
 	"# Barracks",
-	"A barracks is a block of red brick in a timber frame with a blue banner. It is made of four bricks (hold bricks, press X; a stone makes a brick) and put anywhere within forty blocks of the keep. A hand can take it away again.",
+	"Soldiers need a barracks: a house with a blue banner over its door, built by workers from the command view (see Buildings) within forty blocks of the keep. The banner block is what counts: without it the house trains nobody.",
 	"|V|In the command view: train a soldier. He stands by the barracks. It costs six cobble and four planks (free in creative) and takes a barracks: four soldiers to each, eight in all.",
 	"# Soldiers",
 	"A soldier has fourteen hit points and a sword that does what yours does: three blows kill a goblin. He goes after a goblin that comes within twelve blocks of him (and within eighteen of his post), then goes back to his post and stands guard.",
@@ -2000,6 +2344,7 @@ static const char *const HP_COMMAND[] = {
 	"# Giving orders",
 	"|Right button|Send the chosen workers where the pointer is (mode 1), or have them break that block and the next of its kind (mode 2).",
 	"|1, 2|Mode 1: go there. Mode 2: break. The mode is written at the top.",
+	"|3 to 6|Build: see the page Buildings.",
 	"|Backspace|Stop what the chosen are doing.",
 	"# Gathering",
 	"A worker stands beside the block, works for one and a half times as long as you would and then goes on to the next block of the same kind within six blocks. A tree is aimed at its lowest log: the whole trunk and the leaves of its crown go together. What he breaks goes into your pockets.",
@@ -2008,6 +2353,25 @@ static const char *const HP_COMMAND[] = {
 	"|Arrows|Turn it.",
 	"|Wheel|Come nearer or go further.",
 	"|Home|Back to the keep.",
+};
+
+static const char *const HP_BUILDINGS[] = {
+	"# How to build",
+	"In the command view (Tab) pick a building with 3 to 6 or the bar at the bottom. A see-through preview follows the pointer: green where it can be built, red where not, with the reason by the pointer. The left button places it and the price is taken from your pockets (nothing in creative).",
+	"The workers you have chosen go and build it, or every idle worker when none is chosen. A worker puts a block every half second; two are twice as quick. The blue see-through blocks are what is still to come.",
+	"|R|Turn the building. It also turns with the camera: the front of a barracks faces you.",
+	"|Right button|With a plan in hand: put it aside. With workers chosen (mode 1) on a planned building: they build it.",
+	"|Delete|Point at a planned building: it is given up and the price of what is not built yet comes back.",
+	"|Esc|Put the plan aside.",
+	"# The buildings",
+	"|3 Barracks|20 cobble, 16 planks. A house of five by four where soldiers are trained. It wants flat, empty ground within forty blocks of the keep.",
+	"|4 Watchtower|20 cobble, 10 planks. Flat ground, three by three. A soldier on it shoots arrows.",
+	"|5 Wall|6 cobble. Three long, two high, following the ground. It stays in your hand, so a row is quick. Walls that share a corner join.",
+	"|6 Gate|6 cobble, 4 planks. Two posts and a gate: you, your workers and your soldiers walk through it, goblins do not.",
+	"# The watchtower",
+	"Choose a soldier and right-click the tower: he goes to its foot and climbs up. From there he shoots goblins within twenty blocks that he can see - four arrows kill one - and the goblins leave him alone. Send him somewhere else, or press Backspace, and he comes down. One soldier to a tower. If the block with the yellow flag is broken he falls and is on the ground again.",
+	"# Goblins and walls",
+	"A goblin that is after you, your people or the keep and finds a made block in its way - cobble, planks, brick, glass, a gate - hammers at it until it breaks. A wall holds one goblin for some twenty seconds, a gate for fifteen, a brute is quicker. Stone and earth of the land itself they leave alone. Broken blocks are not repaired by themselves: plan the wall again over the gap.",
 };
 
 static const char *const HP_KEYS[] = {
@@ -2027,6 +2391,8 @@ static const char *const HP_KEYS[] = {
 	"|Tab|Command view",
 	"|B|Train a worker (command view)",
 	"|V|Train a soldier (command view)",
+	"|3 4 5 6|Barracks, watchtower, wall, gate (command view)",
+	"|R, Delete|Turn a building, give a planned one up (command view)",
 	"# Time",
 	"|[ ]|The clock an hour",
 	"|T|Stand / run / real sun",
@@ -2046,6 +2412,7 @@ static const struct wlhelp_page BLOCKS_HELP[] = {
 	{ "The keep", HP_KEEP, WLHELP_N(HP_KEEP) },
 	{ "Soldiers, waves", HP_SOLDIERS, WLHELP_N(HP_SOLDIERS) },
 	{ "The command view", HP_COMMAND, WLHELP_N(HP_COMMAND) },
+	{ "Buildings", HP_BUILDINGS, WLHELP_N(HP_BUILDINGS) },
 	{ "All the keys", HP_KEYS, WLHELP_N(HP_KEYS) },
 };
 #define BLOCKS_HELP_N WLHELP_N(BLOCKS_HELP)
@@ -2208,16 +2575,31 @@ static void write_dump(struct app *a)
 	{
 		struct bl_camera cam;
 		cmd_camera(a, &cam);
-		fprintf(f, "cmd on=%d mode=%d sel=%d workers=%d soldiers=%d dist=%.1f yaw=%.3f focus=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f\n", a->cmd, a->order_mode, cmd_selected(a), nworkers(a), nsoldiers(a), a->cam_dist, a->cam_yaw,
-		        a->cam_f[0], a->cam_f[1], a->cam_f[2], cam.x, cam.y, cam.z);
+		fprintf(f, "cmd on=%d mode=%d sel=%d workers=%d soldiers=%d dist=%.1f yaw=%.3f focus=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f plan=%d rot=%d sites=%d\n", a->cmd, a->order_mode, cmd_selected(a), nworkers(a), nsoldiers(a), a->cam_dist, a->cam_yaw,
+		        a->cam_f[0], a->cam_f[1], a->cam_f[2], cam.x, cam.y, cam.z, a->plan, a->plan_rot, bl_mobs_count_sites(&a->mobs));
+		for (int i = 0; i < BL_PLAN_COUNT; i++) {
+			int x, y, bw, bh;
+			bar_rect(a, i, &x, &y, &bw, &bh);
+			fprintf(f, "bar %d x=%d y=%d w=%d h=%d\n", i, x, y, bw, bh);
+		}
+		for (int i = 0; i < BL_SITES_MAX; i++) {
+			const struct bl_site *st = &a->mobs.site[i];
+			if (!st->on)
+				continue;
+			int lo[3], hi[3];
+			float sx = -1, sy = -1;
+			bl_site_box(st, lo, hi);
+			cmd_project(a, &cam, 0.5f * (float)(lo[0] + hi[0] + 1), (float)(hi[1] + 1), 0.5f * (float)(lo[2] + hi[2] + 1), &sx, &sy);
+			fprintf(f, "site %d plan=%s n=%d missing=%d lo=%d,%d,%d hi=%d,%d,%d sx=%.1f sy=%.1f\n", i, bl_plan_name(st->plan), st->n, bl_site_missing(a->world, st), lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], sx, sy);
+		}
 		for (int i = 0; i < BL_MOBS_MAX; i++) {
 			const struct bl_mob *m = &a->mobs.mob[i];
 			float sx = -1, sy = -1;
 			if (!m->alive || !bl_mob_is_unit(m->kind))
 				continue;
 			bool vis = cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy);
-			fprintf(f, "%s %d x=%.3f y=%.3f z=%.3f hp=%.1f order=%d sel=%d vis=%d sx=%.1f sy=%.1f gather=%d,%d,%d post=%.2f,%.2f\n", m->kind == BL_MOB_SOLDIER ? "soldier" : "worker", i, m->x, m->y, m->z, m->hp, m->order, m->selected, vis, sx, sy, m->gx, m->gy,
-			        m->gz, m->tx, m->tz);
+			fprintf(f, "%s %d x=%.3f y=%.3f z=%.3f hp=%.1f order=%d sel=%d vis=%d sx=%.1f sy=%.1f gather=%d,%d,%d post=%.2f,%.2f posted=%d site=%d\n", m->kind == BL_MOB_SOLDIER ? "soldier" : "worker", i, m->x, m->y, m->z, m->hp, m->order, m->selected, vis, sx, sy, m->gx, m->gy,
+			        m->gz, m->tx, m->tz, m->posted, m->order == BL_ORDER_BUILD ? m->site : -1);
 		}
 	}
 	fprintf(f, "inv");
@@ -2339,6 +2721,19 @@ static void paint(struct wlwin *w)
 		v.ty = a->aim.y;
 		v.tz = a->aim.z;
 	}
+	bl_ghosts_clear(&a->ghosts);
+	for (int i = 0; i < BL_SITES_MAX; i++)
+		if (a->mobs.site[i].on)
+			bl_ghosts_add(&a->ghosts, a->world, &a->mobs.site[i], 0x80c8ffu);
+	if (a->cmd && a->plan >= 0 && a->prompt == P_NONE && a->has_pointer && bar_at(a, a->px, a->py) < 0) {    /* the preview: green where it can be built, red where not */
+		struct bl_site s;
+		const char *why = NULL;
+		bool any, ok = plan_at_pointer(a, &s, &why, &any);
+		if (any)
+			bl_ghosts_add(&a->ghosts, NULL, &s, ok ? 0x50f070u : 0xff4030u);
+	}
+	if (a->ghosts.n)
+		v.ghosts = &a->ghosts;
 	bl_render(a->world, &cam, &v, a->frame, a->rw, a->rh, a->rw, a->threads);
 	if (a->hurt_t > 0.0f || a->hp <= 0.0f)
 		red_flash(a);
@@ -2350,7 +2745,8 @@ static void paint(struct wlwin *w)
 
 	struct lay L;
 	layout(a, &L);
-	paint_hotbar(a, &L);
+	if (!a->cmd || a->prompt != P_NONE)
+		paint_hotbar(a, &L);
 	paint_hearts(a, &L);
 	if (a->survival)
 		paint_survival(a);
@@ -2486,7 +2882,17 @@ static void cmd_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 {
 	if (op == LM_WL_POINTER_EVT_BUTTON) {
 		uint32_t button = args[2].u, state = args[3].u;
-		if (button == 272 && state == 1) {
+		int bar = bar_at(a, a->px, a->py);
+		if (button == 272 && state == 1 && bar >= 0) {
+			choose_plan(a, bar);
+		} else if (button == 272 && state == 1 && a->plan >= 0) {
+			build_place(a);
+		} else if (button == 273 && state == 1 && a->plan >= 0) {
+			a->plan = -1;
+			say(a, "Nothing is being placed");
+		} else if (button == 273 && bar >= 0) {
+			;
+		} else if (button == 272 && state == 1) {
 			a->drag_sel = true;
 			a->drag_x = a->px;
 			a->drag_y = a->py;
@@ -2612,8 +3018,25 @@ static bool cmd_key(struct app *a, uint32_t code)
 	switch (code) {
 	case K_G: case K_M: case K_P: case K_E: case K_F1: case K_F3: case K_X:
 		return false;
-	case K_TAB: case K_ESC:
+	case K_TAB:
 		leave_cmd(a);
+		return true;
+	case K_ESC:
+		if (a->plan >= 0) {                                     /* first the plan is put aside, then the view */
+			a->plan = -1;
+			say(a, "Nothing is being placed");
+		} else {
+			leave_cmd(a);
+		}
+		return true;
+	case KEY_PLAN0: case KEY_PLAN0 + 1: case KEY_PLAN0 + 2: case KEY_PLAN0 + 3:
+		choose_plan(a, (int)code - KEY_PLAN0);
+		return true;
+	case K_R:
+		a->plan_rot = (a->plan_rot + 1) % 4;
+		return true;
+	case K_DEL:
+		build_cancel(a);
 		return true;
 	case K_B:
 		train_worker(a);
@@ -2623,10 +3046,12 @@ static bool cmd_key(struct app *a, uint32_t code)
 		return true;
 	case K_1:
 		a->order_mode = 0;
+		a->plan = -1;
 		say(a, "Right button: go there");
 		return true;
 	case K_1 + 1:
 		a->order_mode = 1;
+		a->plan = -1;
 		say(a, "Right button: break that block and the next of its kind");
 		return true;
 	case K_BACKSPACE:
@@ -3391,13 +3816,77 @@ static int selftest(void)
 		R.brk[0].z = 10;
 		apply_breaks(&wa, &R);
 		CHECK(bl_get(wa.world, 10, 25, 10) == BL_AIR && wa.inv[BL_LOG] == 1, "a block the workers finished is gone and in the pockets");
-		/* barracks and soldiers */
+		/* building: the plan at the pointer, its price, the builders, giving it up */
 		wa.hotbar[0] = BL_BRICK;
 		wa.slot = 0;
-		wa.inv[BL_BRICK] = 3;
-		CHECK(!craft_hand(&wa) && wa.inv[BL_BARRACKS] == 0 && wa.inv[BL_BRICK] == 3, "three bricks are not enough for a barracks");
 		wa.inv[BL_BRICK] = 9;
-		CHECK(craft_hand(&wa) && wa.inv[BL_BRICK] == 5 && wa.inv[BL_BARRACKS] == 1, "four bricks make a barracks");
+		CHECK(craft_hand(&wa) == false && wa.inv[BL_BRICK] == 9, "bricks make nothing: a barracks is built");
+		wa.cmd = true;
+		wa.has_pointer = true;
+		wa.cam_f[0] = (float)wa.keep[0] + 10.5f;
+		wa.cam_f[1] = (float)wa.keep[1];
+		wa.cam_f[2] = (float)wa.keep[2] + 0.5f;
+		wa.cam_yaw = 0.0f;
+		wa.cam_dist = 16.0f;
+		wa.px = 320.0;
+		wa.py = 180.0;
+		wa.plan = -1;
+		choose_plan(&wa, BL_PLAN_BARRACKS);
+		CHECK(wa.plan == BL_PLAN_BARRACKS, "a plan in hand");
+		struct bl_site ps;
+		const char *why = NULL;
+		bool any = false;
+		wa.inv[BL_COBBLE] = 19;
+		wa.inv[BL_PLANKS] = 16;
+		CHECK(!plan_at_pointer(&wa, &ps, &why, &any) && any && strstr(why, "costs 20 cobble"), "19 cobble are not enough (%s)", why ? why : "-");
+		CHECK(!build_place(&wa) && bl_mobs_count_sites(&wa.mobs) == 0 && wa.inv[BL_COBBLE] == 19, "nothing is planned or paid");
+		wa.inv[BL_COBBLE] = 25;
+		CHECK(build_place(&wa) && bl_mobs_count_sites(&wa.mobs) == 1 && wa.inv[BL_COBBLE] == 5 && wa.inv[BL_PLANKS] == 0 && wa.plan == -1, "the barracks is planned and paid for (%d %d)", wa.inv[BL_COBBLE], wa.inv[BL_PLANKS]);
+		int sent = 0;
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			sent += wa.mobs.mob[i].alive && wa.mobs.mob[i].order == BL_ORDER_BUILD;
+		CHECK(sent == 2, "both idle workers go to build it (%d)", sent);
+		CHECK(site_at_pointer(&wa) == 0, "the pointer finds the plan");
+		choose_plan(&wa, BL_PLAN_BARRACKS);
+		CHECK(!plan_at_pointer(&wa, &ps, &why, &any) && strstr(why, "planned"), "not twice on one place (%s)", why ? why : "-");
+		wa.plan = -1;
+		/* saved while it is under way */
+		conf_save(&wa);
+		static struct app ws;
+		memset(&ws, 0, sizeof ws);
+		memcpy(ws.dir, wa.dir, sizeof ws.dir);
+		ws.fov = 1.2f;
+		ws.sens = 0.0025f;
+		memcpy(ws.hotbar, k_default_hotbar, sizeof ws.hotbar);
+		conf_load(&ws, true);
+		CHECK(ws.nsites_conf == 1 && ws.site_conf[0].plan == BL_PLAN_BARRACKS && ws.site_conf[0].n == wa.mobs.site[0].n &&
+		      !memcmp(ws.site_conf[0].c, wa.mobs.site[0].c, (size_t)ws.site_conf[0].n * sizeof ws.site_conf[0].c[0]), "the plan is in the file, block for block");
+		struct bl_site bad_site;
+		CHECK(!parse_site("9 1 1:2:3:7", &bad_site) && !parse_site("0 2 1:2:3:7", &bad_site) && !parse_site("0 1 1:2:3:3", &bad_site) && !parse_site("0 1 -1:2:3:7", &bad_site) && !parse_site("0 999 1:2:3:7", &bad_site) &&
+		      parse_site("2 1 10:20:30:13", &bad_site), "damaged site lines are not believed");
+		/* the workers build it and the barracks counts; creative costs nothing */
+		for (int i = 0; i < 60 * 60 && bl_mobs_count_sites(&wa.mobs); i++)
+			mobs_advance(&wa, 1.0f / 60.0f);
+		CHECK(bl_mobs_count_sites(&wa.mobs) == 0 && barracks_find(&wa, NULL) == 1, "it gets built and counts as a barracks (%d, %d)", bl_mobs_count_sites(&wa.mobs), barracks_find(&wa, NULL));
+		wa.cam_f[0] = (float)wa.keep[0] - 8.5f;
+		wa.inv[BL_COBBLE] = 12;
+		wa.inv[BL_PLANKS] = 0;
+		choose_plan(&wa, BL_PLAN_WALL);
+		CHECK(build_place(&wa) && wa.plan == BL_PLAN_WALL && wa.inv[BL_COBBLE] == 6, "a wall costs six and stays in hand");
+		wa.plan = -1;
+		CHECK(build_cancel(&wa) && bl_mobs_count_sites(&wa.mobs) == 0 && wa.inv[BL_COBBLE] == 12, "given up before a block: all comes back (%d)", wa.inv[BL_COBBLE]);
+		wa.cmd = false;
+		wa.has_pointer = false;
+		/* soldiers: at the barracks that was built they stand on the ground, not on its roof */
+		wa.inv[BL_COBBLE] = 100;
+		wa.inv[BL_PLANKS] = 100;
+		CHECK(train_soldier(&wa) && nsoldiers(&wa) == 1, "a soldier at the built barracks");
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			if (wa.mobs.mob[i].alive && wa.mobs.mob[i].kind == BL_MOB_SOLDIER)
+				CHECK(wa.mobs.mob[i].y < (float)wa.keep[1] + 1.0f, "on the ground (%.1f)", wa.mobs.mob[i].y);
+		bl_mobs_clear_kind(&wa.mobs, BL_MOB_SOLDIER);
+		for (float b[3]; barracks_find(&wa, b) > 0;)
+			bl_set(wa.world, (int)b[0], (int)b[1], (int)b[2], BL_AIR);
 		wa.inv[BL_COBBLE] = 100;
 		wa.inv[BL_PLANKS] = 100;
 		CHECK(!train_soldier(&wa) && nsoldiers(&wa) == 0 && wa.inv[BL_COBBLE] == 100, "no soldier without a barracks");
@@ -3748,10 +4237,12 @@ int main(int argc, char **argv)
 		for (int i = 0; i < soldiers_cli; i++) {
 			float cx, cz, sp[3];
 			worker_home(&a, &cx, &cz);
-			if (worker_spot(&a, cx, cz, 3.0f, sp))
+			if (worker_spot(&a, cx, cz, 3.0f, a.have_keep ? (float)a.keep[1] + 2.5f : 1e9f, sp))
 				bl_mobs_add(&a.mobs, a.world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]);
 		}
 	}
+	if (from_file)
+		sites_restore(&a);
 	for (char *tok = strtok(give, ","); tok; tok = strtok(NULL, ",")) {
 		char *eq = strchr(tok, '=');
 		int n = eq ? atoi(eq + 1) : 1;

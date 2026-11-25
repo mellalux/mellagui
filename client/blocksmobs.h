@@ -12,13 +12,18 @@
  * goblin is made of eleven boxes (legs that swing, a body, arms, a head with ears, a nose and two red eyes that shine in the dark). The caller sets how brightly the
  * mob is lit with `bl_mobs_light` once a frame.
  *
- * Not done: finding a way round a wall (a goblin that is blocked turns to one side until it is free), more kinds, shooting ones, mobs that are not hostile, mobs
- * that spawn in caves or by day.
+ * The player's own are mobs too: workers (they walk, break blocks and BUILD the sites of blocksbuild.h) and soldiers (they fight, and on a watchtower they shoot).
+ * A goblin that is after somebody or the keep and finds a made block in its way (bl_siege_hp) hits it until it breaks. The engine never changes the world: what is
+ * broken or put comes back in `struct bl_mobs_result` and the caller does it.
+ *
+ * Not done: finding a way round a wall (a goblin that cannot break what is in its way turns to one side until it is free), shooting goblins, mobs that spawn in caves
+ * or by day.
  */
 #ifndef MELLAGUI_BLOCKSMOBS_H
 #define MELLAGUI_BLOCKSMOBS_H
 
 #include "blocks.h"
+#include "blocksbuild.h"
 
 #define BL_MOBS_MAX 40                  /* goblins, workers and soldiers together */
 #define BL_GOBLIN_HW 0.30f              /* half the width of its box, and its height */
@@ -51,8 +56,16 @@
 #define BL_SOLDIER_SEE 12.0f            /* how far a soldier sees a goblin */
 #define BL_SOLDIER_LEASH 18.0f          /* and how far from its post it goes after one */
 
+#define BL_BUILD_TIME 0.5f              /* seconds a worker takes to put one block of a building */
+#define BL_BOW_RANGE 20.0f              /* a soldier on a watchtower shoots the goblins this near (horizontally) that it can see */
+#define BL_BOW_DAMAGE 3.0f              /* four arrows kill a goblin */
+#define BL_BOW_COOLDOWN 1.5f
+#define BL_ARROWS_MAX 8                 /* arrows in the air (their picture only: the hit counts at once) */
+#define BL_ARROW_TIME 0.25f
+#define BL_DAMAGED_MAX 24               /* blocks the goblins have started on */
+
 enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER, BL_MOB_SOLDIER };
-enum bl_order { BL_ORDER_IDLE = 0, BL_ORDER_MOVE, BL_ORDER_GATHER };
+enum bl_order { BL_ORDER_IDLE = 0, BL_ORDER_MOVE, BL_ORDER_GATHER, BL_ORDER_BUILD, BL_ORDER_TOWER };
 
 static inline float bl_mob_h(int kind)                         /* the height of a kind's box */
 {
@@ -93,6 +106,10 @@ struct bl_mob {
 	float best_d;                   /* the nearest it has been to it so far */
 	bool selected;                  /* the player has chosen it (drawn lighter) */
 	bool brute;                     /* a goblin of the big kind (BL_BRUTE_*) */
+	int site;                       /* BUILD: which of bl_mobs.site */
+	bool at_site;                   /* BUILD: it has got near enough and works (until it gets another site) */
+	bool posted;                    /* TOWER: it stands on the watchpost (gx, gy, gz): it does not move, goblins leave it alone, it shoots */
+	bool sieging;                   /* a goblin: it is hitting a block that is in its way */
 };
 
 static inline float bl_mob_height(const struct bl_mob *b)       /* the height of this one's box (a brute is taller than a goblin) */
@@ -115,6 +132,16 @@ struct bl_mobs {
 	int wave_cap;                   /* how many may be there at a time */
 	int wave_size;                  /* how many the wave was made of */
 	int wave_brutes;                /* the last this many goblins of the wave are brutes */
+	struct bl_site site[BL_SITES_MAX];      /* what is being built */
+	struct bl_arrow {
+		float t;                        /* seconds of flight left (0 = none) */
+		float a[3], b[3];               /* from the bow to the goblin */
+	} arrow[BL_ARROWS_MAX];
+	struct bl_damaged {
+		int x, y, z;
+		float dmg;                      /* what the goblins have taken of its bl_siege_hp (0 = a free entry) */
+		float age;                      /* seconds since the last blow */
+	} damaged[BL_DAMAGED_MAX];
 };
 
 /* what a call of `bl_mobs_step` did to the player */
@@ -131,6 +158,14 @@ struct bl_mobs_result {
 	int slain;                      /* goblins the soldiers killed */
 	int nbreak;                     /* blocks the workers have finished: the caller takes them away (bl_break) and keeps what they leave */
 	struct bl_break { int x, y, z; } brk[64];
+	int nplace;                     /* blocks the workers have put: the caller sets them (bl_set), if the cell is still empty */
+	struct bl_cell place[16];
+	int nbuilt;                     /* buildings that are finished (their sites are free again): which plans */
+	int built[BL_SITES_MAX];
+	int nsmash;                     /* blocks the goblins have broken: the caller takes them away */
+	struct bl_break smash[16];
+	int siege_hits;                 /* blows at blocks */
+	int shots;                      /* arrows shot from the watchtowers */
 };
 
 void bl_mobs_init(struct bl_mobs *m, uint32_t seed);
@@ -174,6 +209,19 @@ void bl_mobs_order_move(struct bl_mobs *m, int i, float x, float z);
  * stand or the block cannot be broken. */
 bool bl_mobs_order_gather(struct bl_mobs *m, const struct bl_world *w, int i, int bx, int by, int bz);
 void bl_mobs_order_stop(struct bl_mobs *m, int i);
+
+/* ---- building ---------------------------------------------------------------------------------------------------------- */
+
+/* A site (bl_plan_lay) to be built: its index, -1 when there are BL_SITES_MAX already or it has no cells. */
+int bl_mobs_add_site(struct bl_mobs *m, const struct bl_site *s);
+void bl_mobs_remove_site(struct bl_mobs *m, int site);
+int bl_mobs_count_sites(const struct bl_mobs *m);
+/* A worker builds the site: it walks beside it and puts a block every BL_BUILD_TIME seconds, lowest first, none into a body; the blocks come back in
+ * `bl_mobs_result.place`. When the site is done it goes on to the nearest other one within 48 blocks. False when it is no worker or no site. */
+bool bl_mobs_order_build(struct bl_mobs *m, const struct bl_world *w, int i, int site);
+/* A soldier mans the watchpost at (x, y, z): it walks there, climbs up (it stands on the post), shoots the goblins it sees and the goblins do not go for it.
+ * Another order brings it down. False when it is no soldier, there is no post, the place on top is not free or another soldier is on it or going to it. */
+bool bl_mobs_order_tower(struct bl_mobs *m, const struct bl_world *w, int i, int x, int y, int z);
 
 /* ---- the picture ---------------------------------------------------------------------------------------------------- */
 

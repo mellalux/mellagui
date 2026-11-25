@@ -1,6 +1,7 @@
 /* blocksview.c - the picture of a block world. See blocksview.h. */
 #include "blocksview.h"
 #include "blockspets.h"
+#include "blocksbuild.h"
 #include "blocksmobs.h"
 
 #include <math.h>
@@ -178,6 +179,32 @@ static void gen_face(int blk, int fk, uint32_t *px)
 				}
 				break;
 			}
+			case BL_GATE: {                              /* upright wooden bars with gaps and two iron bands */
+				bool bar = x % 4 <= 1, band = y == 2 || y == 3 || y == 12 || y == 13, frame = y == 0 || y == TEX - 1;
+				if (band)
+					c = tinted(0x4a4c52, tn(x, y, 60, 6));
+				else if (bar || frame)
+					c = tinted(0x7c5a30, tn(x / 4, y, 61, 8) - (x % 4 == 1 ? 14 : 0));
+				else
+					c = argb(0, 0, 0, 0);
+				break;
+			}
+			case BL_TOWERPOST: {                         /* dressed stone with a yellow flag on the sides and a ringed plate on top */
+				int row = y / 4;
+				bool mortar = (y % 4 == 3) || ((x + (row & 1) * 4) % 8 == 7);
+				c = mortar ? tinted(0x77736a, tn(x, y, 62, 4)) : tinted(0x9a958a, tn((x + (row & 1) * 4) / 8, row, 63, 10) + tn(x, y, 64, 5));
+				if (fk == BL_FACE_SIDE) {
+					if (x == 4 && y >= 2 && y <= 13)
+						c = tinted(0x4a3320, 0);
+					if (x >= 5 && x <= 12 && y >= 2 && y <= 8 && !(x >= 11 && y >= 4 && y <= 6))
+						c = tinted(0xe0b030, tn(x, y, 65, 8));
+				} else if (fk == BL_FACE_TOP) {
+					int d2 = (2 * x - 15) * (2 * x - 15) + (2 * y - 15) * (2 * y - 15);
+					if (d2 > 60 && d2 < 150)
+						c = tinted(0xe0b030, tn(x, y, 66, 8));
+				}
+				break;
+			}
 			case BL_COBBLE: {
 				int off = ((y / 4) & 1) * 2;
 				int sx = (x + off) / 4, sy = y / 4;
@@ -292,6 +319,7 @@ struct frame {
 	bool ids;
 	const struct bl_pets *pets;
 	const struct bl_mobs *mobs;
+	const struct bl_ghosts *ghosts;
 	float inv_f;              /* metres a pixel covers at a distance of one metre */
 	float petmax;             /* the pets are drawn up to here (beyond it the fog has them) */
 	bool start_water;
@@ -422,6 +450,17 @@ static inline void pet_insert(const struct frame *F, float *acc, float *trans, b
 }
 
 
+/* the event just written at ev[n] goes to its place by distance; the new count */
+static inline int event_sort(struct bl_pet_event *ev, int n)
+{
+	for (int k = n; k > 0 && ev[k - 1].tp > ev[k].tp; k--) {
+		struct bl_pet_event sw = ev[k - 1];
+		ev[k - 1] = ev[k];
+		ev[k] = sw;
+	}
+	return n + 1;
+}
+
 static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 {
 	enum { END_SKY, END_FAR, END_EDGE };
@@ -432,7 +471,7 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 	bool in_water = F->start_water;
 	float wt0 = 0.0f;
 	const float maxd = F->maxd;
-	struct bl_pet_event pev[3];                       /* Tom, Filip and a goblin along this ray: laid over what is nearer when the ray gets to their distance */
+	struct bl_pet_event pev[4];                       /* Tom, Filip, a goblin and a planned block along this ray: laid over what is nearer when the ray gets to their distance */
 	int npev = 0, ipev = 0;
 	if (F->pets && !F->ids) {
 		float po[3] = { F->ox, F->oy, F->oz }, pd[3] = { dx, dy, dz };
@@ -449,13 +488,17 @@ static uint32_t trace(const struct frame *F, float dx, float dy, float dz)
 				pev[npev].c[i] = mh.rgb[i] * (1.0f - fog) + F->hor[i] * fog;
 			pev[npev].a = 1.0f;
 			pev[npev].tp = mh.t;
-			int k = npev++;
-			while (k > 0 && pev[k - 1].tp > pev[k].tp) {       /* in order of distance */
-				struct bl_pet_event sw = pev[k - 1];
-				pev[k - 1] = pev[k];
-				pev[k] = sw;
-				k--;
-			}
+			npev = event_sort(pev, npev);
+		}
+	}
+	if (F->ghosts && !F->ids) {
+		float po[3] = { F->ox, F->oy, F->oz }, pd[3] = { dx, dy, dz }, rgb[3], al, tg;
+		if (bl_ghosts_ray(F->ghosts, po, pd, F->maxd, rgb, &al, &tg)) {
+			for (int i = 0; i < 3; i++)
+				pev[npev].c[i] = rgb[i] * al;             /* (an event's colour is already multiplied by how much it covers) */
+			pev[npev].a = al;
+			pev[npev].tp = tg;
+			npev = event_sort(pev, npev);
 		}
 	}
 	const int W = F->W, D = F->D, H = F->H, ytop = F->ytop;
@@ -928,6 +971,7 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	F.ids = v->ids;
 	F.pets = v->pets;
 	F.mobs = v->mobs;
+	F.ghosts = v->ghosts;
 	F.petmax = 0.7f * F.maxd;
 
 	int ex = (int)floorf(c->x), ey = (int)floorf(c->y), ez = (int)floorf(c->z);

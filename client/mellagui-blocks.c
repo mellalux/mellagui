@@ -94,14 +94,30 @@ enum {
 
 #define RIVAL_HP 200.0f                                     /* what the Red Banner's keep can take: a blow of the sword takes 3, of a soldier 4 */
 #define RIVAL_SWORD 3.0f
-#define RIVAL_GUARDS 6                                      /* the guards of their camp besides the archer; one more comes every RIVAL_REINFORCE seconds while there are fewer */
+#define RIVAL_GUARDS 6                                      /* the guards of their camp besides the archers; one more comes every RIVAL_REINFORCE seconds while there are fewer ... */
 #define RIVAL_REINFORCE 45.0f
+#define RIVAL_GUARDS_MORE 8                                 /* ... and this many once their longhouse stands */
+#define RIVAL_GUARD_COST 5                                  /* what the camp pays from its store of material for a guard ... */
+#define RIVAL_RAIDER_COST 4                                 /* ... and for each man of a raiding party */
+#define RIVAL_STOCK 12                                      /* the store a new camp has */
+#define RIVAL_STOCK_MAX 60                                  /* (so a camp cannot save up for ever: catching its workers is felt) */
+#define RIVAL_SPARE 8                                       /* what a building leaves in the store */
+#define RIVAL_WORKER_EVERY 90.0f                            /* seconds until a worker of theirs who is gone is replaced */
+#define CAMP_CHECK 5.0f                                     /* how often the camp looks over its buildings and starts the next one */
 #define RIVAL_NAME "Red Banner"
 #define RAID_FIRST 300.0f                                   /* seconds of play by day until their first raiding party sets out in survival (time to get soldiers) ... */
 #define RAID_FIRST_CREATIVE 120.0f                          /* ... in creative, where nothing has to be gathered ... */
 #define RAID_PAUSE 240.0f                                   /* ... and from the end of one until the next */
 #define RAID_SMALL 2                                        /* the men of the first one; every party has one more than the one before (BL_RAIDER_MAX at most) */
 #define RAID_NEAR 28.0f                                     /* this near where they are bound: "the raiders are here" */
+#define RAID_NO_HOUSE 4                                     /* a party is at most this big until their longhouse stands (then BL_RAIDER_MAX) */
+
+/* the buildings of their camp, in the order they are made (the first tower is there from the start; one that is brought down is built again) */
+enum { CAMP_TOWER, CAMP_HOUSE, CAMP_TOWER2, CAMP_TOWER3, CAMP_BUILDINGS };
+static const struct {
+	const char *name;
+	int cost, dx, dz;                                       /* (a tower's middle, from their keep) */
+} k_camp[CAMP_BUILDINGS] = { { "watchtower", 20, -3, -3 }, { "longhouse", 30, 0, 0 }, { "watchtower", 20, 3, 3 }, { "watchtower", 20, 3, -3 } };
 
 #define N_SFX 33                                            /* the sounds of k_sfx */
 
@@ -131,7 +147,12 @@ struct app {
 	int rkeep[3];                                           /* the lowest block of its keep */
 	float rhp;                                              /* what the keep can still take */
 	int rguards;                                            /* how many guards there are while it is switched off, or as the file said */
-	bool rarcher;                                           /* ... and whether one is on the tower */
+	int rarchers;                                           /* ... and which towers have an archer (a bit for each of k_camp) */
+	int rstock;                                             /* the material in their store */
+	int rbuilt;                                             /* the buildings of theirs that stand (bits of k_camp) ... */
+	int rsite;                                              /* ... and the one that is being built (-1 = none) */
+	int rhands;                                             /* how many workers they have while switched off, or as the file said */
+	float rworker_t, rcheck_t;                              /* seconds until a lost worker is replaced, until the buildings are looked over */
 	float rguard_t;                                         /* seconds until the next one comes */
 	float rhit_t;                                           /* seconds the keep's bar shows after a blow at it */
 	int raids;                                              /* raiding parties that have set out */
@@ -464,7 +485,7 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 			int state, on, x, y, z, guards, archer;
 			float hp;
 			if (sscanf(v, "%d %d %d %d %d %f %d %d", &state, &on, &x, &y, &z, &hp, &guards, &archer) == 8 && state >= 1 && state <= 2 && x > 0 && y > 0 && z > 0 &&
-			    x < BL_MAX_SIZE && z < BL_MAX_SIZE && y < BL_MAX_H && hp >= 0.0f && hp <= RIVAL_HP && guards >= 0 && guards <= BL_GUARD_MAX) {
+			    x < BL_MAX_SIZE && z < BL_MAX_SIZE && y < BL_MAX_H && hp >= 0.0f && hp <= RIVAL_HP && guards >= 0 && guards <= BL_GUARD_MAX && archer >= 0 && archer < 1 << CAMP_BUILDINGS) {
 				a->rival = state;
 				a->rival_on = on != 0 && state == 1;
 				a->rkeep[0] = x;
@@ -472,7 +493,16 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 				a->rkeep[2] = z;
 				a->rhp = hp;
 				a->rguards = guards;
-				a->rarcher = archer != 0;
+				a->rarchers = archer;
+			}
+		} else if (with_player && !strcmp(k, "supply")) {
+			int stock, built, site, hands;
+			if (sscanf(v, "%d %d %d %d", &stock, &built, &site, &hands) == 4 && stock >= 0 && stock <= RIVAL_STOCK_MAX && built >= 0 && built < 1 << CAMP_BUILDINGS &&
+			    site >= -1 && site < CAMP_BUILDINGS && hands >= 0 && hands <= BL_RWORKER_MAX) {
+				a->rstock = stock;
+				a->rbuilt = built;
+				a->rsite = site;
+				a->rhands = hands;
 			}
 		} else if (with_player && !strcmp(k, "raid")) {
 			int raids, used = 0;
@@ -597,6 +627,19 @@ static int rival_count(const struct app *a, bool posted)
 	return n;
 }
 
+/* the towers of their camp that have an archer, as bits of k_camp */
+static int rival_archers(const struct app *a)
+{
+	int mask = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *m = &a->mobs.mob[i];
+		for (int k = 0; m->alive && m->kind == BL_MOB_GUARD && m->posted && k < CAMP_BUILDINGS; k++)
+			if (k != CAMP_HOUSE && m->gx == a->rkeep[0] + k_camp[k].dx && m->gz == a->rkeep[2] + k_camp[k].dz)
+				mask |= 1 << k;
+	}
+	return mask;
+}
+
 /* everything about the game as it is now, as lines conf_read understands */
 static void conf_write(const struct app *a, FILE *f)
 {
@@ -635,12 +678,15 @@ static void conf_write(const struct app *a, FILE *f)
 		}
 	if (a->rival) {
 		int guards = a->rguards;
-		bool archer = a->rarcher;
+		int archers = a->rarchers, hands = a->rhands;
 		if (a->rival_on) {
 			guards = rival_count(a, false);
-			archer = rival_count(a, true) > 0;
+			archers = rival_archers(a);
+			hands = bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER);
 		}
-		fprintf(f, "\nrival = %d %d %d %d %d %.1f %d %d", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, guards, archer);
+		fprintf(f, "\nrival = %d %d %d %d %d %.1f %d %d", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, guards, archers);
+		if (a->rival == 1)
+			fprintf(f, "\nsupply = %d %d %d %d", a->rstock, a->rbuilt, a->rsite, hands);
 		if (a->rival == 1) {                                    /* the raids so far, the time to the next, and the men who are out (not those on their way home) */
 			fprintf(f, "\nraid = %d %.1f ", a->raids, fmaxf(a->raid_t, 0.0f));     /* (while one is out it has run under 0) */
 			bool first = true;
@@ -1381,8 +1427,8 @@ static void rival_build(struct app *a, int x, int level, int z)
 /* a guard comes out at a free post of the camp; false when there is none */
 static bool rival_guard(struct app *a)
 {
-	static const int k_post[BL_GUARD_MAX][2] = { { 3, 0 }, { -3, 0 }, { 0, 3 }, { 0, -3 }, { 3, 3 }, { -3, 3 }, { 3, -3 }, { 2, 1 } };
-	for (int i = 0; i < BL_GUARD_MAX; i++) {
+	static const int k_post[RIVAL_GUARDS_MORE][2] = { { 3, 0 }, { -3, 0 }, { 0, 3 }, { 0, -3 }, { 3, 3 }, { -3, 3 }, { 3, -3 }, { 2, 1 } };
+	for (int i = 0; i < (int)(sizeof k_post / sizeof k_post[0]); i++) {
 		float x = (float)(a->rkeep[0] + k_post[i][0]) + 0.5f, y = (float)a->rkeep[1], z = (float)(a->rkeep[2] + k_post[i][1]) + 0.5f;
 		bool taken = false;
 		for (int k = 0; k < BL_MOBS_MAX && !taken; k++) {
@@ -1395,16 +1441,206 @@ static bool rival_guard(struct app *a)
 	return false;
 }
 
-/* their men at their places: `guards` on the ground and, when `archer` and the tower stands, one on it */
-static void rival_man(struct app *a, int guards, bool archer)
+/* an archer goes up on the tower `k` of their camp, if it stands */
+static void camp_post(struct app *a, int k)
+{
+	for (int y = a->rkeep[1]; k != CAMP_HOUSE && y < a->rkeep[1] + 9; y++)
+		if (bl_mobs_add_archer(&a->mobs, a->world, a->rkeep[0] + k_camp[k].dx, y, a->rkeep[2] + k_camp[k].dz))
+			break;
+}
+
+/* their men at their places: `guards` on the ground and one on each tower of `archers` that stands */
+static void rival_man(struct app *a, int guards, int archers)
 {
 	bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
 	for (int i = 0; i < guards; i++)
 		if (!rival_guard(a))
 			break;
-	for (int y = a->rkeep[1]; archer && y < a->rkeep[1] + 9; y++)
-		if (bl_mobs_add_archer(&a->mobs, a->world, a->rkeep[0] - 3, y, a->rkeep[2] - 3))
+	for (int k = 0; k < CAMP_BUILDINGS; k++)
+		if (archers & 1 << k)
+			camp_post(a, k);
+}
+
+/* a worker of theirs comes out beside the keep */
+static bool rival_worker(struct app *a)
+{
+	static const int k_at[4][2] = { { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } };
+	const int n = bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER);
+	for (int i = 0; i < 4; i++) {
+		const int *p = k_at[(n + i) % 4];
+		if (bl_mobs_add(&a->mobs, a->world, BL_MOB_RWORKER, (float)(a->rkeep[0] + p[0]) + 0.5f, (float)a->rkeep[1], (float)(a->rkeep[2] + p[1]) + 0.5f))
+			return true;
+	}
+	return false;
+}
+
+static void rival_workers(struct app *a, int n)
+{
+	bl_mobs_clear_kind(&a->mobs, BL_MOB_RWORKER);
+	for (int i = 0; i < n; i++)
+		if (!rival_worker(a))
 			break;
+}
+
+/* The longhouse stands outside the wall on a side that has no gateway: 5 wide, 4 deep, planks with cobble corners and a red brick roof, its door to the camp.
+ * Of the two such sides it is the one where most of it is there already, else the first where nothing a hand has made is in the way; false when neither will do. */
+static bool camp_house(const struct app *a, struct bl_site *s)
+{
+	static const int k_side[4][2] = { { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 } };
+	const struct bl_world *w = a->world;
+	const int x = a->rkeep[0], y = a->rkeep[1], z = a->rkeep[2], first = CAMP_WALL + 2;
+	int best = -1;
+	for (int k = 0; k < 4; k++) {
+		const int sx = k_side[k][0], sz = k_side[k][1];
+		if (bl_get(w, x + sx * CAMP_WALL, y, z + sz * CAMP_WALL) == BL_AIR)                /* a gateway */
+			continue;
+		struct bl_site t = { .on = true, .plan = BL_PLAN_BARRACKS };
+		for (int h = 0; h < 4; h++)
+			for (int v = 0; v < 4; v++)
+				for (int u = -2; u <= 2; u++) {
+					const bool side = u == -2 || u == 2 || v == 0 || v == 3, corner = (u == -2 || u == 2) && (v == 0 || v == 3);
+					if (h < 3 && (!side || (u == 0 && v == 0 && h < 2)))                       /* (the inside, the door) */
+						continue;
+					int cx = x + sx * (first + v) + sz * u, cz = z + sz * (first + v) + sx * u;
+					int b = h == 3 ? BL_BRICK : corner ? BL_COBBLE : BL_PLANKS;
+					t.c[t.n++] = (struct bl_cell){ (int16_t)cx, (int16_t)(y + h), (int16_t)cz, (uint8_t)b };
+				}
+		int lo[3], hi[3], there = 0;
+		bl_site_box(&t, lo, hi);
+		if (lo[0] < 2 || lo[2] < 2 || hi[0] >= w->w - 2 || hi[2] >= w->d - 2 || hi[1] >= w->h - 2)
+			continue;
+		for (int i = 0; i < t.n; i++)
+			there += bl_get(w, t.c[i].x, t.c[i].y, t.c[i].z) == t.c[i].block;
+		bool clean = true;
+		for (int cz = lo[2] - 1; cz <= hi[2] + 1 && clean && !there; cz++)
+			for (int cx = lo[0] - 1; cx <= hi[0] + 1 && clean; cx++)
+				for (int cy = y - 2; cy <= y + 4 && clean; cy++) {
+					int b = bl_get(w, cx, cy, cz);
+					clean = !(bl_siege_hp(b) > 0 || b == BL_KEEP);
+				}
+		if ((there || clean) && there > best) {
+			best = there;
+			*s = t;
+		}
+	}
+	return best >= 0;
+}
+
+/* the cells of the building `k` of their camp; false when there is no place for it */
+static bool camp_plan(const struct app *a, int k, struct bl_site *s)
+{
+	if (k == CAMP_HOUSE)
+		return camp_house(a, s);
+	const char *why = NULL;
+	bl_plan_lay(a->world, BL_PLAN_TOWER, 0, a->rkeep[0] + k_camp[k].dx, a->rkeep[1], a->rkeep[2] + k_camp[k].dz, NULL, 0, s, &why);
+	s->on = true;                                               /* (what is in the way of some of it does not stop them) */
+	return s->n > 0;
+}
+
+/* is at least half of it there? */
+static bool camp_standing(const struct app *a, int k)
+{
+	struct bl_site s;
+	if (!camp_plan(a, k, &s))
+		return false;
+	int there = 0;
+	for (int i = 0; i < s.n; i++)
+		there += bl_get(a->world, s.c[i].x, s.c[i].y, s.c[i].z) == s.c[i].block;
+	return there * 2 >= s.n;
+}
+
+/* the ground under a building outside the wall, and a block round it: level with the camp's (what a hand has made stays) */
+static void camp_level(struct app *a, const struct bl_site *s)
+{
+	struct bl_world *w = a->world;
+	const int level = a->rkeep[1] - 1;
+	int lo[3], hi[3];
+	bl_site_box(s, lo, hi);
+	for (int z = lo[2] - 1; z <= hi[2] + 1; z++)
+		for (int x = lo[0] - 1; x <= hi[0] + 1; x++) {
+			for (int y = w->h - 2; y > level; y--) {
+				int b = bl_get(w, x, y, z);
+				if (b != BL_AIR && bl_siege_hp(b) == 0 && b != BL_KEEP)
+					bl_set(w, x, y, z, BL_AIR);
+			}
+			for (int y = level - 1; y > 1; y--) {
+				int b = bl_get(w, x, y, z);
+				if (b != BL_AIR && !bl_water(b) && b != BL_LEAVES && b != BL_LOG)
+					break;
+				bl_set(w, x, y, z, BL_DIRT);
+			}
+			if (bl_siege_hp(bl_get(w, x, level, z)) == 0)
+				bl_set(w, x, level, z, BL_GRASS);
+		}
+}
+
+/* their workers start on the building `k`; false when it cannot be built */
+static bool camp_start(struct app *a, int k)
+{
+	struct bl_site s;
+	if (!camp_plan(a, k, &s))
+		return false;
+	if (k == CAMP_HOUSE)
+		camp_level(a, &s);
+	if (bl_site_missing(a->world, &s) == 0)                     /* (its places are filled with something else) */
+		return false;
+	a->rsite = k;
+	bl_mobs_set_rsite(&a->mobs, &s);
+	return true;
+}
+
+/* a world that was saved (or a camp that was switched off) with a building under way: they go on with it */
+static void camp_resume(struct app *a)
+{
+	struct bl_site s;
+	if (a->rsite >= 0 && camp_plan(a, a->rsite, &s))
+		bl_mobs_set_rsite(&a->mobs, &s);
+	else
+		a->rsite = -1;
+}
+
+/* it is whole */
+static void camp_done(struct app *a)
+{
+	const int k = a->rsite;
+	if (k < 0)
+		return;
+	a->rsite = -1;
+	a->rbuilt |= 1 << k;
+	if (k == CAMP_HOUSE) {
+		say(a, "The %s has built a longhouse: more men", RIVAL_NAME);
+	} else {
+		camp_post(a, k);
+		say(a, "The %s has built a watchtower", RIVAL_NAME);
+	}
+}
+
+/* The camp itself: lost workers are replaced, buildings that have been pulled down are noticed, and when the store allows it the next one is started. */
+static void camp_step(struct app *a, float dt)
+{
+	if (bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER) >= BL_RWORKER_MAX) {
+		a->rworker_t = RIVAL_WORKER_EVERY;
+	} else if ((a->rworker_t -= dt) <= 0.0f) {
+		rival_worker(a);
+		a->rworker_t = RIVAL_WORKER_EVERY;
+	}
+	a->rcheck_t -= dt;
+	if (a->rcheck_t > 0.0f)
+		return;
+	a->rcheck_t = CAMP_CHECK;
+	for (int k = 0; k < CAMP_BUILDINGS; k++)
+		if ((a->rbuilt & 1 << k) && !camp_standing(a, k)) {
+			a->rbuilt &= ~(1 << k);
+			say(a, "A %s of the %s is down", k_camp[k].name, RIVAL_NAME);
+		}
+	for (int k = 0; a->rsite < 0 && k < CAMP_BUILDINGS; k++) {
+		if (a->rbuilt & 1 << k)
+			continue;
+		if (a->rstock < k_camp[k].cost + RIVAL_SPARE)
+			break;                                              /* (they save up for it) */
+		if (camp_start(a, k))
+			a->rstock -= k_camp[k].cost;
+	}
 }
 
 static void rival_sync(struct app *a)
@@ -1461,7 +1697,10 @@ static bool raid_send(struct app *a)
 		}
 	}
 	const float ox = (float)k_side[side][0], oz = (float)k_side[side][1];
-	int want = LM_MIN(RAID_SMALL + a->raids, BL_RAIDER_MAX), came = 0;
+	int want = LM_MIN(RAID_SMALL + a->raids, a->rbuilt & 1 << CAMP_HOUSE ? BL_RAIDER_MAX : RAID_NO_HOUSE), came = 0;
+	want = LM_MIN(want, a->rstock / RIVAL_RAIDER_COST);
+	if (want < RAID_SMALL)                                      /* (not enough in the store for a party) */
+		return false;
 	bl_mobs_set_raid(&a->mobs, at[0], at[1], at[2]);
 	for (int i = 0; i < 36 && came < want; i++) {               /* three abreast, outside the wall */
 		float along = (float)(CAMP_WALL + 2) + 1.5f * (float)(i / 3), across = 1.4f * (float)(i % 3 - 1);
@@ -1473,6 +1712,7 @@ static bool raid_send(struct app *a)
 	}
 	if (!came)
 		return false;
+	a->rstock -= came * RIVAL_RAIDER_COST;
 	a->raids++;
 	a->raid_out = true;
 	a->raid_here = a->raid_home = false;
@@ -1509,7 +1749,7 @@ static void raid_step(struct app *a, float dt)
 	} else if (a->hp > 0.0f && bl_daylight(a->time_h) > 0.55f) {
 		a->raid_t -= dt;
 		if (a->raid_t <= 0.0f && !raid_send(a))
-			a->raid_t = 30.0f;                                  /* (no room at the gateway: later) */
+			a->raid_t = 30.0f;                                  /* (nothing to pay with, or no room at the gateway: later) */
 	}
 }
 
@@ -1530,9 +1770,17 @@ static bool rival_start(struct app *a)
 	a->raids = 0;
 	a->raid_t = raid_first(a);
 	a->raid_out = false;
-	rival_man(a, RIVAL_GUARDS, true);
+	a->rstock = RIVAL_STOCK;
+	a->rbuilt = 1 << CAMP_TOWER;
+	a->rsite = -1;
+	a->rworker_t = RIVAL_WORKER_EVERY;
+	a->rcheck_t = CAMP_CHECK;
+	bl_mobs_set_rsite(&a->mobs, NULL);
+	rival_man(a, RIVAL_GUARDS, 1 << CAMP_TOWER);
+	rival_workers(a, BL_RWORKER_MAX);
 	a->rguards = RIVAL_GUARDS;
-	a->rarcher = true;
+	a->rarchers = 1 << CAMP_TOWER;
+	a->rhands = BL_RWORKER_MAX;
 	rival_sync(a);
 	float dist;
 	const char *way = rival_bearing(a, &dist);
@@ -1548,15 +1796,20 @@ static void rival_switch(struct app *a)
 		return;
 	if (a->rival_on) {
 		a->rguards = rival_count(a, false);
-		a->rarcher = rival_count(a, true) > 0;
+		a->rarchers = rival_archers(a);
+		a->rhands = bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER);
 		a->rival_on = false;
 		a->raid_out = false;
 		bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);             /* (a raiding party that is out is gone, too) */
+		bl_mobs_clear_kind(&a->mobs, BL_MOB_RWORKER);
+		bl_mobs_set_rsite(&a->mobs, NULL);
 		say(a, "The %s stands down (K brings it back)", RIVAL_NAME);
 	} else {
 		a->rival_on = true;
 		a->raid_t = raid_first(a);
-		rival_man(a, a->rguards, a->rarcher);
+		rival_man(a, a->rguards, a->rarchers);
+		rival_workers(a, a->rhands);
+		camp_resume(a);
 		say(a, "The %s is back at its camp", RIVAL_NAME);
 	}
 	rival_sync(a);
@@ -1568,6 +1821,9 @@ static void rival_fall(struct app *a)
 	for (int i = 0; i < KEEP_H; i++)
 		bl_set(a->world, a->rkeep[0], a->rkeep[1] + i, a->rkeep[2], BL_AIR);
 	bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
+	bl_mobs_clear_kind(&a->mobs, BL_MOB_RWORKER);
+	bl_mobs_set_rsite(&a->mobs, NULL);
+	a->rsite = -1;
 	a->rival = 2;
 	a->rival_on = false;
 	a->raid_out = false;
@@ -1604,20 +1860,39 @@ static void rival_strike(struct app *a, int64_t now)
 	rival_hit(a, RIVAL_SWORD);
 }
 
-/* while the camp stands, men come to it again, one at a time, and raiding parties set out from it */
+/* while the camp stands, its workers keep it supplied; from the store men come to it again, one at a time, raiding parties set out and it grows */
 static void rival_step(struct app *a, float dt)
 {
 	a->rhit_t = fmaxf(0.0f, a->rhit_t - dt);
 	raid_step(a, dt);
-	if (a->rival != 1 || !a->rival_on || rival_count(a, false) >= RIVAL_GUARDS) {
+	if (a->rival != 1 || !a->rival_on)
+		return;
+	camp_step(a, dt);
+	if (rival_count(a, false) >= (a->rbuilt & 1 << CAMP_HOUSE ? RIVAL_GUARDS_MORE : RIVAL_GUARDS)) {
 		a->rguard_t = RIVAL_REINFORCE;
 		return;
 	}
 	a->rguard_t -= dt;
-	if (a->rguard_t <= 0.0f) {
-		rival_guard(a);
+	if (a->rguard_t <= 0.0f && a->rstock >= RIVAL_GUARD_COST && rival_guard(a)) {
+		a->rstock -= RIVAL_GUARD_COST;
 		a->rguard_t = RIVAL_REINFORCE;
 	}
+}
+
+/* what their workers did in a step: what they took from the land goes, what they brought in is in the store */
+static void camp_take(struct app *a, const struct bl_mobs_result *R)
+{
+	bool said = false;
+	for (int k = 0; k < R->nraze; k++) {
+		const struct bl_break *c = &R->raze[k];
+		int b = bl_get(a->world, c->x, c->y, c->z);
+		if ((b == BL_LOG || b == BL_LEAVES || b == BL_STONE) && bl_set(a->world, c->x, c->y, c->z, BL_AIR) && b != BL_LEAVES && !said &&
+		    heard(a, (float)c->x, (float)c->z, HEAR)) {
+			block_sound(a, "break", b);
+			said = true;
+		}
+	}
+	a->rstock = LM_MIN(a->rstock + R->delivered, RIVAL_STOCK_MAX);
 }
 
 /* what the workers have finished: the blocks go, what they leave goes into the pockets */
@@ -2170,7 +2445,13 @@ static void state_reset(struct app *a)
 	a->rival_on = false;
 	a->rhp = a->rhit_t = 0.0f;
 	a->rguards = 0;
-	a->rarcher = false;
+	a->rarchers = 0;
+	a->rstock = RIVAL_STOCK;                                /* (a camp saved before it had a store: as a new one) */
+	a->rbuilt = 1 << CAMP_TOWER;
+	a->rsite = -1;
+	a->rhands = BL_RWORKER_MAX;
+	a->rworker_t = RIVAL_WORKER_EVERY;
+	a->rcheck_t = CAMP_CHECK;
 	a->rguard_t = RIVAL_REINFORCE;
 	a->raids = a->nraiders_conf = 0;
 	a->raid_t = -1.0f;                                      /* (not said: world_begin, which knows the mode) */
@@ -2242,7 +2523,9 @@ static void world_begin(struct app *a, bool from_file, int mode, int workers, in
 	if (from_file) {
 		sites_restore(a);
 		if (a->rival == 1 && a->rival_on) {
-			rival_man(a, a->rguards, a->rarcher);
+			rival_man(a, a->rguards, a->rarchers);
+			rival_workers(a, a->rhands);
+			camp_resume(a);
 			for (int i = 0; i < a->nraiders_conf; i++)          /* the party that was out */
 				a->raid_out |= bl_mobs_add_raider(&a->mobs, a->world, a->raider_conf[i][0], a->raider_conf[i][1], a->raider_conf[i][2]);
 		}
@@ -2523,7 +2806,8 @@ static bool sword_swing(struct app *a, int64_t now)
 	int id = bl_mobs_pick(&a->mobs, eye, look, BL_SWORD_REACH, &t);
 	if (id < 0 || (a->mobs.mob[id].kind == BL_MOB_GOBLIN && !a->mobs_on))
 		return false;
-	bool guard = a->mobs.mob[id].kind == BL_MOB_GUARD, raider = a->mobs.mob[id].raider;
+	const int kind = a->mobs.mob[id].kind;
+	bool guard = bl_mob_is_rival(kind), raider = a->mobs.mob[id].raider;
 	if (a->aimed && a->aim.t < t)                           /* a block is in the way (leaves are none: goblins stand among them) */
 		for (float s = 0.0f; s < t; s += 0.1f)
 			if (bl_solid_unit(bl_get(a->world, (int)floorf(eye[0] + look[0] * s), (int)floorf(eye[1] + look[1] * s), (int)floorf(eye[2] + look[2] * s))))
@@ -2536,7 +2820,7 @@ static bool sword_swing(struct app *a, int64_t now)
 	a->hit_t = 0.18f;
 	if (dead && guard) {
 		sound(a, "goblin-die");
-		say(a, raider ? "A raider of the %s is down" : "A guard of the %s is down", RIVAL_NAME);
+		say(a, kind == BL_MOB_RWORKER ? "A worker of the %s is down" : raider ? "A raider of the %s is down" : "A guard of the %s is down", RIVAL_NAME);
 	} else if (dead) {
 		a->kills++;
 		sound(a, "goblin-die");
@@ -2695,6 +2979,13 @@ static void mobs_advance(struct app *a, float dt)
 	if (R.nbreak > 0)
 		apply_breaks(a, &R);
 	apply_build(a, &R, dt);
+	camp_take(a, &R);
+	if (R.rbuilt)
+		camp_done(a);
+	if (R.rworkers_slain > 0) {
+		say(a, "Your soldiers brought down a worker of the %s", RIVAL_NAME);
+		sound(a, "goblin-die");
+	}
 	if (R.guards_slain > 0) {
 		say(a, R.raiders_slain ? "Your soldiers brought down a raider of the %s" : "Your soldiers brought down a guard of the %s", RIVAL_NAME);
 		sound(a, "goblin-die");
@@ -3193,10 +3484,16 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 			if (m->alive && m->kind == BL_MOB_GUARD && cmd_project(a, cam, m->x, m->y + BL_SOLDIER_H + 0.35f, m->z, &sx, &sy)) {
 				wlwin_fill(w, (int)sx - 5, (int)sy - 5, 10, 10, m->raider ? 0xff9820u : 0xd02828u);
 				wlwin_fill(w, (int)sx - 3, (int)sy - 3, 6, 6, 0x18080au);
+			} else if (m->alive && m->kind == BL_MOB_RWORKER && cmd_project(a, cam, m->x, m->y + BL_WORKER_H + 0.35f, m->z, &sx, &sy)) {
+				wlwin_fill(w, (int)sx - 4, (int)sy - 4, 8, 8, 0xc87868u);                      /* a worker of theirs: smaller and paler */
+				wlwin_fill(w, (int)sx - 2, (int)sy - 2, 4, 4, 0x18080au);
 			}
 		}
-		if (cmd_project(a, cam, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[1] + 4.0f, (float)a->rkeep[2] + 0.5f, &sx, &sy))
-			shadow_text(w, (int)sx - lm_font_text_width(RIVAL_NAME) / 2, (int)sy - LM_FONT_H, RIVAL_NAME, 0xff8a7au);
+		if (cmd_project(a, cam, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[1] + 4.0f, (float)a->rkeep[2] + 0.5f, &sx, &sy)) {
+			char l[80];
+			snprintf(l, sizeof l, "%s: %d material", RIVAL_NAME, a->rstock);
+			shadow_text(w, (int)sx - lm_font_text_width(l) / 2, (int)sy - LM_FONT_H, l, 0xff8a7au);
+		}
 	}
 	{                                                                        /* where he stands */
 		float sx, sy;
@@ -3444,9 +3741,13 @@ static const char *const HP_RIVAL[] = {
 	"# The Red Banner",
 	"A rival clan. A new survival world has it from the start; in a world you have already, press K (or the flag at the left): it asks, then makes camp 80 to 120 blocks away and levels the ground there. K again sends its men away, and once more brings them back.",
 	"# Their camp",
-	"A wall with a gateway on two sides, their keep with the red banner in the middle, a watchtower with an archer, and six tough guards in black with red helmets (each more than a match for one soldier). A guard fights you, your people and the goblins that come near his post; he does not follow far. While the camp stands, a lost guard is replaced 45 seconds later.",
+	"A wall with a gateway on two sides, their keep with the red banner in the middle, a watchtower with an archer, and six tough guards in black with red helmets (each more than a match for one soldier). A guard fights you, your people and the goblins that come near his post; he does not follow far. While the camp stands, a lost guard is replaced 45 seconds later, when there is material for him.",
+	"# Their workers",
+	"Four workers in dark red with a sack on the back keep the camp supplied: they fell trees, cut stone that sticks out of the ground and, where there is neither, forage. Every trip to their keep adds to the store (a tree 2, the rest 1), which holds 60 at most. A guard costs 5 of it and each raider 4. A worker does not fight: it runs for the keep when you or your people come near. One that is gone is replaced after 90 seconds.",
+	"# The camp grows",
+	"With material to spare they build a longhouse outside the wall (30: then eight guards instead of six, and raiding parties up to six instead of four), then two more watchtowers with archers (20 each). What you pull down they build again. Catch their workers, and fewer men come against you. The command view shows their store over the camp.",
 	"# Raids",
-	"By day a raiding party sets out for your keep, the first after five minutes of play (two in creative): two men the first time, one more each time after, six at most; the next four minutes after the last one is over. The horn tells you, the top right says how far the nearest raider is and which way. They fight whom they meet, break walls and gates that stop them and, in survival, strike your keep. In creative they cannot hurt the keep: they go after you and your people near it and, with nothing to do, go home. If you die, they go home too.",
+	"By day a raiding party sets out for your keep, the first after five minutes of play (two in creative): two men the first time, one more each time after, four at most until they have a longhouse, then six; a party waits until the camp can pay for two at least, and comes smaller when it cannot pay for all. The next one is four minutes after the last one is over. The horn tells you, the top right says how far the nearest raider is and which way. They fight whom they meet, break walls and gates that stop them and, in survival, strike your keep. In creative they cannot hurt the keep: they go after you and your people near it and, with nothing to do, go home. If you die, they go home too.",
 	"# Winning",
 	"Their keep takes 200 hit points. Strike it with the left button (3 a blow), or send soldiers: right-click their keep in the command view and they attack it when no enemy is about. When it falls, you have won.",
 	"# Finding them",
@@ -3820,13 +4121,18 @@ static void write_dump(struct app *a)
 	{
 		float dist = 0.0f;
 		rival_bearing(a, &dist);
-		fprintf(f, "rival state=%d on=%d keep=%d,%d,%d hp=%.1f guards=%d archer=%d dist=%.1f raids=%d next=%.1f raiders=%d here=%d\n", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2],
-		        a->rhp, rival_count(a, false), rival_count(a, true), a->rival ? dist : -1.0f, a->raids, a->raid_t, bl_mobs_count_raiders(&a->mobs), a->raid_here);
+		fprintf(f, "rival state=%d on=%d keep=%d,%d,%d hp=%.1f guards=%d archer=%d dist=%.1f raids=%d next=%.1f raiders=%d here=%d stock=%d built=%d site=%d workers=%d\n", a->rival,
+		        a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, rival_count(a, false), rival_count(a, true), a->rival ? dist : -1.0f, a->raids, a->raid_t,
+		        bl_mobs_count_raiders(&a->mobs), a->raid_here, a->rstock, a->rbuilt, a->rsite, bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER));
 		struct bl_camera cam;
 		cmd_camera(a, &cam);
 		for (int i = 0; i < BL_MOBS_MAX; i++) {
 			const struct bl_mob *m = &a->mobs.mob[i];
 			float sx = -1, sy = -1;
+			if (m->alive && m->kind == BL_MOB_RWORKER) {
+				cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy);
+				fprintf(f, "rworker %d x=%.3f y=%.3f z=%.3f hp=%.1f order=%d load=%d sx=%.1f sy=%.1f\n", i, m->x, m->y, m->z, m->hp, m->order, m->load, sx, sy);
+			}
 			if (!m->alive || m->kind != BL_MOB_GUARD)
 				continue;
 			cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy);
@@ -5240,11 +5546,15 @@ static int selftest(void)
 		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 1 && !rv.rival_on && rival_count(&rv, false) == 0, "saved switched off");
 		rival_switch(&rv);
 		CHECK(rv.rival_on && rival_count(&rv, false) == RIVAL_GUARDS - 2, "back again, the two that fell still missing (%d)", rival_count(&rv, false));
+		rv.rstock = 0;
 		rv.rguard_t = RIVAL_REINFORCE;
 		rival_step(&rv, RIVAL_REINFORCE - 1.0f);
 		CHECK(rival_count(&rv, false) == RIVAL_GUARDS - 2, "not yet");
 		rival_step(&rv, 2.0f);
-		CHECK(rival_count(&rv, false) == RIVAL_GUARDS - 1, "a minute: one comes");
+		CHECK(rival_count(&rv, false) == RIVAL_GUARDS - 2, "with an empty store nobody comes");
+		rv.rstock = RIVAL_GUARD_COST + 1;
+		rival_step(&rv, 0.1f);
+		CHECK(rival_count(&rv, false) == RIVAL_GUARDS - 1 && rv.rstock == 1, "with material one does, and is paid for (%d)", rv.rstock);
 		/* the sword on the keep, and the end */
 		rv.playing = true;
 		rival_strike(&rv, 1000);
@@ -5300,6 +5610,7 @@ static int selftest(void)
 		CHECK(!rv.raid_out && bl_mobs_count_raiders(&rv.mobs) == 0, "switched off: they are gone");
 		rv.prompt = P_NONE;
 		rival_switch(&rv);
+		rv.rstock = RIVAL_STOCK_MAX;
 		rv.raid_t = 0.1f;
 		rival_step(&rv, 0.2f);
 		CHECK(rv.raids == 2 && bl_mobs_count_raiders(&rv.mobs) == RAID_SMALL + 1, "three the second time (%d)", bl_mobs_count_raiders(&rv.mobs));
@@ -5307,9 +5618,28 @@ static int selftest(void)
 		rival_step(&rv, 0.1f);
 		CHECK(!rv.raid_out && rv.raid_t == RAID_PAUSE, "beaten: the next one in four minutes");
 		rv.raids = 20;
+		rv.rstock = RIVAL_STOCK_MAX;
+		rv.rbuilt &= ~(1 << CAMP_HOUSE);
+		rv.rsite = -1;
+		bl_mobs_set_rsite(&rv.mobs, NULL);
+		rv.rcheck_t = 100.0f;
 		rv.raid_t = 0.1f;
 		rival_step(&rv, 0.2f);
-		CHECK(bl_mobs_count_raiders(&rv.mobs) == BL_RAIDER_MAX, "never more than six (%d)", bl_mobs_count_raiders(&rv.mobs));
+		CHECK(bl_mobs_count_raiders(&rv.mobs) == RAID_NO_HOUSE && rv.rstock == RIVAL_STOCK_MAX - RAID_NO_HOUSE * RIVAL_RAIDER_COST, "four without a longhouse, each paid for (%d, %d)",
+		      bl_mobs_count_raiders(&rv.mobs), rv.rstock);
+		bl_mobs_clear_kind(&rv.mobs, BL_MOB_GUARD);
+		rival_step(&rv, 0.1f);
+		rv.rstock = RIVAL_STOCK_MAX;
+		rv.rbuilt |= 1 << CAMP_HOUSE;
+		rv.raid_t = 0.1f;
+		rival_step(&rv, 0.2f);
+		CHECK(bl_mobs_count_raiders(&rv.mobs) == BL_RAIDER_MAX, "with it six, never more (%d)", bl_mobs_count_raiders(&rv.mobs));
+		bl_mobs_clear_kind(&rv.mobs, BL_MOB_GUARD);
+		rival_step(&rv, 0.1f);
+		rv.rstock = RIVAL_RAIDER_COST * 2 - 1;
+		rv.raid_t = 0.1f;
+		rival_step(&rv, 0.2f);
+		CHECK(!rv.raid_out && rv.raid_t == 30.0f, "nothing to pay two with: no party yet");
 		/* creative: the keep takes no harm and they go home */
 		rv.survival = false;
 		keep_sync(&rv);

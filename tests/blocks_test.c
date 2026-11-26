@@ -3766,7 +3766,7 @@ static void test_rival(void)
 	int n = 0;
 	for (int i = 0; i < 12; i++)
 		n += bl_mobs_add(&M, w, BL_MOB_GUARD, 20.5f + (float)i * 2.0f, 20.0f, 100.5f);
-	CHECK(n == BL_GUARD_MAX && bl_mob_is_foe(BL_MOB_GUARD) && !bl_mob_is_unit(BL_MOB_GUARD), "eight guards at most; they are foes, not the player's own (%d)", n);
+	CHECK(n == BL_GUARD_MAX && bl_mob_is_foe(BL_MOB_GUARD) && !bl_mob_is_unit(BL_MOB_GUARD), "eleven of the camp at most (eight on the ground, three archers); they are foes, not the player's own (%d)", n);
 	CHECK(bl_mobs_hit_cell(&M, 20, 21, 100), "no block is put into one");
 	float o[3] = { 20.5f, 21.0f, 97.5f }, dir[3] = { 0.0f, 0.0f, 1.0f }, t = 0.0f;
 	CHECK(bl_mobs_pick(&M, o, dir, 4.0f, &t) == 0 && bl_units_pick(&M, o, dir, 4.0f, &t) < 0, "the sword finds a guard, the command view does not choose him");
@@ -3881,7 +3881,7 @@ static void test_raiders(void)
 		camp += bl_mobs_add(&M, w, BL_MOB_GUARD, 20.5f + (float)i * 2.0f, 20.0f, 100.5f);
 	for (int i = 0; i < 12; i++)
 		out += bl_mobs_add_raider(&M, w, 20.5f + (float)i * 2.0f, 20.0f, 104.5f);
-	CHECK(camp == BL_GUARD_MAX && out == BL_RAIDER_MAX && bl_mobs_count_raiders(&M) == BL_RAIDER_MAX, "eight guards and six raiders (%d, %d)", camp, out);
+	CHECK(camp == BL_GUARD_MAX && out == BL_RAIDER_MAX && bl_mobs_count_raiders(&M) == BL_RAIDER_MAX, "the camp's guards and six raiders (%d, %d)", camp, out);
 
 	/* they march 60 blocks to the player's keep and strike it; goblins' target and theirs is the same block */
 	bl_mobs_clear(&M);
@@ -3960,6 +3960,151 @@ static void test_raiders(void)
 	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 90.5f);
 	t = raid_steps(&M, w, away, false, BL_RAID_LIMIT + BL_RAID_BACK + 10.0f, &S);
 	CHECK(S.raiders_home == 1 && t < 3.0f * BL_RAID_IDLE + 10.0f, "gone after %.0f s", t);
+	bl_world_free(w);
+}
+
+/* the labourers' steps: what they take from the land goes, what they put is set; *s adds up */
+static void camp_steps(struct bl_mobs *M, struct bl_world *w, const float pl[3], bool alive, float secs, struct bl_mobs_result *S)
+{
+	memset(S, 0, sizeof *S);
+	for (int i = 0; i < (int)(secs * 30.0f); i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(M, w, pl, alive, 12.0f, 1.0f / 30.0f, &R);
+		for (int k = 0; k < R.nraze; k++)
+			bl_set(w, R.raze[k].x, R.raze[k].y, R.raze[k].z, BL_AIR);
+		for (int k = 0; k < R.nplace; k++)
+			if (bl_cell_missing(w, &R.place[k]))
+				bl_set(w, R.place[k].x, R.place[k].y, R.place[k].z, R.place[k].block);
+		S->nraze += R.nraze;
+		S->nplace += R.nplace;
+		S->delivered += R.delivered;
+		S->rbuilt += R.rbuilt;
+		S->rworkers_slain += R.rworkers_slain;
+		S->guards_slain += R.guards_slain;
+		S->hits += R.hits;
+		int building = 0;
+		for (int k = 0; k < BL_MOBS_MAX; k++)
+			building += M->mob[k].alive && M->mob[k].kind == BL_MOB_RWORKER && M->mob[k].order == BL_ORDER_BUILD;
+		if (building > S->shots)                    /* (here: the most builders at a time) */
+			S->shots = building;
+	}
+}
+
+static void put_tree(struct bl_world *w, int x, int z)
+{
+	for (int dy = 3; dy <= 4; dy++)
+		for (int dz = -1; dz <= 1; dz++)
+			for (int dx = -1; dx <= 1; dx++)
+				bl_set(w, x + dx, 20 + dy, z + dz, BL_LEAVES);
+	for (int y = 20; y < 24; y++)
+		bl_set(w, x, y, z, BL_LOG);
+}
+
+static int count_blocks(const struct bl_world *w, int block)
+{
+	int n = 0;
+	for (int x = 0; x < w->w; x++)
+		for (int z = 0; z < w->d; z++)
+			for (int y = 18; y < 30; y++)
+				n += bl_get(w, x, y, z) == block;
+	return n;
+}
+
+static void test_rival_workers(void)
+{
+	static struct bl_mobs M;
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	const float away[3] = { 5.5f, 20.0f, 5.5f };
+	struct bl_mobs_result S;
+	bl_mobs_init(&M, 11);
+	M.enabled = false;
+	for (int y = 20; y < 23; y++)
+		bl_set(w, 64, y, 64, BL_REDKEEP);
+	bl_mobs_set_rival(&M, true, 64.5f, 20.0f, 64.5f);
+
+	int n = 0;
+	for (int i = 0; i < 6; i++)
+		n += bl_mobs_add(&M, w, BL_MOB_RWORKER, 60.5f + (float)i, 20.0f, 66.5f);
+	CHECK(n == BL_RWORKER_MAX && bl_mob_is_foe(BL_MOB_RWORKER) && bl_mob_is_rival(BL_MOB_RWORKER) && !bl_mob_is_unit(BL_MOB_RWORKER), "four of their workers at most; foes (%d)", n);
+	float o[3] = { 60.5f, 20.8f, 62.5f }, dir[3] = { 0.0f, 0.0f, 1.0f }, t = 0.0f;
+	struct bl_mob_hit h;
+	bl_mobs_light(&M, w, 12.0f);
+	CHECK(bl_mobs_pick(&M, o, dir, 6.0f, &t) == 0 && bl_units_pick(&M, o, dir, 6.0f, &t) < 0 && bl_mobs_hit_cell(&M, 60, 20, 66) && bl_mobs_ray(&M, o, dir, 10.0f, &h) &&
+	      h.rgb[0] > 2.0f * h.rgb[1], "the sword and the picture find one, in a red tunic; the command view does not choose him");
+
+	/* a tree is felled and brought home; a log somebody has put down is no tree */
+	bl_mobs_clear(&M);
+	put_tree(w, 90, 64);
+	bl_set(w, 40, 20, 64, BL_LOG);
+	bl_mobs_add(&M, w, BL_MOB_RWORKER, 66.5f, 20.0f, 64.5f);
+	camp_steps(&M, w, away, false, 45.0f, &S);
+	CHECK(S.delivered == BL_RWORKER_TREE_LOAD && count_blocks(w, BL_LEAVES) == 0 && count_blocks(w, BL_LOG) == 1 && bl_get(w, 40, 20, 64) == BL_LOG,
+	      "the tree with its crown, 25 blocks off, is in the store (%d)", S.delivered);
+
+	/* then the stone that sticks out of the ground, but none in the camp */
+	bl_set(w, 64, 20, 90, BL_STONE);
+	bl_set(w, 64, 20, 91, BL_STONE);
+	bl_set(w, 70, 20, 70, BL_STONE);
+	camp_steps(&M, w, away, false, 90.0f, &S);
+	CHECK(S.delivered >= 2 && bl_get(w, 64, 20, 90) == BL_AIR && bl_get(w, 64, 20, 91) == BL_AIR && bl_get(w, 70, 20, 70) == BL_STONE, "stone is cut, the camp's own stays (%d)", S.delivered);
+
+	/* with nothing to fell or cut they forage: it brings material and changes nothing */
+	camp_steps(&M, w, away, false, 120.0f, &S);
+	CHECK(S.delivered >= 2 && S.nraze == 0 && bl_mobs_count_kind(&M, BL_MOB_RWORKER) == 1, "foraging (%d in two minutes)", S.delivered);
+
+	/* an enemy near: home, and no work; gone: back to it */
+	bl_mobs_clear(&M);
+	put_tree(w, 90, 64);
+	bl_mobs_add(&M, w, BL_MOB_RWORKER, 86.5f, 20.0f, 64.5f);
+	float pl[3] = { 90.5f, 20.0f, 68.5f };
+	camp_steps(&M, w, pl, true, 6.0f, &S);
+	CHECK(M.mob[0].x < 76.0f && S.hits == 0, "he runs for the keep and strikes nobody (x %.1f)", M.mob[0].x);
+	camp_steps(&M, w, pl, true, 40.0f, &S);
+	CHECK(S.nraze == 0 && bl_get(w, 90, 20, 64) == BL_LOG, "and leaves the tree beside the player alone");
+	camp_steps(&M, w, away, false, 90.0f, &S);
+	CHECK(bl_get(w, 90, 20, 64) == BL_AIR && S.delivered >= BL_RWORKER_TREE_LOAD, "and fetches it when the player is gone (%d)", S.delivered);
+
+	/* four of them build what the camp is building, two at a time, and it is said once */
+	bl_mobs_clear(&M);
+	for (int i = 0; i < 4; i++)
+		bl_mobs_add(&M, w, BL_MOB_RWORKER, 62.5f + (float)i, 20.0f, 66.5f);
+	struct bl_site site;
+	const char *why = NULL;
+	CHECK(bl_plan_lay(w, BL_PLAN_TOWER, 0, 67, 20, 67, NULL, 0, &site, &why), "room for a tower");
+	bl_mobs_set_rsite(&M, &site);
+	camp_steps(&M, w, away, false, 60.0f, &S);
+	CHECK(S.rbuilt == 1 && !M.rsite.on && bl_site_missing(w, &site) == 0 && S.shots >= 1 && S.shots <= BL_RWORKER_BUILDERS && S.delivered > 0,
+	      "the tower stands (%d missing, %d builders, the others fetched %d)", bl_site_missing(w, &site), S.shots, S.delivered);
+
+	/* a guard of theirs leaves them alone; the player's soldiers do not */
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_RWORKER, 80.5f, 20.0f, 40.5f);
+	bl_mobs_add(&M, w, BL_MOB_GUARD, 80.5f, 20.0f, 43.5f);
+	camp_steps(&M, w, away, false, 3.0f, &S);
+	CHECK(M.mob[0].hp == BL_RWORKER_HP && M.mob[1].hp == BL_GUARD_HP, "friends");
+	M.mob[1].alive = false;
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, M.mob[0].x + 2.0f, 20.0f, M.mob[0].z);
+	camp_steps(&M, w, away, false, 25.0f, &S);
+	CHECK(S.rworkers_slain == 1 && S.guards_slain == 0 && M.kills == 0, "a soldier brings one down: counted as a worker (%d)", S.rworkers_slain);
+
+	/* switched off they stand; shut in, one gives up in the end and is gone */
+	bl_mobs_clear(&M);
+	bl_mobs_set_rival(&M, false, 64.5f, 20.0f, 64.5f);
+	bl_mobs_add(&M, w, BL_MOB_RWORKER, 66.5f, 20.0f, 60.5f);
+	camp_steps(&M, w, away, false, 5.0f, &S);
+	CHECK(S.delivered == 0 && fabsf(M.mob[0].x - 66.5f) < 0.1f, "switched off: nothing");
+	bl_mobs_clear(&M);
+	bl_mobs_set_rival(&M, true, 64.5f, 20.0f, 64.5f);
+	for (int d = -3; d <= 3; d++)
+		for (int y = 20; y < 24; y++) {
+			bl_set(w, 30 + d, y, 27, BL_BRICK);
+			bl_set(w, 30 + d, y, 33, BL_BRICK);
+			bl_set(w, 27, y, 30 + d, BL_BRICK);
+			bl_set(w, 33, y, 30 + d, BL_BRICK);
+		}
+	bl_mobs_add(&M, w, BL_MOB_RWORKER, 30.5f, 20.0f, 30.5f);
+	camp_steps(&M, w, away, false, 600.0f, &S);
+	CHECK(bl_mobs_count(&M) == 0 && S.delivered == 0, "one who is shut in is gone after a while (%d left)", bl_mobs_count(&M));
 	bl_world_free(w);
 }
 
@@ -4598,6 +4743,7 @@ int main(int argc, char **argv)
 	test_raids();
 	test_rival();
 	test_raiders();
+	test_rival_workers();
 	test_soldiers();
 	test_brutes();
 	printf("building\n");

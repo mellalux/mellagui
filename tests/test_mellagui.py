@@ -19797,6 +19797,8 @@ class TestBlocks(Base):
                 st['rival'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'guard':
                 st.setdefault('guards', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'rworker':
+                st.setdefault('rworkers', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'stock':
                 st['stock'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'world':
@@ -20142,6 +20144,23 @@ class TestBlocks(Base):
         self.wait(marching, timeout=10.0)
         self.tap('k')                                           # switched off: the party is gone, too
         self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['raiders'] == '0')
+
+    def test_the_red_banners_workers_supply_the_camp(self):
+        self.start(survival=True, rival=True)
+        st = self.state()
+        r = st['rival']
+        self.assertEqual((r['stock'], r['built'], r['site'], r['workers']), ('12', '1', '-1', '4'))
+        at = {i: (float(w['x']), float(w['z'])) for i, w in st['rworkers'].items()}
+        self.assertEqual(len(at), 4)
+        self.play()
+        def out_of_camp(s):
+            return any(abs(float(w['x']) - at[i][0]) + abs(float(w['z']) - at[i][1]) > 6 for i, w in s.get('rworkers', {}).items() if i in at)
+        self.wait(out_of_camp, timeout=15.0)                    # (even in a flat world, with nothing to fell: they forage)
+        st = self.wait(lambda s: int(s['rival']['stock']) > 12, timeout=45.0)
+        self.tap('k')                                           # switched off: nobody there
+        self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['workers'] == '0')
+        self.tap('k')
+        self.wait(lambda s: s['rival']['on'] == '1' and s['rival']['workers'] == '4')
 
     def test_a_slow_click_breaks_or_puts_one_block_only(self):
         self.start('--pitch', '-45')

@@ -4664,6 +4664,7 @@ static void paint(struct wlwin *w)
 		rail_build(a, &rail);
 		wlrail_paint(w, &rail, &a->ran, rail_usable(a) && !modal_card(a) && a->has_pointer ? a->rail_hover : -1, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text_soft);
 	}
+	wlwin_pane_through(w, WLPANE_TOOL, a->playing && !a->cmd);               /* (it may lie over the window, and the pointer is to be locked to that) */
 	if (panel_on(a))
 		paint_panel(a);
 	a->fps_n++;

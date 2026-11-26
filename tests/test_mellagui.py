@@ -18117,6 +18117,31 @@ class TestPointerConstraints(Base):
         c.cmd('motion 10 10')
         self.assertEqual(self.pointer(c), (before[0] + 10, before[1] + 10))
 
+    def test_an_absolute_mouse_gives_relative_motion_and_a_lock_holds_it(self):
+        c, cl, win, r = self.start('mellagui-pc-abs')
+        rp = self.rel(cl)
+        x, y = r['x'] + 100, r['y'] + 100
+        c.cmd('absmouse %f %f' % (x / 800, y / 500))                    # the device is where the pointer is
+        lk = self.lock(cl, win)
+        c.sync()
+        cl.wl.roundtrip()
+        before = self.pointer(c)
+        cl.wl.queue = []
+        c.cmd('absmouse %f %f' % ((x + 30) / 800, (y - 12) / 500))
+        c.cmd('absmouse %f %f' % ((x + 35) / 800, (y - 6) / 500))
+        c.sync()
+        cl.wl.roundtrip()
+        self.assertEqual(self.pointer(c), before)                         # locked: it stays where it is
+        ms = self.events(cl, rp, 'relative_motion')
+        self.assertEqual([(round(m.args[2]), round(m.args[3])) for m in ms], [(30, -12), (5, 6)])
+        self.assertEqual(self.events(cl, cl.ptr, 'motion'), [])
+        cl.wl.request(lk, 'destroy')
+        cl.wl.roundtrip()
+        c.cmd('absmouse %f %f' % ((x + 40) / 800, y / 500))             # let go: it goes where the device is
+        got = self.pointer(c)
+        self.assertAlmostEqual(got[0], x + 40, delta=1)
+        self.assertAlmostEqual(got[1], y, delta=1)
+
     def test_relative_motion_comes_without_a_constraint_too(self):
         c, cl, win, r = self.start('mellagui-pc2')
         rp = self.rel(cl)
@@ -19892,6 +19917,18 @@ class TestBlocks(Base):
         self.assertEqual(self.S()['rev'], '0', 'the click that started the game did not break a block')
         self.assertEqual(ctl.windows()['pointer'], (self.cx, self.cy + 150), 'the pointer is where it was')
         self.assertNotEqual(before, None)
+
+    def test_a_panel_over_the_window_does_not_keep_the_pointer_from_being_locked(self):
+        self.start(panel=True)                                  # (a window this wide on this screen: the panel lies over its right part)
+        tool = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.blocks.tool'][0]
+        x, y = tool['x'] + 20, tool['y'] + 300
+        self.assertLess(x, self.win['x'] + self.win['w'], 'the panel is over the window')
+        ctl.abs(x, y)
+        ctl.key(self.K['enter'], 1)                             # Play from the keys: the pointer stays on the panel
+        ctl.key(self.K['enter'], 0)
+        self.wait(lambda s: s['state']['playing'] == '1')
+        ctl.cmd('motion 1 0')
+        self.wait(lambda s: s['state']['locked'] == '1')
 
     def test_the_mouse_turns_the_head_while_the_pointer_is_locked(self):
         self.start()

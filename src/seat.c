@@ -149,6 +149,8 @@ struct lm_seat {
     /* pointer */
     double px, py;
     bool pos_valid;
+    double abs_x, abs_y;                /* where an absolute device was last (global): the relative motion of one is the difference */
+    bool abs_valid;                     /* (not after a mouse moved the pointer in between) */
     struct lm_surface *pfocus;
     struct lm_listener pfocus_destroy;
     double pox, poy;                    /* global origin of the focus surface */
@@ -2493,6 +2495,27 @@ void lm_seat_set_locked(struct lm_seat *seat, bool locked)
         lm_idle_schedule(seat->refocus_idle);       /* the pointer finds the surface under it again */
 }
 
+/* An absolute pointer (a virtual machine's mouse, a tablet, the nested backend) says where it is, not how it moved. Programs that lock the pointer (games) only
+ * hear relative motion, so that is the step from the device's last place; a locked pointer stays put and a confined one stays in its region, as with a mouse.
+ * The device cannot go beyond the screen's edge, so neither can the motion: nothing can be done about that here. */
+static void pointer_absolute(struct lm_seat *seat, double gx, double gy, uint32_t time_ms)
+{
+    double dx = seat->abs_valid ? gx - seat->abs_x : gx - seat->px, dy = seat->abs_valid ? gy - seat->abs_y : gy - seat->py;
+    seat->abs_x = gx;
+    seat->abs_y = gy;
+    seat->abs_valid = true;
+    if (dx != 0 || dy != 0) {
+        struct lm_output *po = lm_output_nearest(seat->srv, gx, gy);
+        double sc = po ? lm_output_scalef(po) : 1.0;
+        lm_pconstraints_relative(seat->srv->pconstraints, time_ms, dx, dy, dx * sc, dy * sc);
+    }
+    if (lm_pconstraints_locked(seat->srv->pconstraints))
+        return;
+    lm_pconstraints_confine(seat->srv->pconstraints, seat->px, seat->py, &gx, &gy);
+    pointer_set_position(seat, gx, gy, time_ms);
+    lm_pconstraints_changed(seat->srv->pconstraints);
+}
+
 void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
 {
     if (!seat || !ev || seat->dying)
@@ -2537,6 +2560,7 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
             struct lm_output *po = lm_output_nearest(seat->srv, seat->px, seat->py);
             double sc = po ? lm_output_scalef(po) : 1.0;
             double dx = ev->u.motion.dx / sc, dy = ev->u.motion.dy / sc;
+            seat->abs_valid = false;
             lm_pconstraints_relative(seat->srv->pconstraints, ev->time_ms, dx, dy, ev->u.motion.dx, ev->u.motion.dy);
             if (lm_pconstraints_locked(seat->srv->pconstraints))
                 break;                                              /* a locked pointer stays where it is: the program has the relative motion */
@@ -2549,7 +2573,7 @@ void lm_seat_handle_input(struct lm_seat *seat, const struct lm_input_event *ev)
     case LM_INPUT_POINTER_MOTION_ABS: {
         double gx, gy;
         if (touch_global_pos(seat, ev->u.motion_abs.x, ev->u.motion_abs.y, &gx, &gy))
-            pointer_set_position(seat, gx, gy, ev->time_ms);
+            pointer_absolute(seat, gx, gy, ev->time_ms);
         break;
     }
     case LM_INPUT_POINTER_BUTTON:

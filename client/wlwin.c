@@ -131,6 +131,32 @@ void wlwin_pane_move(struct wlwin *w, int pane)
         WLC_SEND(w->c, w->pane[pane].toplevel, LM_XDG_TOPLEVEL_REQ_MOVE, { .o = w->seat }, { .u = w->button_serial });
 }
 
+void wlwin_pane_through(struct wlwin *w, int pane, bool through)
+{
+    if (pane >= 0 && pane < WLPANE_N)
+        w->pane_through[pane] = through;
+}
+
+/* tells a pane's surface what part of it takes the pointer, when that has changed */
+static void pane_input(struct wlwin *w, int i)
+{
+    struct wlpane *p = &w->pane[i];
+    if (!p->surface || p->through_set == w->pane_through[i])
+        return;
+    p->through_set = w->pane_through[i];
+    uint32_t region = 0;
+    if (p->through_set) {
+        region = wlc_alloc(w->c, &lm_wl_region_interface, NULL, NULL);
+        WLC_SEND(w->c, w->compositor, LM_WL_COMPOSITOR_REQ_CREATE_REGION, { .n = region });
+    }
+    WLC_SEND(w->c, p->surface, LM_WL_SURFACE_REQ_SET_INPUT_REGION, { .o = region });
+    if (region) {
+        WLC_SEND0(w->c, region, LM_WL_REGION_REQ_DESTROY);
+        wlc_forget(w->c, region);
+    }
+    WLC_SEND0(w->c, p->surface, LM_WL_SURFACE_REQ_COMMIT);
+}
+
 static void pane_buffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data);
 
 /* the picture goes to the compositor when it may: the window has been configured and the last buffer is back */
@@ -322,6 +348,9 @@ void wlwin_pane_end(struct wlwin *w)
 /* after the window's own picture: the panes that were painted are (made and) given their pictures, the others are closed */
 static void panes_commit(struct wlwin *w)
 {
+    for (int i = 0; i < WLPANE_N; i++)                                  /* (before a card goes away: the pointer under it then finds the window) */
+        if (w->pane[i].used)
+            pane_input(w, i);
     for (int i = 0; i < WLPANE_N; i++) {
         struct wlpane *p = &w->pane[i];
         if (!p->used) {
@@ -343,6 +372,7 @@ static void panes_commit(struct wlwin *w)
             WLC_SEND(w->c, p->toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = id });
             pane_place(w, p);
             WLC_SEND0(w->c, p->surface, LM_WL_SURFACE_REQ_COMMIT);
+            pane_input(w, i);
             p->dirty = true;
             memcpy(p->last, p->img, (size_t)p->sw * (size_t)p->sh * 4);
         } else if (memcmp(p->last, p->img, (size_t)p->sw * (size_t)p->sh * 4)) {

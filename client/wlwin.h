@@ -58,6 +58,7 @@ struct wlpane {
     int at_x, at_y;                 /* the place asked of the compositor (window pixels) */
     int sw, sh, scale;              /* size of `img` in buffer pixels */
     uint32_t *img, *last;           /* the picture being painted, and the one for the compositor (premultiplied ARGB) */
+    bool through_set;               /* the surface was told to let the pointer through (wlwin_pane_through) */
     size_t cap;
 };
 
@@ -67,6 +68,7 @@ struct wlwin {
     void *data;                     /* for the ops callbacks */
     uint32_t registry, compositor, shm, wm_base, seat, pointer, keyboard, menu;       /* menu: mellagui_menu_v1, 0 without it */
     uint32_t pconstraints, relmgr, lockobj, relobj;          /* zwp_pointer_constraints_v1, zwp_relative_pointer_manager_v1 (0 without them), the locked pointer and the relative pointer of wlwin_lock_pointer */
+    bool pane_through[WLPANE_N];    /* wlwin_pane_through(): what is wanted of each pane */
     bool locked;                    /* the pointer lock is active right now (the compositor said `locked`) */
     uint32_t surface, xsurface, toplevel, pool, buffer;
     int w, h;                       /* size the compositor asked for (clamped to the minimum) */
@@ -189,6 +191,9 @@ void wlwin_pane_end(struct wlwin *w);
 bool wlwin_pane_shown(const struct wlwin *w, int pane);
 /* Carry it with the pointer that has the button down. */
 void wlwin_pane_move(struct wlwin *w, int pane);
+/* A pane that the pointer goes through (an empty input region): a panel that may lie over the window while the window wants the pointer, e.g. a locked one.
+ * Takes effect with the next picture. */
+void wlwin_pane_through(struct wlwin *w, int pane, bool through);
 
 /* ---- drawing (all clip to the buffer) ------------------------------------------------------------------------------ */
 

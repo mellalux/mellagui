@@ -218,7 +218,15 @@ static void ctl_command(struct ctl_client *c, char *line)
         if (srv->input)
             lm_input_inject(srv->input, &ev);
         ctl_reply(c, "ok\n");
-    } else if (!strcmp(cmd, "cursor")) {                      /* the shape under the pointer (a number of enum lm_cursor_shape) */
+    } else if (!strcmp(cmd, "absmouse")) {                    /* an absolute pointer DEVICE (a virtual machine's mouse), 0..1 over the layout; `abs` only warps */
+        if (!a1 || !a2) { ctl_reply(c, "err usage: absmouse <x 0..1> <y 0..1>\n"); return; }
+        struct lm_input_event ev = { .type = LM_INPUT_POINTER_MOTION_ABS };
+        ev.u.motion_abs.x = atof(a1);
+        ev.u.motion_abs.y = atof(a2);
+        if (srv->input)
+            lm_input_inject(srv->input, &ev);
+        ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "cursor")) {                      /* the shape under the pointer (a number of enum lm_cursor_shape) */                      /* the shape under the pointer (a number of enum lm_cursor_shape) */
         struct lm_cursor cur = { 0 };
         if (srv->seat)
             lm_seat_get_cursor(srv->seat, &cur);

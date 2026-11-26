@@ -104,7 +104,7 @@ int dock_window_count(const struct lm_wm *wm, const struct lm_dock_item *it)
     int n = 0;
     struct lm_window *w;
     lm_list_for_each(w, &((struct lm_wm *)wm)->windows, link)
-        if (w->mapped && dock_app_matches(it->match, w->app_id))
+        if (w->mapped && !win_is_card(w) && dock_app_matches(it->match, w->app_id))
             n++;
     return n;
 }
@@ -339,7 +339,7 @@ void dock_launch(struct lm_wm *wm, const struct lm_dock_item *it, int i, bool re
     struct lm_window *w, *best = NULL;
     if (reuse)
         lm_list_for_each(w, &wm->windows, link)
-            if (w->mapped && dock_app_matches(it->match, w->app_id) && (!best || WIN(w)->focus_seq > WIN(best)->focus_seq))
+            if (w->mapped && !win_is_card(w) && dock_app_matches(it->match, w->app_id) && (!best || WIN(w)->focus_seq > WIN(best)->focus_seq))
                 best = w;
     /* A window that is not in front yet comes forward; when the most recent one already has the focus the click is for another
      * instance (two terminals): the program is started again. */

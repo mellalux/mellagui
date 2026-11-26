@@ -9077,7 +9077,9 @@ static void paint_card(struct app *a)
     int nbg;
     card_rect(a, &geo, &nbg);
     bool dims = a->prompt != P_ADJUST && a->prompt != P_EFFECTS;        /* (the effect panels leave the picture as it is) */
+    a->win.card_float = a->prompt == P_ADJUST;
     wlcard_frame_at(w, &c, geo.x, geo.y, geo.w, geo.h, title, COL_ACCENT, COL_BG, lm_theme.text_bright, dims);
+    a->win.card_float = false;
     if (a->prompt == P_ADJUST) {                                        /* a grip in the title: it can be dragged */
         for (int i = 0; i < 3; i++)
             for (int j = 0; j < 2; j++)
@@ -11354,7 +11356,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         return;
     }
     if (op == LM_WL_POINTER_EVT_AXIS) {
-        if (a->prompt == P_ADJUST && args[1].u == 0 && !wlcard_has(&c, (int)a->px, (int)a->py)) {        /* over the picture: the wheel zooms it, as usual */
+        if (a->prompt == P_ADJUST && args[1].u == 0 && !wlcard_over(&a->win, &c, (int)a->px, (int)a->py)) {        /* over the picture: the wheel zooms it, as usual */
             if (args[2].f != 0 && in_canvas(a, a->px, a->py))
                 zoom_to(a, a->zoom * (args[2].f < 0 ? 1.25 : 1.0 / 1.25), a->px - cv_x(a), a->py);
             a->win.redraw = true;
@@ -11379,7 +11381,8 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     if (op != LM_WL_POINTER_EVT_BUTTON)
         return;
     a->clip.serial = args[0].u;
-    int k = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
+    const bool over = wlcard_over(&a->win, &c, (int)a->px, (int)a->py);
+    int k = over ? wlcard_button_at(&c, nb, (int)a->px, (int)a->py) : -1;
     if (args[3].u != 1) {
         wlpicker_release(&a->pk);
         a->cp.drag = 0;
@@ -11407,7 +11410,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         return;
     }
     if (args[2].u == 274 && a->prompt == P_ADJUST) {                                            /* the middle button pans the picture behind the panel */
-        if (!wlcard_has(&c, (int)a->px, (int)a->py) && in_canvas(a, a->px, a->py)) {
+        if (!over && in_canvas(a, a->px, a->py)) {
             a->pan = true;
             a->pan_x = a->px;
             a->pan_y = a->py;
@@ -11421,9 +11424,11 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             a->pcard_down = k;
         } else if (a->prompt != P_ADJUST && wlcard_drag_press(&a->win, &c, a->px, a->py)) {
             a->win.redraw = true;                                                               /* the title: take hold of the card */
-        } else if (!wlcard_has(&c, (int)a->px, (int)a->py)) {
+        } else if (!over) {
             if (a->prompt != P_ADJUST)                                                          /* (an effect panel stays: a stray click must not lose the work) */
                 prompt_close(a, false);                                                         /* a click outside the card cancels */
+        } else if (a->prompt == P_ADJUST && a->py < c.y + 38 && wlwin_pane_shown(&a->win, WLPANE_CARD)) {
+            wlwin_pane_move(&a->win, WLPANE_CARD);                                              /* a window of its own: the compositor carries it */
         } else if (a->prompt == P_ADJUST && a->py < c.y + 38) {                                 /* the title bar: take hold of the panel */
             a->adj_moving = true;
             a->adj_gx = a->px - c.x;

@@ -536,12 +536,13 @@ static const struct lm_message mellagui_menu_requests[] = {
     MSG("popup", "s", 1, NULL),
     MSG("warp", "ii", 1, NULL),
     MSG("raise", "o", 1, TY(&lm_wl_surface_interface)),
+    MSG("place", "oii", 2, TY(&lm_wl_surface_interface, NULL, NULL)),
 };
 static const struct lm_message mellagui_menu_events[] = {
     MSG("chosen", "i", 1, NULL),
     MSG("closed", "", 1, NULL),
 };
-DEFINE_IFACE(lm_mellagui_menu_v1_interface, "mellagui_menu_v1", 1, mellagui_menu_requests, mellagui_menu_events);
+DEFINE_IFACE(lm_mellagui_menu_v1_interface, "mellagui_menu_v1", 2, mellagui_menu_requests, mellagui_menu_events);
 
 /* ---- mellagui_tray_v1 ---------------------------------------------------------------- */
 static const struct lm_message mellagui_tray_requests[] = {

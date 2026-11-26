@@ -139,6 +139,35 @@ bool places_find(struct lm_wm *wm, const struct lm_window *w, struct lm_rect *r,
     return true;
 }
 
+/* A panel of a program (".tool") opens where the user left it, counted from its program's window: the same file, the same entry form. */
+bool places_tool_find(struct lm_wm *wm, const struct lm_window *w, int32_t *x, int32_t *y)
+{
+    const char *path = wm->srv->config.windows_path;
+    const struct wm_place *p = path && *path && w->app_id ? place_of(w->app_id) : NULL;
+    if (!p)
+        return false;
+    *x = p->x;
+    *y = p->y;
+    return true;
+}
+
+void places_tool_remember(struct lm_wm *wm, struct lm_window *w, int32_t x, int32_t y)
+{
+    const char *path = wm->srv->config.windows_path;
+    if (!path || !*path || !w->app_id || strlen(w->app_id) >= sizeof(places[0].app) || w->width < 40 || w->height < 40)
+        return;
+    struct wm_place *p = place_of(w->app_id);
+    if (!p) {
+        if (nplaces >= PLACES_MAX)
+            memmove(&places[0], &places[1], sizeof(places[0]) * (size_t)--nplaces);
+        p = &places[nplaces++];
+    }
+    struct wm_place now = { .x = x, .y = y, .w = w->width, .h = w->height };
+    snprintf(now.app, sizeof(now.app), "%s", w->app_id);
+    *p = now;
+    places_save(wm);
+}
+
 void places_remember(struct lm_wm *wm, struct lm_window *w)
 {
     const char *path = wm->srv->config.windows_path;

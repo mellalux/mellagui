@@ -24,6 +24,8 @@ bool ov_hides(const struct lm_wm *wm, const struct lm_window *w)
 {
     if (!wm->ov.open)
         return false;
+    if (win_is_card(w))                                         /* (the pictures of the overview are of the windows alone) */
+        return true;
     for (int i = 0; i < wm->ov.n; i++)
         if (wm->ov.item[i].win == w)
             return true;
@@ -620,7 +622,7 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
         }
         if (clip && !lm_rect_overlaps(&sb, clip))
             continue;
-        if (!(w->states & LM_WINDOW_FULLSCREEN) && !win_is_gadget(w) && !win_is_desktop(w) && (!clip || lm_rect_overlaps(&outer, clip))) {
+        if (!(w->states & LM_WINDOW_FULLSCREEN) && !win_is_gadget(w) && !win_is_desktop(w) && !win_is_card(w) && (!clip || lm_rect_overlaps(&outer, clip))) {
             memset(&it, 0, sizeof(it));
             it.kind = LM_SCENE_FRAME;
             frame_info(wm, w, &it.u.frame);

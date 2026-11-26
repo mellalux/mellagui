@@ -189,6 +189,8 @@ void lm_wm_window_initial_configure(struct lm_window *w);
 void lm_wm_window_set_title(struct lm_window *w, const char *title);
 void lm_wm_window_set_app_id(struct lm_window *w, const char *app_id);
 void lm_wm_window_set_parent(struct lm_window *w, struct lm_window *parent);
+/* Where the card window of this surface opens, from its parent's top left corner (menu.h "place"). */
+void lm_wm_place_surface(struct lm_wm *wm, struct lm_surface *surface, int32_t x, int32_t y);
 void lm_wm_window_set_min_size(struct lm_window *w, int32_t width, int32_t height);
 void lm_wm_window_set_max_size(struct lm_window *w, int32_t width, int32_t height);
 /*

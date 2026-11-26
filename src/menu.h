@@ -12,6 +12,10 @@
  *                    button can be pressed again where it now is
  *   raise(surface)   bring the window of one of this program's own surfaces forward (its workspace is switched to, a minimized window comes back):
  *                    the single `mellagui-view` window, asked by a second start to show another picture, comes up without an xdg-activation token
+ *   place(surface, x, y)   (since 2) where a CARD WINDOW of this program opens, from the top left corner of its parent window's content: a card is a
+ *                    toplevel with a parent whose app id ends in ".card" (a dialog), ".panel" (a floating panel) or ".tool" (a panel that stays beside the program). The wm gives
+ *                    it no frame, keeps it above its parent, lets the user drag it anywhere (xdg_toplevel.move) and never gives it the keyboard
+ *                    (the parent keeps it). Once the user has moved it, `place` is not obeyed.
  *   closed()         the menu went away without a choice (a click elsewhere, Esc, another menu, the screen was locked)
  *
  * One menu at a time; a new popup closes the old one (which gets `closed`). Served only to MellaGUI's own programs (lm_settings_client_allowed);

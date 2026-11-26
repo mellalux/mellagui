@@ -2713,6 +2713,33 @@ def wait_for_window(app_id, timeout=5.0):
     return None
 
 
+def card_window(c, app_id, kind='card', timeout=5.0):
+    """The window of a program's dialog card ('card'), floating panel ('panel') or tool panel ('tool'), once it has a size; None when none comes."""
+    end = time.time() + timeout
+    while time.time() < end:
+        for w in c.windows()['windows']:
+            if w['app_id'] == '%s.%s' % (app_id, kind) and w['w'] > 0:
+                return w
+        time.sleep(0.03)
+    return None
+
+
+def carry_card(c, app_id, px, py, dx, dy, kind='card'):
+    """Takes hold of a card window at the screen point (px, py), carries it by (dx, dy) and returns how far it went."""
+    before = card_window(c, app_id, kind)
+    c.abs(px, py)
+    time.sleep(0.15)
+    c.button(272, True)
+    time.sleep(0.2)                                             # (the move is asked for while the button is down)
+    for i in range(1, 6):
+        c.abs(px + dx * i // 5, py + dy * i // 5)
+        time.sleep(0.03)
+    c.button(272, False)
+    time.sleep(0.2)
+    after = card_window(c, app_id, kind)
+    return (after['x'] - before['x'], after['y'] - before['y'])
+
+
 def wait_for_window_in(c, app_id, timeout=5.0):
     """Like wait_for_window, in the compositor behind the control socket `c`."""
     end = time.time() + timeout
@@ -8704,24 +8731,16 @@ esac
         ctl.abs(x0 + 300, y0 + 400)
         ctl.click(x0 + 588, y0 + 232)                                                 # the "?" of the sticky keys box
         cx, cy, cw, ch = card()
-        ctl.abs(x0 + cx + 300, y0 + cy + 14)                                          # the title strip
-        time.sleep(0.1)
-        ctl.button(272, True)
-        for i in range(1, 5):
-            ctl.abs(x0 + cx + 300 - 4 * i, y0 + cy + 14 - 3 * i)
-            time.sleep(0.04)
-        ctl.button(272, False)
-        for _ in range(60):
-            if card() != (cx, cy, cw, ch):
-                break
-            time.sleep(0.03)
-        self.assertEqual(card(), (cx - 16, cy - 12, cw, ch))
+        home = card_window(ctl, 'mellagui.settings')
+        self.assertEqual(carry_card(ctl, 'mellagui.settings', x0 + cx + 300, y0 + cy + 14, -16, -12), (-16, -12))          # by its title
+        self.assertEqual(card(), (cx, cy, cw, ch))                                    # (the program draws it where it did)
         ctl.tap(KEY_ESC)                                                              # the card closes, not the panel
         time.sleep(0.3)
         self.assertIsNone(p.poll())
         os.unlink(dump)
         ctl.click(x0 + 588, y0 + 232)                                                 # and opens in the middle again
-        self.assertEqual(card(), (cx, cy, cw, ch))
+        again = card_window(ctl, 'mellagui.settings')
+        self.assertEqual((again['x'], again['y']), (home['x'], home['y']))
         ctl.tap(KEY_ESC)
         time.sleep(0.2)
         ctl.tap(KEY_ESC)
@@ -8752,24 +8771,16 @@ esac
             self.fail('no card in the dump')
         ctl.click(x0 + 460, y0 + 319)                               # "Browse..."
         cx, cy, cw, ch = card()
-        ctl.abs(x0 + cx + 200, y0 + cy + 14)                        # the card's title strip
-        time.sleep(0.1)
-        ctl.button(272, True)
-        for i in range(1, 5):
-            ctl.abs(x0 + cx + 200 + 5 * i, y0 + cy + 14 + 2 * i)
-            time.sleep(0.04)
-        ctl.button(272, False)
-        for _ in range(60):
-            if card() != (cx, cy, cw, ch):
-                break
-            time.sleep(0.03)
-        self.assertEqual(card(), (cx + 20, cy + 8, cw, ch))
+        home = card_window(ctl, 'mellagui.settings')
+        self.assertEqual(carry_card(ctl, 'mellagui.settings', x0 + cx + 200, y0 + cy + 14, 20, 8), (20, 8))                # by its title
+        self.assertEqual(card(), (cx, cy, cw, ch))
         ctl.tap(KEY_ESC)                                            # closed ...
         time.sleep(0.3)
         self.assertIsNone(p.poll())
         os.unlink(dump)
         ctl.click(x0 + 460, y0 + 319)                               # ... and the next one opens in the middle
-        self.assertEqual(card(), (cx, cy, cw, ch))
+        again = card_window(ctl, 'mellagui.settings')
+        self.assertEqual((again['x'], again['y']), (home['x'], home['y']))
         ctl.tap(KEY_ESC)
         time.sleep(0.2)
         ctl.tap(KEY_ESC)
@@ -16022,25 +16033,17 @@ class TestPaint(Base):
         c = {k: int(v) for k, v in st['card'].items() if k in 'xywh'}
         self.assertGreater(c['x'], 300)                                                       # it sits at the right, not over the middle of the picture
         # take it by its title and move it to the left
-        ctl.abs(wx + c['x'] + 120, wy + c['y'] + 14)
-        time.sleep(0.1)
-        ctl.button(272, True)
-        for i in range(1, 6):
-            ctl.abs(wx + c['x'] + 120 - 50 * i, wy + c['y'] + 14 + 20 * i)
-            time.sleep(0.03)
-        ctl.button(272, False)
-        st = self.wait(lambda s: int(s['card']['x']) < c['x'] - 200)
-        self.assertEqual(int(st['card']['x']), c['x'] - 250)
-        self.assertEqual(int(st['card']['y']), c['y'] + 100)
-        self.assertEqual(st['state']['prompt'], '10')
-        # a click on the picture or beside the panel does not close it
-        self.click_at(int(st['card']['x']) + c['w'] + 10, 40)
+        self.assertEqual(carry_card(ctl, 'mellagui.paint', wx + c['x'] + 120, wy + c['y'] + 14, -250, 100, 'panel'), (-250, 100))
+        left = card_window(ctl, 'mellagui.paint', 'panel')
+        self.assertEqual(self.state()['state']['prompt'], '10')
+        # a click on the picture or beside the panel does not close it, also where it was before it was carried away
+        self.click_at(c['x'] + c['w'] - 20, c['y'] + 40)
         time.sleep(0.15)
         self.assertEqual(self.state()['state']['prompt'], '10')
         # a slider works where it is now, and the picture can be zoomed and moved while the panel is open
         r = self.row('adjust', 'Distance')
         v0 = int(r['value'])
-        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.9), int(r['ty']))
+        self.click_at(int(r['tx']) + int(int(r['tw']) * 0.9) - 250, int(r['ty']) + 100)
         self.wait(lambda s: int(self.row('adjust', 'Distance')['value']) != v0)
         z0 = int(self.state()['state']['zoom'])
         ctl.abs(wx + 200, wy + 60)                                                            # (over the picture's area, above the panel)
@@ -16061,8 +16064,9 @@ class TestPaint(Base):
         self.click_button(self.state(), 'Effects')
         self.wait(lambda s: s['state']['prompt'] == '14')
         self.click_box(self.row('efx', 'Blur...'))
-        st = self.wait(lambda s: s['state']['prompt'] == '10' and s['fxcard']['kind'] == 'blur')
-        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'] - 250, c['y'] + 100))
+        self.wait(lambda s: s['state']['prompt'] == '10' and s['fxcard']['kind'] == 'blur')
+        again = card_window(ctl, 'mellagui.paint', 'panel')
+        self.assertEqual((again['x'], again['y']), (left['x'], left['y']))
         ctl.tap(KEY_ESC)
 
     def test_the_colour_card_goes_whole_when_it_is_carried(self):
@@ -16073,16 +16077,12 @@ class TestPaint(Base):
         c = {k: int(v) for k, v in st['card'].items() if k in 'xywh'}
         sq = {k: int(v) for k, v in st['cpsq'].items() if k in 'xy'}
         wx, wy = self.win_xy()
-        ctl.abs(wx + c['x'] + 200, wy + c['y'] + 12)                                          # the title strip
-        time.sleep(0.1)
-        ctl.button(272, True)
-        for i in range(1, 5):
-            ctl.abs(wx + c['x'] + 200 - 6 * i, wy + c['y'] + 12 + 3 * i)
-            time.sleep(0.04)
-        ctl.button(272, False)
-        st = self.wait(lambda s: int(s['cpsq']['x']) != sq['x'])
-        self.assertEqual((int(st['cpsq']['x']), int(st['cpsq']['y'])), (sq['x'] - 24, sq['y'] + 12))       # (the gauges went with the card)
-        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'] - 24, c['y'] + 12))
+        self.assertEqual(carry_card(ctl, 'mellagui.paint', wx + c['x'] + 200, wy + c['y'] + 12, -24, 12), (-24, 12))
+        colour = self.state()['colour']
+        ctl.click(wx + sq['x'] - 24 + 3, wy + sq['y'] + 12 + 3)                                # the corner of the square, where it is now: nearly white
+        time.sleep(0.4)
+        self.assertNotEqual(self.state()['colour'], colour)
+        self.assertEqual(self.state()['state']['prompt'], '8')
         ctl.tap(KEY_ESC)
 
     def test_the_font_card_has_the_global_scroll_bar_that_pages_and_drags(self):
@@ -16219,22 +16219,18 @@ class TestPaint(Base):
         st = self.wait(lambda s: s['state']['prompt'] == '3' and 'card' in s)
         c = {k: int(v) for k, v in st['card'].items() if k in 'xywh'}
         wx, wy = self.win_xy()
-        ctl.abs(wx + c['x'] + 300, wy + c['y'] + 14)                                          # the title strip
-        time.sleep(0.1)
-        ctl.button(272, True)
-        for i in range(1, 6):
-            ctl.abs(wx + c['x'] + 300 - 10 * i, wy + c['y'] + 14 + 6 * i)
-            time.sleep(0.03)
-        ctl.button(272, False)
-        st = self.wait(lambda s: int(s['card']['x']) != c['x'])
-        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'] - 50, c['y'] + 30))
+        home = card_window(ctl, 'mellagui.paint')
+        self.assertEqual(carry_card(ctl, 'mellagui.paint', wx + c['x'] + 300, wy + c['y'] + 14, -50, 30), (-50, 30))          # by its title
+        st = self.state()
+        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'], c['y']))      # (the program draws it where it did)
         self.assertEqual(st['state']['prompt'], '3')                                          # (a press on the title is no click outside the card)
         r = self.row('cbtn', '0')                                                             # the buttons are where the card is now: Cancel closes it
-        self.click_at(int(r['x']) + int(r['w']) // 2, int(r['y']) + int(r['h']) // 2)
+        self.click_at(int(r['x']) + int(r['w']) // 2 - 50, int(r['y']) + int(r['h']) // 2 + 30)
         self.wait(lambda s: s['state']['prompt'] == '0')
         self.chord(KEYCODES['n'], KEY_LEFTCTRL)                                               # a new card opens in the middle again
-        st = self.wait(lambda s: s['state']['prompt'] == '3' and 'card' in s)
-        self.assertEqual((int(st['card']['x']), int(st['card']['y'])), (c['x'], c['y']))
+        self.wait(lambda s: s['state']['prompt'] == '3' and 'card' in s)
+        again = card_window(ctl, 'mellagui.paint')
+        self.assertEqual((again['x'], again['y']), (home['x'], home['y']))
         ctl.tap(KEY_ESC)
 
     def test_the_help_has_pages_that_scroll_and_a_list_to_choose_from(self):
@@ -19695,7 +19691,7 @@ class TestBlocks(Base):
     compositor's zwp_pointer_constraints_v1 / zwp_relative_pointer_v1). Through MELLAGUI_BLOCKS_DUMP: where the player is, what he aims at, the hand, the number of
     blocks of each kind, the boxes of the hotbar and of a card's buttons. The world is a flat one (`--seed 11 --flat`: grass at y 19, the player stands at y 20)."""
     EXE = os.environ.get('MELLAGUI_BLOCKS_BIN') or os.path.join(ROOT, 'build', 'mellagui-blocks')      # (a sanitized build can be tried with MELLAGUI_BLOCKS_BIN)
-    K = dict(o=24, y=21, k=37, end=107, esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
+    K = dict(o=24, i=23, y=21, k=37, end=107, esc=1, enter=28, e=18, p=25, w=17, a=30, s=31, d=32, f=33, t=20, q=16, n=49, space=57, shift=42, ctrl=29, left=105, right=106, up=103, down=108,
              f1=59, f3=61, h=35, lbrace=26, rbrace=27, m=50, g=34, x=45, tab=15, b=48, v=47, backspace=14, home=102, r=19, delete=111, **{str(i): 1 + i for i in range(1, 10)})
 
     def setUp(self):
@@ -19703,7 +19699,7 @@ class TestBlocks(Base):
         if not os.path.exists(self.EXE):
             self.skipTest('mellagui-blocks not built')
 
-    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False, survival=False, nomode=False, body=False, rival=False):
+    def start(self, *args, flat=True, data=None, size='800x480', render='160x100', env=None, pets=False, mobs=False, survival=False, nomode=False, body=False, rival=False, panel=False):
         for w in ctl.windows()['windows']:
             self.assertNotEqual(w['app_id'], 'mellagui.blocks', 'a window of an earlier test is still open')
         self.dump = os.path.join(tmp, 'blocks-%d.dump' % int(time.time() * 1000))
@@ -19722,6 +19718,8 @@ class TestBlocks(Base):
             argv += ['--no-body']                            # (the arm in the corner of the picture has tests of its own)
         if not rival:
             argv += ['--no-rival']                           # (the rival clan has tests of its own: a new survival world would get its camp)
+        if not panel:
+            argv += ['--no-panel']                           # (the panel beside the window has tests of its own: here it would lie over it)
         p = subprocess.Popen(argv + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_BLOCKS_DUMP=self.dump, MELLAGUI_BLOCKS_DIR=self.data, XDG_CONFIG_HOME=self.data, **(env or {})))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -19797,6 +19795,8 @@ class TestBlocks(Base):
                 st['rival'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'guard':
                 st.setdefault('guards', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'panel':
+                st['panel'] = dict(x.split('=', 1) for x in f[1:])
             elif f[0] == 'rworker':
                 st.setdefault('rworkers', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'stock':
@@ -20161,6 +20161,73 @@ class TestBlocks(Base):
         self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['workers'] == '0')
         self.tap('k')
         self.wait(lambda s: s['rival']['on'] == '1' and s['rival']['workers'] == '4')
+
+    def own(self, kind):
+        """The game's card window (kind 'card') or panel ('tool'), None when there is none."""
+        found = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.blocks.' + kind]
+        return found[0] if found else None
+
+    def until(self, what, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            got = what()
+            if got:
+                return got
+            time.sleep(0.05)
+        self.fail('it did not happen')
+
+    def carry(self, x, y, dx, dy):
+        ctl.abs(x, y)
+        time.sleep(0.2)
+        ctl.button(272, True)
+        time.sleep(0.3)                                         # (the move is asked for while the button is down)
+        for i in range(1, 11):
+            ctl.abs(x + dx * i // 10, y + dy * i // 10)
+            time.sleep(0.03)
+        ctl.button(272, False)
+        time.sleep(0.3)
+
+    def test_a_card_is_a_window_that_can_be_carried_out_of_the_games(self):
+        self.start(size='640x420')
+        main = wait_for_window('mellagui.blocks')
+        card = self.until(lambda: self.own('card'))
+        self.assertIn('focused', wait_for_window('mellagui.blocks')['flags'], 'the keyboard stays with the game')
+        self.assertTrue(card['x'] >= main['x'] and card['x'] + card['w'] <= main['x'] + main['w'], 'it opens over its window')
+        self.carry(card['x'] + 60, card['y'] + 14, 300, 80)
+        moved = self.own('card')
+        self.assertEqual((moved['x'] - card['x'], moved['y'] - card['y']), (300, 80))
+        self.assertGreater(moved['x'] + moved['w'], main['x'] + main['w'], 'part of it is outside the game window')
+        self.carry(main['x'] + 100, main['y'] - 12, 40, 20)     # the game window is dragged by its title bar: the card goes along
+        after = self.own('card')
+        self.assertEqual((after['x'] - moved['x'], after['y'] - moved['y']), (40, 20))
+        b = self.state()['cbtn']
+        play = b[max(b)]                                        # a button works where the card is now
+        view = self.view(wait_for_window('mellagui.blocks'))
+        ctl.click(view['x'] + play[0] + play[2] // 2 + after['x'] - card['x'] - 40, view['y'] + play[1] + play[3] // 2 + after['y'] - card['y'] - 20)
+        self.wait(lambda s: s['state']['playing'] == '1')
+        self.until(lambda: not self.own('card'))
+
+    def test_the_text_stands_in_a_panel_that_can_be_carried_and_i_puts_it_away(self):
+        self.start('--no-clock', size='560x430', survival=True, panel=True)
+        main = wait_for_window('mellagui.blocks')
+        panel = self.until(lambda: self.own('tool'))
+        self.assertGreaterEqual(panel['x'], main['x'] + main['w'], 'beside the window')
+        self.assertIn('focused', wait_for_window('mellagui.blocks')['flags'])
+        st = self.wait(lambda s: s['panel']['shown'] == '1')
+        self.assertEqual(st['panel']['on'], '1')
+        self.play()
+        self.wait(lambda s: s['state']['locked'] == '1')
+        self.tap('tab')
+        self.wait(lambda s: s['cmd']['on'] == '1')
+        self.carry(panel['x'] + 40, panel['y'] + 12, -150, 30)
+        moved = self.own('tool')
+        self.assertEqual((moved['x'] - panel['x'], moved['y'] - panel['y']), (-150, 30))
+        self.assertEqual((self.state()['cmd']['on'], self.state()['state']['playing']), ('1', '1'), 'carrying it neither pauses the game nor orders anything')
+        self.tap('i')
+        self.until(lambda: not self.own('tool'))
+        self.assertEqual(self.state()['panel']['on'], '0')
+        self.tap('i')
+        self.until(lambda: self.own('tool'))
 
     def test_a_slow_click_breaks_or_puts_one_block_only(self):
         self.start('--pitch', '-45')
@@ -24409,14 +24476,8 @@ class TestBluetoothWindow(Base):
         x, y, w, h = box()
         win = [q for q in self.c.windows()['windows'] if q['app_id'] == 'mellagui.bluetooth'][0]
         px, py = win['x'] + x + 60, win['y'] + y + 8                                      # the top strip of the card
-        self.c.abs(px, py)
-        time.sleep(0.1)
-        self.c.button(272, True)
-        for i in range(1, 5):
-            self.c.abs(px + 5 * i, py - 6 * i)
-            time.sleep(0.04)
-        self.c.button(272, False)
-        self.wait(lambda: box() == (x + 20, y - 24, w, h), 'the card moved')
+        self.assertEqual(carry_card(self.c, 'mellagui.bluetooth', px, py, 20, -24), (20, -24), 'the card is a window of its own, and it moved')
+        self.assertEqual(box(), (x, y, w, h))                                             # (the program draws it as before)
         self.assertEqual(self.view()['modal'], '1')                                       # (carrying it is no click on a button)
         self.c.tap(self.KEY_N)                                                            # the question can still be answered
         self.wait(lambda: self.view()['modal'] == '0', 'answered')
@@ -29564,25 +29625,22 @@ class TestSmart(Base):
         before = self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0]
         close = self.view()['mctl'][('plug1', '-', 'close')][0]                           # (its Close button is in the title strip, at the right)
         px, py = self.x0 + close[0] - 120, self.y0 + close[1] + 4                         # the strip beside it
-        c.abs(px, py)
-        time.sleep(0.1)
-        c.button(272, True)
-        for i in range(1, 5):
-            c.abs(px - 2 * i, py + 4 * i)                                                 # (the view nearly fills the window: it can only be moved a little)
-            time.sleep(0.04)
-        c.button(272, False)
-        self.wait(lambda: self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0][:2] == (before[0] - 8, before[1] + 16), 'the view moved')
-        after = self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0]
-        self.assertEqual((after[0], after[1]), (before[0] - 8, before[1] + 16))           # (the controls went with it)
+        home = card_window(c, 'mellagui.smart')
+        self.assertEqual(carry_card(c, 'mellagui.smart', px, py, 60, 40), (60, 40), 'the view is a window of its own, and it moved')
+        self.assertEqual(self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0], before)   # (the program draws it as before)
         self.assertEqual(self.view()['modal'], 'plug1')                                   # carrying it is no click beside the view
-        self.press(('plug1', 'switch_1', 'toggle'), dx=20, where='mctl')                  # and the switch works where it is now
+        self.x0 += 60                                                                     # and the switch works where it is now
+        self.y0 += 40
+        self.press(('plug1', 'switch_1', 'toggle'), dx=20, where='mctl')
+        self.x0 -= 60
+        self.y0 -= 40
         self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the switch in the moved view works')
         c.tap(1)                                                                          # Esc closes the view; the next one opens at its place
         self.wait(lambda: self.view()['modal'] == '-', 'closed')
         self.press(('plug1', '-', 'details'))
         self.wait(lambda: self.view()['modal'] == 'plug1', 'the view again')
-        again = self.view()['mctl'][('plug1', 'switch_1', 'toggle')][0]
-        self.assertEqual((again[0], again[1]), (before[0], before[1]))
+        again = card_window(c, 'mellagui.smart')
+        self.assertEqual((again['x'], again['y']), (home['x'], home['y']))
 
     def test_details_opens_the_devices_own_view(self):
         c = self.logged_in_window('w6')

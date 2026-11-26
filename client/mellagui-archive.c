@@ -1020,6 +1020,7 @@ static void paint(struct wlwin *w)
     paint_footer(a);
     if (a->prompt)
         paint_card(a);
+    wlwin_pane_end(w);
     struct wlrail L;
     files_rail_like(a, &L);
     wlrail_paint(w, &L, &a->ran, rail_hover_index(a), now_ms(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text_soft);

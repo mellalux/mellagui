@@ -44,6 +44,23 @@ struct wlwin_ops {
     void (*relative)(struct wlwin *w, double dx, double dy);
 };
 
+/* CARD WINDOWS: a part of the picture (a dialog card, a panel) that is a window of its own, so it can be dragged anywhere on the screen. The program
+ * goes on drawing it from its paint and hit-testing it in the window's coordinates: see wlwin_pane_begin. */
+enum { WLPANE_CARD, WLPANE_TOOL, WLPANE_N };
+
+struct wlpane {
+    struct wlwin *win;
+    bool used;                      /* painted in the picture being made */
+    bool modal;                     /* the window behind it does not take clicks where it was first drawn */
+    bool configured, busy, dirty;
+    uint32_t surface, xsurface, toplevel, buffer;
+    int x, y, w, h, r;              /* where its contents are drawn and hit (the window's coordinates), and the corner radius */
+    int at_x, at_y;                 /* the place asked of the compositor (window pixels) */
+    int sw, sh, scale;              /* size of `img` in buffer pixels */
+    uint32_t *img, *last;           /* the picture being painted, and the one for the compositor (premultiplied ARGB) */
+    size_t cap;
+};
+
 struct wlwin {
     struct wlc *c;
     const struct wlwin_ops *ops;
@@ -81,6 +98,16 @@ struct wlwin {
     bool card_shown;                /* a card was painted since the last paint began (when not, the offset is forgotten: the next card opens in the middle) */
     bool card_drag;                 /* the card is being dragged by its title */
     double card_gx, card_gy;        /* where the pointer took hold of it, from the card's corner */
+    uint32_t menu_ver;              /* the bound version of mellagui_menu_v1 (2: card windows can be placed) */
+    char app_id[56];
+    struct wlpane pane[WLPANE_N];
+    int cur_pane, on_pane;          /* the one being painted and the one the pointer is on (-1 = the window itself) */
+    bool no_panes;                  /* set by a program whose cards stay inside its window (the desktop) */
+    int iny;                        /* (while a pane is painted: the y its picture starts at, negated; inx likewise) */
+    uint32_t *main_px;              /* (and the window's own drawing target, put aside) */
+    int main_pw, main_ph, main_inx;
+    uint32_t button_serial;         /* of the last button press: a pane is carried with it */
+    bool card_float;                /* set by a program while it draws a card that floats: the window stays in use, and the card keeps the place it was carried to */
 };
 
 /*
@@ -145,6 +172,23 @@ void wlwin_set_zoom(struct wlwin *w, int percent);
 /* Make the window this big (a program zooming its text): the next repaint uses a buffer of that size and the compositor
  * follows it. Ignored while `fixed_size`. Returns true when the size was changed. */
 bool wlwin_request_size(struct wlwin *w, int width, int height);
+
+/* ---- card windows ------------------------------------------------------------------------------------------------------- */
+
+/* True when card windows work here (MellaGUI's compositor, and the program did not set no_panes; MELLAGUI_NO_PANES=1 switches them off). */
+bool wlwin_panes(const struct wlwin *w);
+/* Call from paint, after the window's own picture: what is drawn until wlwin_pane_end() goes into a window of its own, which opens with its top left corner
+ * at (at_x, at_y) of the window and can be carried anywhere. (x, y, width, height) is the rectangle the program draws it in, in the window's coordinates;
+ * pointer events on it arrive in those coordinates, wherever it has been carried. `modal`: a click on the window where the rectangle was first drawn counts as
+ * a click outside it; a card that is not modal (a floating panel) keeps the place the user carried it to while the window lives. `edge` is the colour of its rim, `radius` that of its corners. A pane that a paint does not draw is closed. False (and nothing changes:
+ * the drawing goes on in the window) when there are no card windows. WLPANE_TOOL is a panel that stays beside the program: it is carried by a press anywhere
+ * on it, and the program gets no pointer events from it. */
+bool wlwin_pane_begin(struct wlwin *w, int pane, int x, int y, int width, int height, int at_x, int at_y, int radius, uint32_t edge, bool modal);
+void wlwin_pane_end(struct wlwin *w);
+/* Is that pane a window on the screen now? */
+bool wlwin_pane_shown(const struct wlwin *w, int pane);
+/* Carry it with the pointer that has the button down. */
+void wlwin_pane_move(struct wlwin *w, int pane);
 
 /* ---- drawing (all clip to the buffer) ------------------------------------------------------------------------------ */
 

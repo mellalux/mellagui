@@ -96,11 +96,21 @@ static void req_raise(struct lm_resource *res, const union lm_arg *args)
     lm_wm_activate_surface(b->menu->srv->wm, s);
 }
 
+static void req_place(struct lm_resource *res, const union lm_arg *args)
+{
+    struct mbind *b = res->data;
+    struct lm_surface *s = args[0].r ? lm_surface_from_resource(args[0].r) : NULL;
+    if (!b || !b->allowed || !b->menu || !s || !b->menu->srv->wm || args[0].r->client != res->client)
+        return;
+    lm_wm_place_surface(b->menu->srv->wm, s, args[1].i, args[2].i);
+}
+
 static const lm_request_fn handlers[] = {
     [LM_MELLAGUI_MENU_V1_REQ_DESTROY] = req_destroy,
     [LM_MELLAGUI_MENU_V1_REQ_POPUP] = req_popup,
     [LM_MELLAGUI_MENU_V1_REQ_WARP] = req_warp,
     [LM_MELLAGUI_MENU_V1_REQ_RAISE] = req_raise,
+    [LM_MELLAGUI_MENU_V1_REQ_PLACE] = req_place,
 };
 
 static void menu_bind(struct lm_client *client, void *data, uint32_t version, uint32_t id)
@@ -142,9 +152,11 @@ void lm_menu_destroy(struct lm_menu *m)
 {
     if (!m)
         return;
-    struct mbind *b;
-    lm_list_for_each(b, &m->binds, link)
+    struct mbind *b, *btmp;
+    lm_list_for_each_safe(b, btmp, &m->binds, link) {         /* (their clients go later: off the list, which is freed here) */
         b->menu = NULL;
+        lm_list_remove(&b->link);
+    }
     if (m->global)
         lm_global_destroy(m->global);
     free(m);

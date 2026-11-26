@@ -58,6 +58,7 @@
 #include "uikit.h"
 #include "util.h"
 #include "wlc.h"
+#include "wlcard.h"
 #include "wlwin.h"
 
 #define HEAD_H 58
@@ -1822,8 +1823,8 @@ static void paint_modal(struct app *a)
     if (!d)
         return;
     wlwin_dim(w, 0.6);
-    w->card_shown = true;
     struct box m = a->modal;
+    wlcard_pane(w, m.x, m.y, m.w, m.h, 11, lm_theme.accent, true);
     rbox(w, (struct box){ m.x - 1, m.y - 1, m.w + 2, m.h + 2 }, 11, lm_theme.accent);
     rbox(w, m, 10, lm_theme.card);
     wlwin_text(w, m.x + 16, m.y + 14, d->name, 1, d->online ? lm_theme.text : lm_theme.text_dim, m.w - 190);
@@ -2155,6 +2156,10 @@ static void press_devices(struct app *a)
             return;
         }
         if (a->py < a->modal.y + 34 && a->px < a->modal.x + a->modal.w - 100) {            /* the title strip (not the Close button): take hold of the view */
+            if (wlwin_pane_shown(w, WLPANE_CARD)) {             /* a window of its own: the compositor carries it */
+                wlwin_pane_move(w, WLPANE_CARD);
+                return;
+            }
             w->card_drag = true;
             w->card_gx = a->px - a->modal.x;
             w->card_gy = a->py - a->modal.y;

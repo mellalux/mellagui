@@ -74,7 +74,7 @@
 /* evdev key codes: the place of a key, not the letter it makes */
 enum {
 	K_ESC = 1, K_1 = 2, K_9 = 10, K_Q = 16, K_W = 17, K_T = 20, K_LBRACE = 26, K_RBRACE = 27, K_ENTER = 28, K_LCTRL = 29, K_A = 30, K_S = 31, K_D = 32,
-	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_O = 24, K_Y = 21, K_K = 37, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111, K_H = 35,
+	K_E = 18, K_F = 33, K_P = 25, K_M = 50, K_G = 34, K_X = 45, K_TAB = 15, K_B = 48, K_BACKSPACE = 14, K_HOME = 102, K_LSHIFT = 42, K_N = 49, K_RSHIFT = 54, K_SPACE = 57, K_F1 = 59, K_F3 = 61, K_RCTRL = 97, K_UP = 103, K_LEFT = 105, K_RIGHT = 106, K_DOWN = 108, K_END = 107, K_O = 24, K_Y = 21, K_K = 37, K_PGUP = 104, K_PGDN = 109, K_V = 47, K_R = 19, K_DEL = 111, K_H = 35, K_I = 23,
 };
 
 #define SLOTS 9
@@ -119,12 +119,24 @@ static const struct {
 	int cost, dx, dz;                                       /* (a tower's middle, from their keep) */
 } k_camp[CAMP_BUILDINGS] = { { "watchtower", 20, -3, -3 }, { "longhouse", 30, 0, 0 }, { "watchtower", 20, 3, 3 }, { "watchtower", 20, 3, -3 } };
 
+#define PANEL_W 340                                          /* the panel of text beside the window (I) */
+#define PANEL_H 600
+#define LOG_N 24                                            /* the messages it remembers */
+
 #define N_SFX 33                                            /* the sounds of k_sfx */
 
 enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE, P_CLAN, P_WON };
 
 struct app {
 	struct wlhelp help;                                     /* the pages of F1 */
+	uint32_t test_seed;                                     /* the selftest: the seed of the next new world (0 = a fresh one) */
+	bool panel;                                             /* the text stands in a panel of its own beside the window, where there are card windows (I) */
+	struct logline {
+		char text[200];
+		int64_t ms;
+		int times;                                          /* said this many times in a row */
+	} log[LOG_N];                                           /* the messages, the newest first */
+	int nlog;
 	struct wlwin win;
 	struct bl_world *world;
 	struct bl_player pl;
@@ -303,6 +315,17 @@ static void say(struct app *a, const char *fmt, ...)
 	vsnprintf(a->msg, sizeof a->msg, fmt, ap);
 	va_end(ap);
 	a->msg_ms = now_ms();
+	char line[sizeof a->log[0].text];
+	snprintf(line, sizeof line, "%s", a->msg);
+	if (a->nlog > 0 && !strcmp(a->log[0].text, line)) {
+		a->log[0].times++;
+	} else {
+		memmove(&a->log[1], &a->log[0], sizeof a->log[0] * (LOG_N - 1));
+		snprintf(a->log[0].text, sizeof a->log[0].text, "%s", line);
+		a->log[0].times = 1;
+		a->nlog = LM_MIN(a->nlog + 1, LOG_N);
+	}
+	a->log[0].ms = a->msg_ms;
 	a->win.redraw = true;
 }
 
@@ -476,7 +499,7 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 		while (*v == ' ')
 			v++;
 		double d = strtod(v, NULL);
-		if (!prefs && (!strcmp(k, "fov") || !strcmp(k, "sensitivity") || !strcmp(k, "sound") || !strcmp(k, "body")))
+		if (!prefs && (!strcmp(k, "fov") || !strcmp(k, "sensitivity") || !strcmp(k, "sound") || !strcmp(k, "body") || !strcmp(k, "panel")))
 			continue;
 		if (!strcmp(k, "world")) {
 			v[strcspn(v, "\r\n")] = 0;
@@ -526,6 +549,8 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 			a->mobs_on = d != 0;
 		else if (!strcmp(k, "body") && (d == 0 || d == 1))
 			a->body = d != 0;
+		else if (!strcmp(k, "panel") && (d == 0 || d == 1))
+			a->panel = d != 0;
 		else if (with_player && !strcmp(k, "survival") && (d == 0 || d == 1)) {
 			a->survival = d != 0;
 			a->conf_mode = true;
@@ -648,7 +673,7 @@ static void conf_write(const struct app *a, FILE *f)
 	if (a->pets.placed)
 		fprintf(f, "yard_x = %.2f\nyard_z = %.2f\ntom_x = %.3f\ntom_y = %.3f\ntom_z = %.3f\nfilip_x = %.3f\nfilip_y = %.3f\nfilip_z = %.3f\n", a->pets.yard[0], a->pets.yard[2],
 		        a->pets.tom.x, a->pets.tom.y, a->pets.tom.z, a->pets.filip.x, a->pets.filip.y, a->pets.filip.z);
-	fprintf(f, "survival = %d\nnights = %d\nkills = %d\nbody = %d\n", a->survival, a->nights, a->kills, a->body);
+	fprintf(f, "survival = %d\nnights = %d\nkills = %d\nbody = %d\npanel = %d\n", a->survival, a->nights, a->kills, a->body, a->panel);
 	if (a->have_keep)
 		fprintf(f, "keep_x = %d\nkeep_y = %d\nkeep_z = %d\nkeep_hp = %.1f\n", a->keep[0], a->keep[1], a->keep[2], a->keep_hp);
 	fprintf(f, "workers = ");
@@ -2398,7 +2423,7 @@ static void new_world(struct app *a)
 {
 	if (a->path[0] && !a->nosave)
 		save_all(a, false);
-	if (!make_world(a, fresh_seed(), false)) {
+	if (!make_world(a, a->test_seed ? a->test_seed : fresh_seed(), false)) {
 		say(a, "Cannot make a world");
 		return;
 	}
@@ -2434,6 +2459,7 @@ static void state_reset(struct app *a)
 {
 	a->survival = true;
 	a->conf_read = a->conf_mode = false;
+	a->nlog = 0;
 	memset(a->inv, 0, sizeof a->inv);
 	a->dig_on = false;
 	a->dig_t = 0.0f;
@@ -3306,6 +3332,12 @@ static void paint_hotbar(struct app *a, const struct lay *L)
 	}
 }
 
+/* is the text in its panel (else it is written over the picture)? */
+static bool panel_on(const struct app *a)
+{
+	return a->panel && wlwin_panes(&a->win);
+}
+
 /* survival: the keep's hit points over the middle of the top, the nights survived, and under the crosshair how far the block is broken */
 static void paint_survival(struct app *a)
 {
@@ -3320,8 +3352,9 @@ static void paint_survival(struct app *a)
 			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 12, 5, f > 0.5f ? 0x4cb050u : f > 0.25f ? 0xe0a030u : 0xe04030u);
 		char l[160];
 		snprintf(l, sizeof l, "Keep %d   Nights %d   Workers %d   Soldiers %d   (Tab: command view)", (int)ceilf(a->keep_hp), a->nights, nworkers(a), nsoldiers(a));
-		shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, 0xffffffu);
-		if (a->mobs.wave_on && bl_mobs_wave_remaining(&a->mobs) > 0) {
+		if (!panel_on(a))
+			shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, 0xffffffu);
+		if (!panel_on(a) && a->mobs.wave_on && bl_mobs_wave_remaining(&a->mobs) > 0) {
 			int br = bl_mobs_count_brutes(&a->mobs) + a->mobs.wave_brutes;
 			if (br > 0)
 				snprintf(l, sizeof l, "Wave: %d goblins left, %d of them brute%s", bl_mobs_wave_remaining(&a->mobs), br, br == 1 ? "" : "s");
@@ -3339,9 +3372,8 @@ static void paint_survival(struct app *a)
 	}
 }
 
-/* where the list of what he has lies: at the right, under the lines of the top; `rows` of it show. In survival the wood and the stone always, then whatever else
- * there is; in creative, where nothing is used up, only what has been gathered (no list when that is nothing). */
-static int stock_layout(const struct app *a, int *x, int *y, int *wd, int list[BL_COUNT])
+/* the blocks of the list of what he has */
+static int stock_list(const struct app *a, int list[BL_COUNT])
 {
 	int n = 0;
 	static const int k_first[3] = { BL_LOG, BL_PLANKS, BL_COBBLE };
@@ -3351,6 +3383,14 @@ static int stock_layout(const struct app *a, int *x, int *y, int *wd, int list[B
 	for (int b = 1; b < BL_COUNT; b++)
 		if (a->inv[b] > 0 && b != BL_LOG && b != BL_PLANKS && b != BL_COBBLE)
 			list[n++] = b;
+	return n;
+}
+
+/* where the list of what he has lies: at the right, under the lines of the top; `rows` of it show. In survival the wood and the stone always, then whatever else
+ * there is; in creative, where nothing is used up, only what has been gathered (no list when that is nothing). */
+static int stock_layout(const struct app *a, int *x, int *y, int *wd, int list[BL_COUNT])
+{
+	const int n = stock_list(a, list);
 	*wd = 0;
 	for (int i = 0; i < n; i++)
 		*wd = LM_MAX(*wd, lm_font_text_width(bl_block_name(list[i])));
@@ -3491,7 +3531,10 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 		}
 		if (cmd_project(a, cam, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[1] + 4.0f, (float)a->rkeep[2] + 0.5f, &sx, &sy)) {
 			char l[80];
-			snprintf(l, sizeof l, "%s: %d material", RIVAL_NAME, a->rstock);
+			if (panel_on(a))
+				snprintf(l, sizeof l, "%s", RIVAL_NAME);
+			else
+				snprintf(l, sizeof l, "%s: %d material", RIVAL_NAME, a->rstock);
 			shadow_text(w, (int)sx - lm_font_text_width(l) / 2, (int)sy - LM_FONT_H, l, 0xff8a7au);
 		}
 	}
@@ -3504,16 +3547,18 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 		}
 	}
 	char l[200];
-	int y0 = a->survival ? 88 : 6;                                           /* (the keep's bar and the message are at the top in survival) */
-	shadow_text(w, 8, y0, "COMMAND VIEW", 0xffe080u);
-	snprintf(l, sizeof l, "Left: choose (drag a box, Shift adds)   Right: %s   1 go there, 2 break blocks", a->order_mode == 1 ? "break that block and the rest of its kind" : "go there");
-	shadow_text(w, 8, y0 + LM_FONT_H + 2, l, 0xffffffu);
-	shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), "Build: 3 to 6 or the bar below, R turns it, Delete takes a plan away", 0xffffffu);
-	snprintf(l, sizeof l, "B: a worker (%d planks)   V: a soldier (a barracks, %d cobble, %d planks)", WORKER_COST, SOLDIER_COBBLE, SOLDIER_PLANKS);
-	shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), l, 0xffffffu);
-	shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), a->rival == 1 && a->rival_on ? "WASD move   arrows turn   wheel zoom   Home back   End: their camp   Tab or Esc: back to him" : "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
-	snprintf(l, sizeof l, "Workers %d, soldiers %d, chosen %d, being built %d", nworkers(a), nsoldiers(a), cmd_selected(a), bl_mobs_count_sites(&a->mobs));
-	shadow_text(w, 8, y0 + 5 * (LM_FONT_H + 2), l, 0xc8e8ffu);
+	if (!panel_on(a)) {                                                      /* (else the panel says it) */
+		int y0 = a->survival ? 88 : 6;                                       /* (the keep's bar and the message are at the top in survival) */
+		shadow_text(w, 8, y0, "COMMAND VIEW", 0xffe080u);
+		snprintf(l, sizeof l, "Left: choose (drag a box, Shift adds)   Right: %s   1 go there, 2 break blocks", a->order_mode == 1 ? "break that block and the rest of its kind" : "go there");
+		shadow_text(w, 8, y0 + LM_FONT_H + 2, l, 0xffffffu);
+		shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), "Build: 3 to 6 or the bar below, R turns it, Delete takes a plan away", 0xffffffu);
+		snprintf(l, sizeof l, "B: a worker (%d planks)   V: a soldier (a barracks, %d cobble, %d planks)", WORKER_COST, SOLDIER_COBBLE, SOLDIER_PLANKS);
+		shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), l, 0xffffffu);
+		shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), a->rival == 1 && a->rival_on ? "WASD move   arrows turn   wheel zoom   Home back   End: their camp   Tab or Esc: back to him" : "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
+		snprintf(l, sizeof l, "Workers %d, soldiers %d, chosen %d, being built %d", nworkers(a), nsoldiers(a), cmd_selected(a), bl_mobs_count_sites(&a->mobs));
+		shadow_text(w, 8, y0 + 5 * (LM_FONT_H + 2), l, 0xc8e8ffu);
+	}
 	for (int i = 0; i < BL_PLAN_COUNT; i++) {                                /* the plans */
 		int x, y, bw, bh, cob, pl;
 		bar_rect(a, i, &x, &y, &bw, &bh);
@@ -3581,7 +3626,9 @@ static const char *const HP_WELCOME[] = {
 	"- The picture is drawn at a smaller size and stretched, so it stays quick; it takes more pixels by itself when the machine has the time.",
 	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In survival the number under a block is how many you have.",
 	"- Ten hearts over the hotbar are your hit points. In survival the keep's bar is at the top.",
-	"- The list at the right is what you have: in survival the wood, the planks and the cobble always and then everything else you carry; in creative, where nothing is used up, what you and your workers have gathered. It is there in the command view, too.",
+	"# The panel",
+	"Everything the game says in words stands in a panel of its own beside the window: the keep, the Red Banner, what you have, in the command view its orders, and the messages with the earlier ones under them. Drag it anywhere on the screen by pressing on it, while the game is paused or in the command view; it stays where you left it. I switches between the panel and text over the picture.",
+	"- Without the panel the same stands over the picture. The list at the right is then what you have: in survival the wood, the planks and the cobble always and then everything else you carry; in creative, where nothing is used up, what you and your workers have gathered. The panel lists the same.",
 	"# Sounds",
 	"Blocks sound of what they are made of; the sword, the goblins, your soldiers, the builders, the keep's bell, the horn of a wave and the dawn have their own sounds. They follow Settings > Sound > Sound feedback and the chosen output; --no-sound starts without them.",
 	"# To start",
@@ -3770,6 +3817,7 @@ static const char *const HP_KEYS[] = {
 	"|M|Goblins on / off",
 	"|P|Tom and Filip on / off",
 	"|H|Your body shown / hidden",
+	"|I|The panel of text on / off",
 	"|Tab|Command view",
 	"|B|Train a worker (command view)",
 	"|V|Train a soldier (command view)",
@@ -4046,6 +4094,9 @@ static void write_dump(struct app *a)
 		}
 	fprintf(f, "hero on=%d phase=%.3f stride=%.2f swing=%.2f sword=%d held=%s\n", a->body, a->walk_phase, a->walk_stride, a->arm_swing, a->body && a->hero.sword,
 	        a->survival && a->inv[hand_block(a)] < 1 ? "air" : bl_block_name(hand_block(a)));
+	fprintf(f, "panel on=%d shown=%d messages=%d\n", a->panel, wlwin_pane_shown(&a->win, WLPANE_TOOL), a->nlog);
+	if (a->nlog)
+		fprintf(f, "said %s\n", a->log[0].text);
 	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f wave=%d/%d/%d barracks=%d brutes=%d\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
 	        a->dig_on ? a->dig_t : -1.0f, a->mobs.wave_on ? bl_mobs_wave_remaining(&a->mobs) : 0, a->mobs.wave_on ? a->mobs.wave_size : 0, a->mobs.wave_on, barracks_find(a, NULL), bl_mobs_count_brutes(&a->mobs));
 	{
@@ -4306,6 +4357,186 @@ static bool rail_usable(const struct app *a)
 	return !a->playing || a->cmd;
 }
 
+/* ---- the panel: everything the game has to say in words, in a window of its own beside the game's ---- */
+
+/* text broken at blanks to `width` pixels, from y down; no further than `bottom`; where the next line would go */
+static int panel_wrap(struct wlwin *w, int x, int y, int width, int bottom, const char *text, uint32_t rgb)
+{
+	while (*text && y + LM_FONT_H <= bottom) {
+		char line[220];
+		size_t n = 0, cut = 0;
+		for (; text[n] && n < sizeof line - 1; n++) {
+			line[n] = text[n];
+			line[n + 1] = 0;
+			if (lm_font_text_width(line) > width) {
+				break;
+			}
+			if (text[n] == ' ')
+				cut = n;
+		}
+		if (text[n] && cut > 0)
+			n = cut;
+		memcpy(line, text, n);
+		line[n] = 0;
+		wlwin_text(w, x, y, line, 1, rgb, width);
+		y += LM_FONT_H + 2;
+		text += n ? n : 1;
+		while (*text == ' ')
+			text++;
+	}
+	return y;
+}
+
+static int panel_head(struct wlwin *w, int y, const char *s)
+{
+	wlwin_fill(w, 14, y + 3, PANEL_W - 28, 1, lm_theme.border);
+	wlwin_text(w, 14, y + 9, s, 1, lm_theme.accent, PANEL_W - 28);
+	return y + 9 + LM_FONT_H + 4;
+}
+
+static int panel_line(struct wlwin *w, int y, const char *s, uint32_t rgb)
+{
+	wlwin_text(w, 14, y, s, 1, rgb, PANEL_W - 28);
+	return y + LM_FONT_H + 2;
+}
+
+static int panel_bar(struct wlwin *w, int y, float f, uint32_t rgb)
+{
+	f = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+	wlwin_round_fill(w, 14, y + 1, PANEL_W - 28, 8, 4, lm_theme.bar);
+	if (f > 0.0f)
+		wlwin_round_fill(w, 14, y + 1, LM_MAX(8, (int)((float)(PANEL_W - 28) * f)), 8, 4, rgb);
+	return y + 14;
+}
+
+static void paint_panel(struct app *a)
+{
+	struct wlwin *w = &a->win;
+	if (!wlwin_pane_begin(w, WLPANE_TOOL, 0, 0, PANEL_W, PANEL_H, w->bw + 6, 0, 14, lm_theme.accent, false))
+		return;
+	wlwin_round_fill(w, 0, 0, PANEL_W, PANEL_H, 14, lm_theme.accent);
+	wlwin_round_fill(w, 1, 1, PANEL_W - 2, PANEL_H - 2, 13, lm_theme.background);
+	wlwin_text_bold(w, 14, 10, a->cmd ? "Command view" : "Blocks", 1, lm_theme.text_bright, 0);
+	wlwin_text(w, PANEL_W - 14 - lm_font_text_width("drag me   I hides"), 10, "drag me   I hides", 1, lm_theme.text_dim, 0);
+	const int bottom = PANEL_H - 10;
+	int y = 28;
+	char l[200];
+	if (a->survival && a->have_keep) {
+		snprintf(l, sizeof l, "Your keep %d of %d      Nights %d", (int)ceilf(a->keep_hp), (int)KEEP_HP, a->nights);
+		y = panel_head(w, y, "Keep");
+		y = panel_line(w, y, l, lm_theme.text);
+		float f = a->keep_hp / KEEP_HP;
+		y = panel_bar(w, y, f, f > 0.5f ? 0x4cb050u : f > 0.25f ? 0xe0a030u : 0xe04030u);
+		if (a->mobs.wave_on && bl_mobs_wave_remaining(&a->mobs) > 0) {
+			int br = bl_mobs_count_brutes(&a->mobs) + a->mobs.wave_brutes;
+			if (br > 0)
+				snprintf(l, sizeof l, "Wave: %d goblins left, %d of them brute%s", bl_mobs_wave_remaining(&a->mobs), br, br == 1 ? "" : "s");
+			else
+				snprintf(l, sizeof l, "Wave: %d goblins left", bl_mobs_wave_remaining(&a->mobs));
+			y = panel_line(w, y, l, 0xff9a70u);
+		}
+	}
+	snprintf(l, sizeof l, "Workers %d   Soldiers %d", nworkers(a), nsoldiers(a));
+	y = panel_line(w, y + 2, l, lm_theme.text_dim);
+	if (!a->cmd)
+		y = panel_line(w, y, "Tab: the command view", lm_theme.text_dim);
+	if (a->cmd) {
+		snprintf(l, sizeof l, "Chosen %d   Being built %d", cmd_selected(a), bl_mobs_count_sites(&a->mobs));
+		y = panel_line(w, y, l, lm_theme.text_dim);
+	}
+	if (a->rival == 1 && a->rival_on) {
+		float dist;
+		const char *way = rival_bearing(a, &dist);
+		y = panel_head(w, y, RIVAL_NAME);
+		snprintf(l, sizeof l, "Camp %.0f blocks, %s", dist, way);
+		y = panel_line(w, y, l, lm_theme.text);
+		snprintf(l, sizeof l, "Their keep %.0f of %.0f      Material %d", a->rhp, RIVAL_HP, a->rstock);
+		y = panel_line(w, y, l, lm_theme.text_dim);
+		y = panel_bar(w, y, a->rhp / RIVAL_HP, 0xd02828u);
+		int n = 0;
+		float near = 1e9f, nx = 0.0f, nz = 0.0f;
+		for (int i = 0; i < BL_MOBS_MAX; i++) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			if (!m->alive || !m->raider)
+				continue;
+			n++;
+			float d = hypotf(m->x - a->pl.x, m->z - a->pl.z);
+			if (d < near) {
+				near = d;
+				nx = m->x;
+				nz = m->z;
+			}
+		}
+		if (n) {
+			const char *to = bearing_to(a, nx, nz, &near);
+			snprintf(l, sizeof l, "Raiders %d: %.0f blocks, %s", n, near, to);
+			y = panel_line(w, y, l, 0xffb040u);
+		}
+	}
+	int list[BL_COUNT];
+	const int n = stock_list(a, list);
+	if (n) {
+		y = panel_head(w, y, "You have");
+		const int rows = LM_MIN((n + 1) / 2, a->cmd ? 3 : 5);
+		for (int i = 0; i < n && i < rows * 2; i++) {
+			int b = list[i], cx = 14 + (i % 2) * ((PANEL_W - 28) / 2), cy = y + (i / 2) * (LM_FONT_H + 2), cw = (PANEL_W - 28) / 2 - 12;
+			snprintf(l, sizeof l, "%d", a->inv[b] > 99999 ? 99999 : a->inv[b]);
+			wlwin_round_fill(w, cx, cy + 3, 11, 11, 3, bl_block_color(b) & 0xffffffu);
+			wlwin_text(w, cx + 18, cy + 1, bl_block_name(b), 1, a->inv[b] ? lm_theme.text_soft : lm_theme.text_dim, cw - 60);
+			wlwin_text(w, cx + cw - lm_font_text_width(l), cy + 1, l, 1, a->inv[b] ? lm_theme.text_bright : lm_theme.text_dim, 0);
+		}
+		y += rows * (LM_FONT_H + 2);
+	}
+	if (a->debug) {
+		y = panel_head(w, y, "Numbers (F3)");
+		snprintf(l, sizeof l, "x %.1f  y %.1f  z %.1f      seed %u", a->pl.x, a->pl.y, a->pl.z, a->world->seed);
+		y = panel_line(w, y, l, lm_theme.text_dim);
+		snprintf(l, sizeof l, "%d frames a second, %dx%d in %.0f ms", a->fps, a->rw, a->rh, a->ms_render);
+		y = panel_line(w, y, l, lm_theme.text_dim);
+		if (a->aimed)
+			snprintf(l, sizeof l, "aiming at %s (%d %d %d)", bl_block_name(bl_get(a->world, a->aim.x, a->aim.y, a->aim.z)), a->aim.x, a->aim.y, a->aim.z);
+		else
+			snprintf(l, sizeof l, "aiming at nothing");
+		y = panel_line(w, y, l, lm_theme.text_dim);
+	}
+	static const char *const k_keys[][2] = {
+		{ "Left", "choose; box; Shift adds" }, { "Right", "go, or break (1 / 2)" }, { "3 - 6", "build; R turns it" }, { "Delete", "give a plan up" },
+		{ "B / V", "a worker / a soldier" }, { "WASD", "move; arrows turn" }, { "Wheel", "nearer, farther" }, { "Home / End", "to him / their camp" }, { "Tab, Esc", "back to him" },
+	};
+	const int nkeys = (int)(sizeof k_keys / sizeof k_keys[0]);
+	const int msg_bottom = a->cmd ? bottom - (nkeys * (LM_FONT_H + 2) + LM_FONT_H + 13) : bottom;
+	if (a->nlog && y + 2 * LM_FONT_H + 16 <= msg_bottom) {
+		y = panel_head(w, y, "Messages");
+		const int64_t now = now_ms();
+		for (int i = 0; i < a->nlog && y + LM_FONT_H <= msg_bottom; i++) {
+			const struct logline *g = &a->log[i];
+			const int64_t age = (now - g->ms) / 1000;
+			char when[24];
+			if (age < 10)
+				snprintf(when, sizeof when, "now");
+			else if (age < 60)
+				snprintf(when, sizeof when, "%d s", (int)(age / 10 * 10));
+			else
+				snprintf(when, sizeof when, "%d min", (int)(age / 60));
+			wlwin_text(w, PANEL_W - 14 - lm_font_text_width(when), y, when, 1, lm_theme.text_dim, 0);
+			if (g->times > 1)
+				snprintf(l, sizeof l, "%s (%d times)", g->text, g->times);
+			else
+				snprintf(l, sizeof l, "%s", g->text);
+			y = panel_wrap(w, 14, y, PANEL_W - 28 - 52, msg_bottom, l, age < 10 ? lm_theme.text_bright : lm_theme.text_soft) + 3;
+		}
+	}
+	if (a->cmd) {                                                /* the orders keep their place at the bottom: the messages end above them */
+		y = panel_head(w, msg_bottom, a->order_mode == 1 ? "Orders: break that block and its kind" : "Orders: go there");
+		for (int i = 0; i < nkeys && y + LM_FONT_H <= bottom; i++) {
+			wlwin_text(w, 14, y, k_keys[i][0], 1, lm_theme.text_bright, 90);
+			wlwin_text(w, 108, y, k_keys[i][1], 1, lm_theme.text_dim, PANEL_W - 122);
+			y += LM_FONT_H + 2;
+		}
+	}
+	wlwin_pane_end(w);
+}
+
 static void paint(struct wlwin *w)
 {
 	struct app *a = w->data;
@@ -4409,26 +4640,32 @@ static void paint(struct wlwin *w)
 	paint_hearts(a, &L);
 	if (a->survival)
 		paint_survival(a);
-	paint_stock(a);
-	paint_rival(a);
+	if (!panel_on(a)) {
+		paint_stock(a);
+		paint_rival(a);
+	}
 	if (a->cmd && a->prompt == P_NONE)
 		paint_cmd(a, &cam);
 	if (a->prompt == P_NONE && !a->cmd)
 		paint_crosshair(w, a->hit_t > 0.0f);
-	if (a->debug)
+	if (a->debug && !panel_on(a))
 		paint_debug(a);
 	if (a->msg[0]) {
-		shadow_text(w, (w->bw - lm_font_text_width(a->msg)) / 2, a->survival ? 64 : 26, a->msg, 0xffffffu);       /* (under the keep's bar in survival) */
+		if (!panel_on(a))
+			shadow_text(w, (w->bw - lm_font_text_width(a->msg)) / 2, a->survival ? 64 : 26, a->msg, 0xffffffu);   /* (under the keep's bar in survival) */
 		if (t1 - a->msg_ms > 3000)
 			a->msg[0] = 0;
 	}
 	if (a->prompt != P_NONE)
 		paint_card(a);
+	wlwin_pane_end(w);
 	{
 		struct wlrail rail;
 		rail_build(a, &rail);
 		wlrail_paint(w, &rail, &a->ran, rail_usable(a) && !modal_card(a) && a->has_pointer ? a->rail_hover : -1, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text_soft);
 	}
+	if (panel_on(a))
+		paint_panel(a);
 	a->fps_n++;
 	if (t1 - a->fps_t0 >= 1000) {
 		a->fps = (int)((int64_t)a->fps_n * 1000 / (t1 - a->fps_t0));
@@ -4935,7 +5172,7 @@ static void keys_release(struct app *a)
 static bool cmd_key(struct app *a, uint32_t code)
 {
 	switch (code) {
-	case K_G: case K_M: case K_P: case K_H: case K_E: case K_F1: case K_F3: case K_X: case K_K:
+	case K_G: case K_M: case K_P: case K_H: case K_I: case K_E: case K_F1: case K_F3: case K_X: case K_K:
 		return false;
 	case K_TAB:
 		leave_cmd(a);
@@ -5107,6 +5344,11 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 				wlhelp_nav(&a->help, &hc, WLHELP_PAGE, (int)(code - K_1));
 			break;
 		}
+		return;
+	}
+	if (code == K_I && (a->prompt == P_NONE || a->prompt == P_PAUSE)) {           /* the panel of text, or the text over the picture */
+		a->panel = !a->panel;
+		say(a, !wlwin_panes(&a->win) ? "There are no panels here: the text stays over the picture" : a->panel ? "The text is in its panel (drag it anywhere)" : "The text is over the picture");
 		return;
 	}
 	if (a->prompt == P_PAUSE && code == K_F1) {                  /* the pages from the pause card, too */
@@ -5565,6 +5807,7 @@ static int selftest(void)
 		      "at nought the keep is gone, their men too, and the game is won");
 		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 2 && !rv.rival_on && rival_count(&rv, false) == 0, "and stays won");
 		/* a new survival world has them from the start */
+		rv.test_seed = 10;                                      /* (what follows depends on the land: in some worlds the keep stands where raiders do not get to) */
 		rv.cli_no_rival = false;
 		rv.survival = true;
 		new_world(&rv);
@@ -6387,9 +6630,10 @@ int main(int argc, char **argv)
 	a.pets_on = true;
 	a.mobs_on = true;
 	a.body = true;
+	a.panel = true;
 	a.survival = true;
 	int clock_cli = -1;
-	bool no_pets = false, no_mobs = false, no_body = false;
+	bool no_pets = false, no_mobs = false, no_body = false, no_panel = false;
 	int workers_cli = -1;                                   /* --workers N */
 	int soldiers_cli = -1;                                  /* --soldiers N */
 	int mode_cli = -1;                                      /* --survival 1, --creative 0 */
@@ -6453,6 +6697,8 @@ int main(int argc, char **argv)
 			clock_cli = 1;
 		} else if (!strcmp(argv[i], "--no-body")) {
 			no_body = true;
+		} else if (!strcmp(argv[i], "--no-panel")) {
+			no_panel = true;
 		} else if (!strcmp(argv[i], "--no-pets")) {
 			no_pets = true;
 		} else if (!strcmp(argv[i], "--rival")) {
@@ -6520,7 +6766,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--rival | --no-rival] [--raid-after SECONDS] [--no-body] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--rival | --no-rival] [--raid-after SECONDS] [--no-body] [--no-panel] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -6541,6 +6787,8 @@ int main(int argc, char **argv)
 		a.sound_on = false;
 	if (no_body)
 		a.body = false;
+	if (no_panel)
+		a.panel = false;
 	if (!fresh) {
 		char deflt[600], path[1024], gone[300] = "";
 		world_path(&a, deflt, sizeof deflt);

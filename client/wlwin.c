@@ -110,6 +110,249 @@ static int wanted_scale(const struct wlwin *w)
     return LM_CLAMP(s, 1, 4);
 }
 
+/* ---- card windows ---------------------------------------------------------------------------------------------------- */
+
+bool wlwin_panes(const struct wlwin *w)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("MELLAGUI_NO_PANES") != NULL;
+    return !off && !w->no_panes && !w->argb && w->menu && w->menu_ver >= 2 && w->toplevel && zoom_of(w) == 1.0;
+}
+
+bool wlwin_pane_shown(const struct wlwin *w, int pane)
+{
+    return pane >= 0 && pane < WLPANE_N && w->pane[pane].surface != 0;
+}
+
+void wlwin_pane_move(struct wlwin *w, int pane)
+{
+    if (wlwin_pane_shown(w, pane) && w->seat)
+        WLC_SEND(w->c, w->pane[pane].toplevel, LM_XDG_TOPLEVEL_REQ_MOVE, { .o = w->seat }, { .u = w->button_serial });
+}
+
+static void pane_buffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data);
+
+/* the picture goes to the compositor when it may: the window has been configured and the last buffer is back */
+static void pane_flush(struct wlpane *p)
+{
+    struct wlwin *w = p->win;
+    if (!p->surface || !p->configured || p->busy || !p->dirty)
+        return;
+    size_t size = (size_t)p->sw * (size_t)p->sh * 4;
+    int fd = memfd_create("card", MFD_CLOEXEC);
+    if (fd < 0 || ftruncate(fd, (off_t)size) < 0) {
+        if (fd >= 0)
+            close(fd);
+        return;
+    }
+    uint32_t *px = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (px == MAP_FAILED) {
+        close(fd);
+        return;
+    }
+    memcpy(px, p->last, size);
+    munmap(px, size);
+    uint32_t pool = wlc_alloc(w->c, &lm_wl_shm_pool_interface, NULL, NULL);
+    WLC_SEND(w->c, w->shm, LM_WL_SHM_REQ_CREATE_POOL, { .n = pool }, { .h = fd }, { .i = (int32_t)size });
+    close(fd);
+    p->buffer = wlc_alloc(w->c, &lm_wl_buffer_interface, pane_buffer_event, p);
+    WLC_SEND(w->c, pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = p->buffer }, { .i = 0 }, { .i = p->sw }, { .i = p->sh }, { .i = p->sw * 4 }, { .u = LM_WL_SHM_FORMAT_ARGB8888 });
+    WLC_SEND0(w->c, pool, LM_WL_SHM_POOL_REQ_DESTROY);
+    wlc_forget(w->c, pool);
+    WLC_SEND(w->c, p->surface, LM_WL_SURFACE_REQ_SET_BUFFER_SCALE, { .i = p->scale });
+    WLC_SEND(w->c, p->surface, LM_WL_SURFACE_REQ_ATTACH, { .o = p->buffer }, { .i = 0 }, { .i = 0 });
+    WLC_SEND(w->c, p->surface, LM_WL_SURFACE_REQ_DAMAGE, { .i = 0 }, { .i = 0 }, { .i = p->w }, { .i = p->h });
+    WLC_SEND0(w->c, p->surface, LM_WL_SURFACE_REQ_COMMIT);
+    p->busy = true;
+    p->dirty = false;
+    wlc_flush(w->c);                    /* (also from an event's handler: a program with a loop of its own would not send it before the next event) */
+}
+
+static void pane_buffer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)args;
+    struct wlpane *p = data;
+    if (op != LM_WL_BUFFER_EVT_RELEASE)
+        return;
+    WLC_SEND0(c, id, LM_WL_BUFFER_REQ_DESTROY);
+    wlc_forget(c, id);
+    if (p->buffer == id) {
+        p->buffer = 0;
+        p->busy = false;
+        pane_flush(p);
+    }
+}
+
+static void pane_xsurface_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    struct wlpane *p = data;
+    if (op != LM_XDG_SURFACE_EVT_CONFIGURE)
+        return;
+    WLC_SEND(c, id, LM_XDG_SURFACE_REQ_ACK_CONFIGURE, { .u = args[0].u });
+    if (!p->configured) {
+        p->configured = true;
+        pane_flush(p);
+    }
+}
+
+static void pane_toplevel_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
+{
+    (void)c; (void)id; (void)op; (void)args; (void)data;                /* the size is ours; it is closed by its program */
+}
+
+static void pane_close(struct wlwin *w, int i)
+{
+    struct wlpane *p = &w->pane[i];
+    if (p->surface) {
+        WLC_SEND0(w->c, p->toplevel, LM_XDG_TOPLEVEL_REQ_DESTROY);
+        wlc_forget(w->c, p->toplevel);
+        WLC_SEND0(w->c, p->xsurface, LM_XDG_SURFACE_REQ_DESTROY);
+        wlc_forget(w->c, p->xsurface);
+        WLC_SEND0(w->c, p->surface, LM_WL_SURFACE_REQ_DESTROY);
+        wlc_forget(w->c, p->surface);
+        if (p->buffer) {
+            WLC_SEND0(w->c, p->buffer, LM_WL_BUFFER_REQ_DESTROY);
+            wlc_forget(w->c, p->buffer);
+        }
+    }
+    free(p->img);
+    free(p->last);
+    memset(p, 0, sizeof(*p));
+    if (w->on_pane == i)
+        w->on_pane = -1;
+}
+
+static void pane_place(struct wlwin *w, const struct wlpane *p)
+{
+    WLC_SEND(w->c, w->menu, LM_MELLAGUI_MENU_V1_REQ_PLACE, { .o = p->surface }, { .i = p->at_x }, { .i = p->at_y });
+}
+
+bool wlwin_pane_begin(struct wlwin *w, int i, int x, int y, int width, int height, int at_x, int at_y, int radius, uint32_t edge, bool modal)
+{
+    wlwin_pane_end(w);
+    if (!wlwin_panes(w) || i < 0 || i >= WLPANE_N || width < 1 || height < 1 || width > 4000 || height > 4000)
+        return false;
+    struct wlpane *p = &w->pane[i];
+    int s = w->scale > 1 ? w->scale : 1, sw = width * s, sh = height * s;
+    size_t n = (size_t)sw * (size_t)sh;
+    if (p->surface && i == WLPANE_CARD && p->modal != modal)
+        pane_close(w, i);                                               /* (a dialog and a floating panel are two kinds of window) */
+    if (n > p->cap) {
+        free(p->img);
+        free(p->last);
+        p->img = malloc(n * 4);
+        p->last = malloc(n * 4);
+        p->cap = p->img && p->last ? n : 0;
+        p->sw = p->sh = 0;
+        if (!p->cap)
+            return false;
+    }
+    if (sw != p->sw || sh != p->sh)
+        memset(p->last, 0, n * 4);                                      /* (whatever is painted is new) */
+    p->win = w;
+    p->sw = sw;
+    p->sh = sh;
+    p->scale = s;
+    p->x = x;
+    p->y = y;
+    p->w = width;
+    p->h = height;
+    p->r = radius;
+    p->modal = modal;
+    int ax = at_x + w->inx, ay = at_y;
+    if (p->surface && (ax != p->at_x || ay != p->at_y)) {
+        p->at_x = ax;
+        p->at_y = ay;
+        pane_place(w, p);
+    }
+    p->at_x = ax;
+    p->at_y = ay;
+    for (size_t k = 0; k < n; k++)
+        p->img[k] = 0xff000000u | edge;
+    w->main_px = w->pixels;
+    w->main_pw = w->pw;
+    w->main_ph = w->ph;
+    w->main_inx = w->inx;
+    w->pixels = p->img;
+    w->pw = sw;
+    w->ph = sh;
+    w->inx = -x;
+    w->iny = -y;
+    w->cur_pane = i;
+    return true;
+}
+
+/* the corners are rounded off: outside them the picture is see-through */
+static void pane_round(struct wlpane *p)
+{
+    int r = LM_MIN(p->r * p->scale, LM_MIN(p->sw, p->sh) / 2);
+    for (int cy = 0; cy < r; cy++)
+        for (int cx = 0; cx < r; cx++) {
+            double dx = r - cx - 0.5, dy = r - cy - 0.5, cov = (double)r + 0.5 - sqrt(dx * dx + dy * dy);
+            if (cov >= 1.0)
+                continue;
+            uint32_t a = cov <= 0.0 ? 0 : (uint32_t)(cov * 255.0 + 0.5);
+            const int xs[2] = { cx, p->sw - 1 - cx }, ys[2] = { cy, p->sh - 1 - cy };
+            for (int i = 0; i < 2; i++)
+                for (int j = 0; j < 2; j++) {
+                    uint32_t *q = &p->img[(size_t)ys[j] * (size_t)p->sw + (size_t)xs[i]], c = *q;
+                    *q = a << 24 | (((c >> 16) & 255) * a / 255) << 16 | (((c >> 8) & 255) * a / 255) << 8 | ((c & 255) * a / 255);
+                }
+        }
+}
+
+void wlwin_pane_end(struct wlwin *w)
+{
+    if (w->cur_pane < 0)
+        return;
+    struct wlpane *p = &w->pane[w->cur_pane];
+    w->pixels = w->main_px;
+    w->pw = w->main_pw;
+    w->ph = w->main_ph;
+    w->inx = w->main_inx;
+    w->iny = 0;
+    w->cur_pane = -1;
+    for (size_t k = 0, n = (size_t)p->sw * (size_t)p->sh; k < n; k++)
+        p->img[k] |= 0xff000000u;                                       /* (what was blended may have lost its alpha) */
+    pane_round(p);
+    p->used = true;
+}
+
+/* after the window's own picture: the panes that were painted are (made and) given their pictures, the others are closed */
+static void panes_commit(struct wlwin *w)
+{
+    for (int i = 0; i < WLPANE_N; i++) {
+        struct wlpane *p = &w->pane[i];
+        if (!p->used) {
+            if (p->surface || p->img)
+                pane_close(w, i);
+            continue;
+        }
+        if (!p->surface) {
+            char id[64];
+            snprintf(id, sizeof(id), "%s%s", w->app_id, i == WLPANE_TOOL ? ".tool" : p->modal ? ".card" : ".panel");
+            p->surface = wlc_alloc(w->c, &lm_wl_surface_interface, NULL, NULL);
+            WLC_SEND(w->c, w->compositor, LM_WL_COMPOSITOR_REQ_CREATE_SURFACE, { .n = p->surface });
+            p->xsurface = wlc_alloc(w->c, &lm_xdg_surface_interface, pane_xsurface_event, p);
+            WLC_SEND(w->c, w->wm_base, LM_XDG_WM_BASE_REQ_GET_XDG_SURFACE, { .n = p->xsurface }, { .o = p->surface });
+            p->toplevel = wlc_alloc(w->c, &lm_xdg_toplevel_interface, pane_toplevel_event, p);
+            WLC_SEND(w->c, p->xsurface, LM_XDG_SURFACE_REQ_GET_TOPLEVEL, { .n = p->toplevel });
+            WLC_SEND(w->c, p->toplevel, LM_XDG_TOPLEVEL_REQ_SET_PARENT, { .o = w->toplevel });
+            WLC_SEND(w->c, p->toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = w->name });
+            WLC_SEND(w->c, p->toplevel, LM_XDG_TOPLEVEL_REQ_SET_APP_ID, { .s = id });
+            pane_place(w, p);
+            WLC_SEND0(w->c, p->surface, LM_WL_SURFACE_REQ_COMMIT);
+            p->dirty = true;
+            memcpy(p->last, p->img, (size_t)p->sw * (size_t)p->sh * 4);
+        } else if (memcmp(p->last, p->img, (size_t)p->sw * (size_t)p->sh * 4)) {
+            memcpy(p->last, p->img, (size_t)p->sw * (size_t)p->sh * 4);
+            p->dirty = true;
+        }
+        pane_flush(p);
+    }
+}
+
 static void draw(struct wlwin *w)
 {
     if (w->bw != content_w(w) || w->bh != content_len(w, w->h) || w->pw != w->w * w->scale || !w->pixels || w->scale != wanted_scale(w)) {
@@ -121,7 +364,10 @@ static void draw(struct wlwin *w)
     if (!w->card_shown)                                                 /* no dialog card in the last picture: the next one opens in the middle again */
         w->card_dx = w->card_dy = 0, w->card_drag = false;
     w->card_shown = false;
+    for (int i = 0; i < WLPANE_N; i++)
+        w->pane[i].used = false;
     w->ops->paint(w);
+    wlwin_pane_end(w);
     w->buffer = wlc_alloc(w->c, &lm_wl_buffer_interface, buffer_event, w);
     WLC_SEND(w->c, w->pool, LM_WL_SHM_POOL_REQ_CREATE_BUFFER, { .n = w->buffer }, { .i = 0 }, { .i = w->pw },
              { .i = w->ph }, { .i = w->pw * 4 }, { .u = w->argb ? LM_WL_SHM_FORMAT_ARGB8888 : LM_WL_SHM_FORMAT_XRGB8888 });
@@ -130,6 +376,7 @@ static void draw(struct wlwin *w)
     WLC_SEND0(w->c, w->surface, LM_WL_SURFACE_REQ_COMMIT);
     w->buffer_busy = true;
     w->redraw = false;
+    panes_commit(w);
 }
 
 /* ---- protocol events ----------------------------------------------------------------------------------------- */
@@ -253,18 +500,41 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
     if (op == LM_WL_POINTER_EVT_ENTER) {
         w->cur_serial = args[0].u;
         send_cursor(w);
+        w->on_pane = -1;
+        for (int i = 0; i < WLPANE_N; i++)
+            if (w->pane[i].surface && w->pane[i].surface == args[1].o)
+                w->on_pane = i;
+    }
+    if (op == LM_WL_POINTER_EVT_BUTTON && args[3].u == 1)
+        w->button_serial = args[0].u;
+    if (w->on_pane == WLPANE_TOOL) {                                    /* a panel: a press carries it, the program hears nothing of it */
+        if (op == LM_WL_POINTER_EVT_BUTTON && args[3].u == 1 && args[2].u == 0x110)
+            wlwin_pane_move(w, WLPANE_TOOL);
+        if (op == LM_WL_POINTER_EVT_LEAVE)
+            w->on_pane = -1;
+        return;
     }
     if (op == LM_WL_POINTER_EVT_ENTER || op == LM_WL_POINTER_EVT_MOTION) {   /* the pointer is in window pixels: the program thinks in content pixels */
         union lm_arg *m = (union lm_arg *)args;
         int a = op == LM_WL_POINTER_EVT_ENTER ? 2 : 1;                  /* (enter: serial, surface, x, y; motion: time, x, y) */
         w->rpx = lm_fixed_to_double(m[a].f) / z;
         w->rpy = lm_fixed_to_double(m[a + 1].f) / z;
-        if (z != 1.0 || w->inx) {
+        const struct wlpane *card = &w->pane[WLPANE_CARD];
+        if (w->on_pane == WLPANE_CARD) {                                /* on the card window: where the program drew it, wherever it is now */
+            m[a].f = lm_fixed_from_double(card->x + w->rpx);
+            m[a + 1].f = lm_fixed_from_double(card->y + w->rpy);
+            w->rpx = 100000.0;                                          /* (not over a rail at the left) */
+        } else if (card->surface && card->modal && w->rpx - w->inx >= card->x && w->rpx - w->inx < card->x + card->w && w->rpy >= card->y && w->rpy < card->y + card->h) {
+            m[a].f = lm_fixed_from_double(-10000.0);                    /* on the window, where the card was drawn but is not: outside it */
+            m[a + 1].f = lm_fixed_from_double(-10000.0);
+        } else if (z != 1.0 || w->inx) {
             m[a].f = lm_fixed_from_double(w->rpx - w->inx);
             m[a + 1].f = lm_fixed_from_double(w->rpy);
         }
     }
     w->ops->pointer(w, op, args);
+    if (op == LM_WL_POINTER_EVT_LEAVE)
+        w->on_pane = -1;
 }
 
 /* ---- the pointer lock ---- */
@@ -453,7 +723,7 @@ static void registry_event(struct wlc *c, uint32_t id, uint32_t op, const union 
         w->out_id[w->nout] = oid;
         w->out_scale[w->nout++] = 1;
     } else if (!strcmp(iface, "mellagui_menu_v1"))
-        w->menu = wlc_bind(c, w->registry, name, &lm_mellagui_menu_v1_interface, 1, menu_event, w);
+        w->menu = wlc_bind(c, w->registry, name, &lm_mellagui_menu_v1_interface, w->menu_ver = LM_MIN(ver, 2u), menu_event, w);
     else if (!strcmp(iface, "zwp_pointer_constraints_v1"))
         w->pconstraints = wlc_bind(c, w->registry, name, &lm_zwp_pointer_constraints_v1_interface, 1, NULL, w);
     else if (!strcmp(iface, "zwp_relative_pointer_manager_v1"))
@@ -473,6 +743,7 @@ int wlwin_connect(struct wlwin *w, const char *name, const struct wlwin_ops *ops
     w->ops = ops;
     w->data = data;
     w->running = true;
+    w->cur_pane = w->on_pane = -1;
     w->c = wlc_connect(NULL);
     if (!w->c)
         return -1;
@@ -492,6 +763,7 @@ int wlwin_open(struct wlwin *w, const char *title, const char *app_id, int def_w
     w->def_h = w->h = def_h;
     w->min_w = min_w;
     w->min_h = min_h;
+    snprintf(w->app_id, sizeof(w->app_id), "%s", app_id);
     w->surface = wlc_alloc(w->c, &lm_wl_surface_interface, NULL, NULL);
     WLC_SEND(w->c, w->compositor, LM_WL_COMPOSITOR_REQ_CREATE_SURFACE, { .n = w->surface });
     w->xsurface = wlc_alloc(w->c, &lm_xdg_surface_interface, xsurface_event, w);
@@ -529,6 +801,11 @@ bool wlwin_request_size(struct wlwin *w, int width, int height)
 
 void wlwin_destroy(struct wlwin *w)
 {
+    for (int i = 0; i < WLPANE_N; i++) {
+        free(w->pane[i].img);
+        free(w->pane[i].last);
+        w->pane[i].img = w->pane[i].last = NULL;
+    }
     free(w->cur_px);
     w->cur_px = NULL;
     wlc_destroy(w->c);
@@ -540,6 +817,7 @@ void wlwin_destroy(struct wlwin *w)
 void wlwin_fill(struct wlwin *w, int x0, int y0, int width, int height, uint32_t rgb)
 {
     x0 += w->inx;
+    y0 += w->iny;
     double f = fscale(w);
     int ya = LM_MAX(P(f, y0), 0), yb = LM_MIN(P(f, y0 + height), w->ph), xa = LM_MAX(P(f, x0), 0), xb = LM_MIN(P(f, x0 + width), w->pw);
     for (int y = ya; y < yb; y++)
@@ -550,6 +828,7 @@ void wlwin_fill(struct wlwin *w, int x0, int y0, int width, int height, uint32_t
 void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int r, uint32_t rgb)
 {
     x += w->inx;
+    y += w->iny;
     double f = fscale(w);
     int px = P(f, x), py = P(f, y), pwid = P(f, x + width) - px, phei = P(f, y + height) - py, pr = P(f, r);
     if (w->argb)
@@ -566,6 +845,7 @@ void wlwin_drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t c
         return;
     }
     x += w->inx;
+    y += w->iny;
     double f = fscale(w);
     int px = P(f, x), py = P(f, y), pwid = P(f, x + bw) - px, phei = P(f, y + bh) - py, pr = P(f, r);
     lm_drop_px(w->pixels, w->pw, w->pw, w->ph, px, py, pwid, phei, pr, c, LM_MAX((int)(f + 0.5), 1));
@@ -580,6 +860,7 @@ void wlwin_dim(struct wlwin *w, double t)
 void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint32_t *src, int sw, int sh, int stride)
 {
     x += w->inx;
+    y += w->iny;
     double f = fscale(w);
     int dx0 = P(f, x), dy0 = P(f, y), dw = P(f, x + width) - dx0, dh = P(f, y + height) - dy0;
     if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0)
@@ -595,6 +876,7 @@ void wlwin_blit(struct wlwin *w, int x, int y, int width, int height, const uint
 void wlwin_cell(struct wlwin *w, int x, int y, uint32_t cp, int cw, int ch, uint32_t rgb, bool bold)
 {
     x += w->inx;
+    y += w->iny;
     double f = fscale(w);
     int pcw = P(f, cw), pch = P(f, ch);
     if (pcw < 1 || pch < 1)
@@ -620,6 +902,8 @@ void wlwin_blit_px(struct wlwin *w, int x, int y, const uint32_t *src, int sw, i
 {
     x += w->inx;
     cx += w->inx;
+    y += w->iny;
+    cy += w->iny;
     int s = w->scale > 1 ? w->scale : 1;
     int x0 = LM_MAX(LM_MAX(cx * s, x * s), 0), x1 = LM_MIN(LM_MIN((cx + cw) * s, x * s + sw), w->pw);
     int y0 = LM_MAX(LM_MAX(cy * s, y * s), 0), y1 = LM_MIN(LM_MIN((cy + ch) * s, y * s + sh), w->ph);
@@ -634,6 +918,7 @@ void wlwin_blit_px(struct wlwin *w, int x, int y, const uint32_t *src, int sw, i
 void wlwin_blit_px_over(struct wlwin *w, int x, int y, const uint32_t *src, int sw, int sh, int stride)
 {
     x += w->inx;
+    y += w->iny;
     int s = w->scale > 1 ? w->scale : 1;
     int x0 = LM_MAX(x * s, 0), x1 = LM_MIN(x * s + sw, w->pw);
     int y0 = LM_MAX(y * s, 0), y1 = LM_MIN(y * s + sh, w->ph);
@@ -661,6 +946,7 @@ void wlwin_glyph(struct wlwin *w, int x, int y, uint32_t cp, int scale, uint32_t
     if (scale < 1)
         return;
     x += w->inx;
+    y += w->iny;
     double f = fscale(w);
     int cw = P(f, LM_FONT_W * scale), ch = P(f, LM_FONT_H * scale);
     if (cw < 1 || ch < 1)
@@ -706,6 +992,7 @@ void wlwin_text_small(struct wlwin *w, int x, int y, const char *s, double size,
         return;
     }
     x += w->inx;
+    y += w->iny;
     double f = fscale(w);
     size_t len = strlen(s);
     int cum = 0;
@@ -786,6 +1073,7 @@ static void text_zoomed(struct wlwin *w, int x, int y, const char *s, int scale,
 static void text_styled(struct wlwin *w, int x, int y, const char *s, int scale, uint32_t rgb, int max_w, bool bold)
 {
     x += w->inx;
+    y += w->iny;
     if (zoom_of(w) != 1.0) {
         text_zoomed(w, x, y, s, scale, rgb, max_w, bold);
         return;

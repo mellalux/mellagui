@@ -228,9 +228,11 @@ void lm_tray_destroy(struct lm_tray *t)
 {
     if (!t)
         return;
-    struct tbind *b;
-    lm_list_for_each(b, &t->binds, link)
+    struct tbind *b, *btmp;
+    lm_list_for_each_safe(b, btmp, &t->binds, link) {         /* (their clients go later: off the list, which is freed here) */
         b->tray = NULL;
+        lm_list_remove(&b->link);
+    }
     struct item *it, *tmp;
     lm_list_for_each_safe(it, tmp, &t->items, link) {
         lm_list_remove(&it->link);

@@ -9,7 +9,7 @@
 
 struct lm_rect frame_outer(const struct lm_window *w)
 {
-    if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w) || win_is_desktop(w))        /* (a gadget and the desktop have no frame) */
+    if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w) || win_is_desktop(w) || win_is_card(w))     /* (a gadget, the desktop and a card have no frame) */
         return lm_rect_make(w->x, w->y, w->width, w->height);
     return lm_rect_make(w->x - LM_BORDER_WIDTH, w->y - LM_TITLEBAR_HEIGHT,
                         w->width + 2 * LM_BORDER_WIDTH,
@@ -18,6 +18,8 @@ struct lm_rect frame_outer(const struct lm_window *w)
 
 bool win_visible(const struct lm_wm *wm, const struct lm_window *w)
 {
+    if (win_is_card(w) && w->parent && !win_visible(wm, w->parent))          /* a card goes where its window goes */
+        return false;
     return w->mapped && !w->minimized && w->workspace == wm->workspace;
 }
 
@@ -32,9 +34,31 @@ bool win_is_gadget(const struct lm_window *w)
     return w->app_id && !strncmp(w->app_id, "mellagui.gadget.", 16);
 }
 
+static bool app_id_ends(const struct lm_window *w, const char *end)
+{
+    size_t n = w->app_id ? strlen(w->app_id) : 0, e = strlen(end);
+    return n > e && !strncmp(w->app_id, "mellagui.", 9) && !strcmp(w->app_id + n - e, end);
+}
+
+bool win_is_tool(const struct lm_window *w)
+{
+    return app_id_ends(w, ".tool") && !win_is_gadget(w);       /* (a gadget may be called "card" or "tool") */
+}
+
+bool win_is_card(const struct lm_window *w)
+{
+    return win_is_tool(w) || ((app_id_ends(w, ".card") || app_id_ends(w, ".panel")) && !win_is_gadget(w));
+}
+
+/* which of its window's two remembered places a card uses: a floating panel 0, a tool panel 1; -1 a dialog, which opens where it is asked to */
+static int card_kept(const struct lm_window *w)
+{
+    return win_is_tool(w) ? 1 : app_id_ends(w, ".panel") ? 0 : -1;
+}
+
 bool win_is_aux(const struct lm_window *w)
 {
-    return win_is_calendar(w) || win_is_gadget(w) || win_is_desktop(w);
+    return win_is_calendar(w) || win_is_gadget(w) || win_is_desktop(w) || win_is_card(w);
 }
 
 bool win_is_calendar(const struct lm_window *w)
@@ -266,6 +290,76 @@ void damage_frame(struct lm_wm *wm, const struct lm_window *w)
 {
     struct lm_rect r = frame_outer(w);
     damage_rect(wm, &r);
+    if (!win_is_card(w))
+        cards_follow(wm, w);                                    /* (whatever moved, hid or showed the window is followed here) */
+}
+
+void cards_follow(struct lm_wm *wm, const struct lm_window *w)
+{
+    struct lm_window *c;
+    lm_list_for_each(c, &wm->windows, link) {
+        if (c->parent != w || !win_is_card(c) || !c->mapped)
+            continue;
+        struct lm_rect r = frame_outer(c);
+        damage_rect(wm, &r);
+        if (!(wm->grab_kind == GRAB_MOVE && wm->grab_win == c)) {
+            c->x = w->x + WIN(c)->card_x;
+            c->y = w->y + WIN(c)->card_y;
+        }
+        c->workspace = w->workspace;
+        r = frame_outer(c);
+        damage_rect(wm, &r);
+        update_outputs(wm, c);
+    }
+}
+
+/* A card goes to its place from the parent's corner, kept on the screen; a panel that finds no room at the right takes the left side. */
+static void card_arrange(struct lm_wm *wm, struct lm_window *w)
+{
+    struct wm_win *ww = WIN(w);
+    const struct lm_window *p = w->parent;
+    if (!p)
+        return;
+    int32_t x = ww->card_placed ? ww->card_x : (p->width - w->width) / 2, y = ww->card_placed ? ww->card_y : (p->height - w->height) / 2;
+    const int k = card_kept(w);
+    if (k >= 0 && WIN(w->parent)->kept[k]) {                    /* where the user left it ... */
+        x = WIN(w->parent)->kept_x[k];
+        y = WIN(w->parent)->kept_y[k];
+    } else if (win_is_tool(w)) {
+        places_tool_find(wm, w, &x, &y);                        /* ... the last time the program ran */
+    }
+    x += p->x;
+    y += p->y;
+    struct lm_rect ua;
+    lm_wm_usable_area(wm, p->x + p->width / 2, p->y + p->height / 2, &ua);
+    if (win_is_tool(w) && x + w->width > ua.x + ua.w && p->x - w->width - 8 >= ua.x)
+        x = p->x - w->width - 8;
+    x = LM_MAX(LM_MIN(x, ua.x + ua.w - w->width), ua.x);
+    y = LM_MAX(LM_MIN(y, ua.y + ua.h - w->height), ua.y);
+    w->x = x;
+    w->y = y;
+    ww->card_x = x - p->x;
+    ww->card_y = y - p->y;
+}
+
+void lm_wm_place_surface(struct lm_wm *wm, struct lm_surface *surface, int32_t x, int32_t y)
+{
+    struct lm_window *w;
+    lm_list_for_each(w, &wm->windows, link) {
+        if (w->surface != surface || !win_is_card(w) || WIN(w)->card_moved)
+            continue;
+        WIN(w)->card_x = LM_CLAMP(x, -20000, 20000);
+        WIN(w)->card_y = LM_CLAMP(y, -20000, 20000);
+        WIN(w)->card_placed = true;
+        if (w->mapped) {
+            damage_frame(wm, w);
+            card_arrange(wm, w);
+            damage_frame(wm, w);
+            update_outputs(wm, w);
+            refresh_pointer(wm);
+        }
+        return;
+    }
 }
 
 void damage_all(struct lm_wm *wm)
@@ -422,6 +516,8 @@ void refresh_pointer(struct lm_wm *wm)
 
 void set_focus(struct lm_wm *wm, struct lm_window *w)
 {
+    while (w && win_is_card(w) && w->parent)                    /* a card never has the keyboard: its window does */
+        w = w->parent;
     struct lm_window *old = wm->focused;
     if (old == w)
         return;
@@ -449,18 +545,37 @@ static struct lm_window *top_visible(struct lm_wm *wm, const struct lm_window *s
 {
     struct lm_window *w;
     lm_list_for_each_reverse(w, &wm->windows, link)
-        if (w != skip && win_visible(wm, w) && !win_is_gadget(w) && !win_is_desktop(w))
+        if (w != skip && win_visible(wm, w) && !win_is_gadget(w) && !win_is_desktop(w) && !win_is_card(w))
             return w;
     return NULL;
 }
 
 void raise_window(struct lm_wm *wm, struct lm_window *w)
 {
-    if (win_is_gadget(w) || win_is_desktop(w) || wm->windows.prev == &w->link)             /* (a gadget and the desktop stay at the bottom) */
+    if (win_is_gadget(w) || win_is_desktop(w))                  /* (a gadget and the desktop stay at the bottom) */
+        return;
+    struct lm_window *top = NULL;
+    if (win_is_card(w) && w->parent) {                          /* a card: its window comes up with all its cards, this one on top of them */
+        top = w;
+        w = w->parent;
+    }
+    struct lm_window *card[32], *c;
+    int n = 0;
+    lm_list_for_each(c, &wm->windows, link)
+        if (c->parent == w && win_is_card(c) && c != top && n < 31)
+            card[n++] = c;
+    if (top)
+        card[n++] = top;
+    if (n == 0 && wm->windows.prev == &w->link)
         return;
     lm_list_remove(&w->link);
     lm_list_append(&wm->windows, &w->link);
     damage_frame(wm, w);
+    for (int i = 0; i < n; i++) {
+        lm_list_remove(&card[i]->link);
+        lm_list_append(&wm->windows, &card[i]->link);
+        damage_frame(wm, card[i]);
+    }
 }
 
 void lm_wm_switch_workspace(struct lm_wm *wm, int ws)
@@ -831,6 +946,9 @@ void lm_wm_window_set_geometry(struct lm_window *w, const struct lm_rect *g)
             w->x = wm->grab_x + wm->grab_w - w->width;
         if (wm->grab_edges & LM_EDGE_TOP)
             w->y = wm->grab_y + wm->grab_h - w->height;
+    } else if (resized && win_is_card(w)) {
+        if (!WIN(w)->card_moved)
+            card_arrange(wm, w);
     } else if (resized && win_is_desktop(w)) {
         /* the wm sized it: nothing to fit */
     } else if (resized && win_is_gadget(w)) {
@@ -880,6 +998,22 @@ void lm_wm_window_map(struct lm_window *w)
     if (win_is_gadget(w)) {
         gadget_map(wm, w);
         desktop_lower(wm);                                      /* (the desktop's icons are under the cards) */
+        return;
+    }
+    if (win_is_card(w) && w->parent) {                          /* a card: above its window, the keyboard stays where it is */
+        w->mapped = true;
+        w->minimized = false;
+        w->workspace = w->parent->workspace;
+        card_arrange(wm, w);
+        struct lm_window *above = w->parent, *c;
+        lm_list_for_each(c, &wm->windows, link)                 /* a dialog opens over the others, a panel under them */
+            if (!win_is_tool(w) && c != w && c->parent == w->parent && win_is_card(c))
+                above = c;
+        lm_list_remove(&w->link);
+        lm_list_insert(&above->link, &w->link);
+        update_outputs(wm, w);
+        damage_frame(wm, w);
+        refresh_pointer(wm);
         return;
     }
     if (!ww->placed) {
@@ -966,7 +1100,8 @@ void lm_wm_window_unmap(struct lm_window *w)
     struct lm_wm *wm = w->wm;
     if (!w->mapped)
         return;
-    places_remember(wm, w);
+    if (!win_is_card(w))
+        places_remember(wm, w);
     sw_close(wm);
     anim_play_close(wm, w);
     struct lm_rect r = frame_outer(w);
@@ -976,6 +1111,7 @@ void lm_wm_window_unmap(struct lm_window *w)
     if (wm->focused == w)
         set_focus(wm, top_visible(wm, w));
     damage_rect(wm, &r);
+    cards_follow(wm, w);
     damage_panels(wm);
     overview_changed(wm);
     if (win_is_gadget(w))
@@ -985,7 +1121,7 @@ void lm_wm_window_unmap(struct lm_window *w)
 
 void lm_wm_window_request_maximize(struct lm_window *w, bool maximize)
 {
-    if (win_is_gadget(w) || win_is_desktop(w))
+    if (win_is_gadget(w) || win_is_desktop(w) || win_is_card(w))
         return;
     struct lm_wm *wm = w->wm;
     struct wm_win *ww = WIN(w);
@@ -1012,7 +1148,7 @@ void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge)
     struct wm_win *ww = WIN(w);
     if (!snap_zone_valid(edge) || edge == LM_EDGE_TOP)
         return;
-    if (!w->mapped || (w->states & LM_WINDOW_FULLSCREEN) || ww->tiled == edge)
+    if (!w->mapped || (w->states & LM_WINDOW_FULLSCREEN) || ww->tiled == edge || win_is_card(w))
         return;
     if (edge == LM_EDGE_NONE) {
         if (!ww->tiled)
@@ -1043,7 +1179,7 @@ void lm_wm_window_request_tile(struct lm_window *w, uint32_t edge)
 
 void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen)
 {
-    if (win_is_gadget(w) || win_is_desktop(w))
+    if (win_is_gadget(w) || win_is_desktop(w) || win_is_card(w))
         return;
     struct lm_wm *wm = w->wm;
     struct wm_win *ww = WIN(w);
@@ -1064,7 +1200,7 @@ void lm_wm_window_request_fullscreen(struct lm_window *w, bool fullscreen)
 
 void lm_wm_window_request_minimize(struct lm_window *w)
 {
-    if (win_is_gadget(w) || win_is_desktop(w))
+    if (win_is_gadget(w) || win_is_desktop(w) || win_is_card(w))
         return;
     struct lm_wm *wm = w->wm;
     if (!w->mapped || w->minimized)
@@ -1077,6 +1213,7 @@ void lm_wm_window_request_minimize(struct lm_window *w)
     if (wm->focused == w)
         set_focus(wm, top_visible(wm, w));
     damage_rect(wm, &r);
+    cards_follow(wm, w);
     damage_panels(wm);
     refresh_pointer(wm);
 }
@@ -1378,7 +1515,7 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             out->sy = sy;
             return;
         }
-        if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w) || win_is_desktop(w))
+        if ((w->states & LM_WINDOW_FULLSCREEN) || win_is_gadget(w) || win_is_desktop(w) || win_is_card(w))
             continue;
         struct lm_frame_info f;
         frame_info(wm, w, &f);
@@ -1614,7 +1751,7 @@ static void grab_end(struct lm_wm *wm)
     enum grab_kind kind = wm->grab_kind;
     wm->grab_kind = GRAB_NONE;
     wm->grab_win = NULL;
-    uint32_t snap = kind == GRAB_MOVE && w && !win_is_gadget(w) ? wm->snap_zone : 0;
+    uint32_t snap = kind == GRAB_MOVE && w && !win_is_gadget(w) && !win_is_card(w) ? wm->snap_zone : 0;
     snap_clear(wm);
     if (wm->wb.active)
         wm->wb.released = true;                                  /* the mesh settles and goes */
@@ -1638,7 +1775,21 @@ static void grab_end(struct lm_wm *wm)
         if (win_is_gadget(w))
             WIN(w)->gad_placed = true;                          /* from now on it stays where the user put it */
         gadget_glue_end(wm);
-        places_remember(wm, w);                                 /* the next window of the program opens here */
+        if (win_is_card(w) && w->parent) {                      /* a card the user carried stays there, from its window's corner */
+            WIN(w)->card_moved = true;
+            WIN(w)->card_x = w->x - w->parent->x;
+            WIN(w)->card_y = w->y - w->parent->y;
+            const int k = card_kept(w);
+            if (k >= 0) {
+                WIN(w->parent)->kept[k] = true;
+                WIN(w->parent)->kept_x[k] = WIN(w)->card_x;
+                WIN(w->parent)->kept_y[k] = WIN(w)->card_y;
+            }
+            if (win_is_tool(w))
+                places_tool_remember(wm, w, WIN(w)->card_x, WIN(w)->card_y);
+        } else {
+            places_remember(wm, w);                             /* the next window of the program opens here */
+        }
     }
 }
 
@@ -1664,10 +1815,10 @@ static void grab_motion(struct lm_pointer_grab *g, uint32_t time_ms, double x, d
         int32_t tx = wm->grab_x + (int32_t)dx, ty = wm->grab_y + (int32_t)dy;
         struct lm_rect ua;
         lm_wm_usable_area(wm, (int32_t)x, (int32_t)y, &ua);
-        int top = win_is_gadget(w) ? ua.y : ua.y + LM_TITLEBAR_HEIGHT;       /* (a gadget has no title bar above it) */
+        int top = win_is_gadget(w) || win_is_card(w) ? ua.y : ua.y + LM_TITLEBAR_HEIGHT;     /* (a gadget and a card have no title bar above) */
         if (ty < top && !(w->states & LM_WINDOW_FULLSCREEN))
             ty = top;
-        if (!wm->wb.active && anim_glide_to(wm, w, tx, ty)) {
+        if (!wm->wb.active && !win_is_card(w) && anim_glide_to(wm, w, tx, ty)) {
             snap_update(wm, x, y);
             return;
         }
@@ -1676,7 +1827,8 @@ static void grab_motion(struct lm_pointer_grab *g, uint32_t time_ms, double x, d
         damage_rect(wm, &before);
         damage_frame(wm, w);
         update_outputs(wm, w);
-        snap_update(wm, x, y);                                  /* at an edge or a corner: show where it would go */
+        if (!win_is_card(w))
+            snap_update(wm, x, y);                              /* at an edge or a corner: show where it would go */
     } else if (wm->grab_kind == GRAB_RESIZE) {
         int32_t nw = wm->grab_w, nh = wm->grab_h;
         if (wm->grab_edges & LM_EDGE_RIGHT) nw = wm->grab_w + (int32_t)dx;
@@ -1860,6 +2012,7 @@ void move_to_workspace(struct lm_wm *wm, struct lm_window *w, int ws)
     w->workspace = ws;
     update_outputs(wm, w);
     damage_rect(wm, &r);
+    cards_follow(wm, w);
     if (wm->focused == w)
         set_focus(wm, top_visible(wm, w));
     damage_panels(wm);

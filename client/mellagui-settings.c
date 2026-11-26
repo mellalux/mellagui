@@ -2178,6 +2178,7 @@ static void paint_help(struct app *a)
         return;
     help_geom(a, g);
     const struct rect *c = &g->card;
+    wlcard_pane(&a->win, c->x, c->y, c->w, c->h, 11, COL_ACCENT, true);
     const char *hd = getenv("MELLAGUI_SETTINGS_DUMP");                  /* where the card is, for the tests */
     if (hd && *hd) {
         FILE *f = fopen(hd, "w");
@@ -2362,8 +2363,8 @@ static void paint_pick(struct app *a)
     struct pick_geom g;
     pick_geom(a, &g);
     wlwin_dim(w, 0.6);
-    w->card_shown = true;
     const struct rect *c = &g.card;
+    wlcard_pane(w, c->x, c->y, c->w, c->h, 11, COL_ACCENT, true);
     wlwin_round_fill(w, c->x - 1, c->y - 1, c->w + 2, c->h + 2, 11, COL_ACCENT);
     wlwin_round_fill(w, c->x, c->y, c->w, c->h, 10, COL_BG);
     draw_text(a, c->x + 16, c->y + 14, "Choose a wallpaper", COL_TEXT, c->w - 32);

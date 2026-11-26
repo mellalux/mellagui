@@ -155,7 +155,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 #define LM_MELLAGUI_CAPTURE_V1_VERSION         1
 #define LM_MELLAGUI_TRAY_V1_VERSION            1
-#define LM_MELLAGUI_MENU_V1_VERSION            1
+#define LM_MELLAGUI_MENU_V1_VERSION            2
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
 enum {
@@ -687,6 +687,7 @@ enum {
     LM_MELLAGUI_MENU_V1_REQ_POPUP = 1,         /* "s" the entries, one per line (a leading '~' = dim, cannot be chosen) */
     LM_MELLAGUI_MENU_V1_REQ_RAISE = 3,         /* "o" a surface of this program: bring its window forward (see menu.h) */
     LM_MELLAGUI_MENU_V1_REQ_WARP = 2,          /* "ii" move the pointer to this place of the surface it is over (surface pixels): see menu.h */
+    LM_MELLAGUI_MENU_V1_REQ_PLACE = 4,         /* "oii" since 2: where a card window of this program opens, from its parent's top left corner (see menu.h) */
     LM_MELLAGUI_MENU_V1_EVT_CHOSEN = 0,        /* "i" the entry */
     LM_MELLAGUI_MENU_V1_EVT_CLOSED = 1,        /* "" the menu went away without a choice */
 };

@@ -627,8 +627,8 @@ static void paint(struct wlwin *w)
     wlwin_text(w, 14, fy + 22, hint, 1, lm_theme.text_dim, w->bw - 28);
     if (a->modal != M_NONE) {
         wlwin_dim(w, 0.5);                                      /* the list dims */
-        w->card_shown = true;
         struct box m = modal_box(a);
+        wlcard_pane(w, m.x, m.y, m.w, m.h, 2, lm_theme.accent, true);
         wlwin_fill(w, m.x - 1, m.y - 1, m.w + 2, m.h + 2, lm_theme.accent);
         wlwin_fill(w, m.x, m.y, m.w, m.h, lm_theme.card);
         wlwin_text(w, m.x + 14, m.y + 14, a->modal_text, 1, lm_theme.text, m.w - 28);

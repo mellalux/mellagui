@@ -31,7 +31,9 @@ static inline int wlcard_text_w(const char *s)
     return lm_font_ui_cells_get() ? (int)strlen(s) * LM_FONT_W : lm_font_text_width(s);
 }
 
-/* Dialog cards can be moved: a press on the title strip takes hold of the card, the pointer carries it, the button lets it go. The offset from the middle
+/* Dialog cards can be moved. Where there are card windows (wlwin.h) the card IS a window of its own: it opens where it would be drawn and can be carried
+ * anywhere on the screen by its title; the program draws and hit-tests it in the window's coordinates all the same. Without them it stays inside the window:
+ * a press on the title strip takes hold of the card, the pointer carries it, the button lets it go. The offset from the middle
  * of the window lives in the wlwin (card_dx / card_dy), so every program that uses a card gets it the same way and a card that closes is forgotten (wlwin.c
  * puts the offset back to 0 when a picture was made without a card). A program does three things:
  *   - its card's rectangle is made with wlcard_center(&a->win, &c) after c->w / c->h are set (not (bw - w) / 2),
@@ -52,6 +54,12 @@ static inline bool wlcard_drag_press(struct wlwin *w, const struct wlcard *c, do
 {
     if (px < c->x || px >= c->x + c->w || py < c->y || py >= c->y + WLCARD_TITLE_H)
         return false;
+    if (wlwin_pane_shown(w, WLPANE_CARD)) {
+        if (w->on_pane != WLPANE_CARD)
+            return false;
+        wlwin_pane_move(w, WLPANE_CARD);                        /* the compositor carries the card's window */
+        return true;
+    }
     w->card_drag = true;
     w->card_gx = px - c->x;
     w->card_gy = py - c->y;
@@ -74,6 +82,14 @@ static inline bool wlcard_drag_motion(struct wlwin *w, const struct wlcard *c, d
 
 static inline void wlcard_drag_release(struct wlwin *w) { w->card_drag = false; }
 
+/* From here to the end of the paint (or wlwin_pane_end) what is drawn belongs to the card whose top left corner is at (x, y): its own window where
+ * there are card windows. For a program that draws a card's frame itself; wlcard_frame does it. `modal` false: the window behind stays in use. */
+static inline void wlcard_pane(struct wlwin *w, int x, int y, int cw, int ch, int radius, uint32_t rim, bool modal)
+{
+    w->card_shown = true;
+    wlwin_pane_begin(w, WLPANE_CARD, x - 1, y - 1, cw + 2, ch + 2, x - 1, y - 1, radius, rim, modal);
+}
+
 /* The same at a place of the program's choosing (x, y = the card's top left corner); `dim` false leaves the page behind it as it is (a panel that
  * floats over the picture it works on and can be moved: it must not darken it). */
 static inline void wlcard_frame_at(struct wlwin *w, struct wlcard *c, int x, int y, int cw, int ch, const char *title, uint32_t accent, uint32_t body, uint32_t ink, bool dim)
@@ -89,6 +105,7 @@ static inline void wlcard_frame_at(struct wlwin *w, struct wlcard *c, int x, int
     w->card_shown = true;
     if (dim)
         wlwin_dim(w, 0.55);
+    wlcard_pane(w, c->x, c->y, cw, ch, 15, accent, !w->card_float);
     wlwin_round_fill(w, c->x - 1, c->y - 1, cw + 2, ch + 2, 15, accent);
     wlwin_round_fill(w, c->x, c->y, cw, ch, 14, body);
     wlwin_text(w, c->x + WLCARD_PAD, c->y + WLCARD_PAD - 2, title, 1, ink, cw - 2 * WLCARD_PAD);
@@ -145,6 +162,13 @@ static inline int wlcard_button_at(const struct wlcard *c, int n, int px, int py
 static inline bool wlcard_has(const struct wlcard *c, int px, int py)
 {
     return px >= c->x && px < c->x + c->w && py >= c->y && py < c->y + c->h;
+}
+
+/* Is the pointer on the card, for a panel that leaves the window behind it in use (wlcard_frame_at without dimming): when the card is a window of its own,
+ * the place it was first drawn at belongs to the window again. */
+static inline bool wlcard_over(const struct wlwin *w, const struct wlcard *c, int px, int py)
+{
+    return (!wlwin_pane_shown(w, WLPANE_CARD) || w->on_pane == WLPANE_CARD) && wlcard_has(c, px, py);
 }
 
 #endif

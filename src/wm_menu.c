@@ -217,7 +217,7 @@ static void dockitem_menu_activate(struct lm_wm *wm, int which)
     case 1: {
         struct lm_window *w;
         lm_list_for_each(w, &wm->windows, link)
-            if (w->mapped && dock_app_matches(it->match, w->app_id))
+            if (w->mapped && !win_is_card(w) && dock_app_matches(it->match, w->app_id))
                 lm_wm_window_close(w);
         break;
     }

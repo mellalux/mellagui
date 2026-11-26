@@ -119,6 +119,12 @@ struct wm_win {
     bool osk_moved;
     int32_t osk_ox, osk_oy, osk_ow, osk_oh;
     int32_t osk_ax, osk_ay, osk_aw, osk_ah;
+    /* a card window (win_is_card): where it lies from its parent's corner; asked for by its program (placed) or carried there by the user (moved) */
+    int32_t card_x, card_y;
+    bool card_placed, card_moved;
+    /* (of the window the cards belong to) where the user left its floating panel [0] and its tool panel [1], from its corner */
+    int32_t kept_x[2], kept_y[2];
+    bool kept[2];
 };
 
 struct wm_popup {
@@ -461,6 +467,14 @@ bool win_is_aux(const struct lm_window *w);
 /* The desktop's icons (wm_desktop.c): a window of the program mellagui-desktop (app id "mellagui.desktop") that covers the output under the panel, lies at the
  * very bottom (under the gadgets), has no frame and is on every workspace. */
 bool win_is_desktop(const struct lm_window *w);
+/* A card window (menu.h "place"): a dialog (app id "mellagui.*.card"), a floating panel (".panel") or a tool panel (".tool") of a program, above its
+ * parent, frameless, never focused. The two panels open where the user left them. */
+bool win_is_card(const struct lm_window *w);
+bool win_is_tool(const struct lm_window *w);
+/* the cards of `w` go where it went */
+void cards_follow(struct lm_wm *wm, const struct lm_window *w);
+bool places_tool_find(struct lm_wm *wm, const struct lm_window *w, int32_t *x, int32_t *y);
+void places_tool_remember(struct lm_wm *wm, struct lm_window *w, int32_t x, int32_t y);
 struct lm_window *desktop_window(struct lm_wm *wm);     /* the window of the first output (the primary one) */
 void lm_wm_desktops_sync(struct lm_wm *wm);               /* one desktop program per extra output, from the left (`mellagui-desktop --output N`) */
 void desktop_fit(struct lm_wm *wm);

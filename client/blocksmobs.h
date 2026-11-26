@@ -63,7 +63,8 @@
 #define BL_SOLDIER_SEE 12.0f            /* how far a soldier sees a goblin */
 #define BL_SOLDIER_LEASH 18.0f          /* and how far from its post it goes after one */
 
-/* The rival clan, the Red Banner: its guards hold a camp round its keep. They fight the player, his people and the goblins that come within sight of their post. */
+/* The rival clan, the Red Banner: its guards hold a camp round its keep. They fight the player, his people and the goblins that come within sight of their post.
+ * BL_GUARD_MAX is for the camp's; the raiders (below) are counted apart. */
 #define BL_GUARD_MAX 8
 #define BL_GUARD_HP 18.0f               /* (a soldier has 14: they are the better fighters, and they are at home) */
 #define BL_GUARD_HIT 3.0f               /* hit points a blow of a guard takes (from the player, his people or a goblin) */
@@ -73,6 +74,17 @@
 #define BL_GUARD_LEASH 20.0f            /* ... and how far from its post it goes after one */
 #define BL_RIVAL_AT_KEEP 10.0f          /* a soldier of the player whose post is this near the rival keep attacks it when no enemy is about */
 #define BL_SOLDIER_KEEP_HIT 4.0f        /* what a blow of his takes from it */
+
+/* Their raiding parties: guards that march from the camp to a place the caller names (bl_mobs_set_raid), fight whom they meet on the way, hammer at made blocks
+ * that stop them and, when the player's keep stands (bl_mobs_set_keep), strike it. With no keep to strike they go after the player and his people near that
+ * place. One that finds nothing to do, gets no nearer or has been out too long goes home. */
+#define BL_RAIDER_MAX 6                 /* (eight soldiers, the most there can be, hold a keep against six of them) */
+#define BL_RAIDER_KEEP_HIT 2.0f         /* what a blow of a raider takes from the player's keep */
+#define BL_RAID_HUNT 40.0f              /* with no keep to strike: how far from that place a raider goes after somebody */
+#define BL_RAID_IDLE 60.0f              /* seconds with nothing to strike, or without getting nearer, after which a raider goes home */
+#define BL_RAID_LIMIT 300.0f            /* seconds a party stays out at most before it turns back ... */
+#define BL_RAID_BACK 180.0f             /* ... and seconds more after which one that has not got home is gone */
+#define BL_RAID_HOME 9.0f               /* this near their keep a raider that goes home is back */
 
 #define BL_BUILD_TIME 0.5f              /* seconds a worker takes to put one block of a building */
 #define BL_BOW_RANGE 20.0f              /* a soldier on a watchtower shoots the goblins this near (horizontally) that it can see */
@@ -133,7 +145,10 @@ struct bl_mob {
 	int site;                       /* BUILD: which of bl_mobs.site */
 	bool at_site;                   /* BUILD: it has got near enough and works (until it gets another site) */
 	bool posted;                    /* TOWER: it stands on the watchpost (gx, gy, gz): it does not move, goblins leave it alone, it shoots */
-	bool sieging;                   /* a goblin: it is hitting a block that is in its way */
+	bool sieging;                   /* a goblin or a raider: it is hitting a block that is in its way */
+	bool raider;                    /* a guard of the rival clan out on a raid (BL_RAIDER_*) */
+	bool retreat;                   /* ... on its way home */
+	float idle, since;              /* a raider: seconds it has had nothing to strike, and when it turned back (its age) */
 	/* the way to where it is going, when it cannot walk straight there (blockspath.h) */
 	struct bl_way way[BL_PATH_MAX];
 	int nway, iway;                 /* the turns of it, and the one it walks to */
@@ -168,6 +183,7 @@ struct bl_mobs {
 	int wave_brutes;                /* the last this many goblins of the wave are brutes */
 	bool rival_on;                  /* the rival clan's keep stands: the player's soldiers that are sent to it attack it */
 	float rkeep[3];                 /* the middle of the bottom of it */
+	float raid_at[3];               /* where a raiding party of theirs is bound (the player's keep, or him) */
 	int path_budget;                /* places that may still be looked at in this call (BL_PATH_BUDGET) */
 	int paths;                      /* ways that have been looked for since the start */
 	struct bl_site site[BL_SITES_MAX];      /* what is being built */
@@ -196,7 +212,9 @@ struct bl_mobs_result {
 	int slain;                      /* goblins the soldiers killed */
 	int sword_hits;                 /* blows the soldiers landed */
 	float rkeep_damage;             /* hit points the player's soldiers took from the rival keep */
-	int guards_slain;               /* guards the player's soldiers and archers killed */
+	int guards_slain;               /* guards the player's soldiers and archers killed (raiders among them) */
+	int raiders_slain;              /* ... and how many of those were raiders */
+	int raiders_home;               /* raiders that went home (they are gone) */
 	int guard_hits;                 /* blows of the guards (and their archer) at the player; they are in `hits` and `damage`, too */
 	int nbreak;                     /* blocks the workers have finished: the caller takes them away (bl_break) and keeps what they leave */
 	struct bl_break { int x, y, z; } brk[64];
@@ -222,6 +240,11 @@ int bl_mobs_count_brutes(const struct bl_mobs *m);
 void bl_mobs_end_wave(struct bl_mobs *m);
 int bl_mobs_wave_remaining(const struct bl_mobs *m);        /* goblins still to come + goblins alive */
 void bl_mobs_set_rival(struct bl_mobs *m, bool on, float x, float y, float z);   /* where the rival keep is, or that there is none */
+void bl_mobs_set_raid(struct bl_mobs *m, float x, float y, float z);    /* where the raiders are bound */
+/* a raider of the rival clan; false when there are BL_RAIDER_MAX already or there is no room for him there */
+bool bl_mobs_add_raider(struct bl_mobs *m, const struct bl_world *w, float x, float y, float z);
+int bl_mobs_count_raiders(const struct bl_mobs *m);
+void bl_mobs_raid_retreat(struct bl_mobs *m);               /* every raider turns back */
 /* a guard of the rival clan up on a watchtower of theirs (its post at x, y, z), shooting; false when there is no room */
 bool bl_mobs_add_archer(struct bl_mobs *m, const struct bl_world *w, int x, int y, int z);
 void bl_mobs_clear_kind(struct bl_mobs *m, int kind);       /* only that kind (the player died: the goblins go, the workers stay) */

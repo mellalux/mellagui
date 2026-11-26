@@ -20124,6 +20124,25 @@ class TestBlocks(Base):
         r = self.state()['rival']
         self.assertEqual((r['state'], r['on'], r['guards'], r['archer']), ('1', '1', '6', '1'))
 
+    def test_the_red_banner_sends_raiders_by_day(self):
+        self.start('--clock', '--raid-after', '2', survival=True, rival=True)
+        r = self.state()['rival']
+        self.assertEqual((r['raids'], r['raiders']), ('0', '0'))
+        time.sleep(2.5)
+        self.assertEqual(self.state()['rival']['raids'], '0', 'not while the game stands still')
+        self.play()
+        st = self.wait(lambda s: s['rival']['raiders'] == '2', timeout=10.0)
+        self.assertEqual((st['rival']['raids'], st['rival']['guards']), ('1', '6'), 'two set out; the camp keeps its guards')
+        raiders = [g for g in st['guards'].values() if g['raider'] == '1']
+        self.assertEqual(len(raiders), 2)
+        far = float(raiders[0]['x']), float(raiders[0]['z'])
+        def marching(s):
+            now = [g for g in s['guards'].values() if g['raider'] == '1']
+            return bool(now) and any(abs(float(g['x']) - far[0]) + abs(float(g['z']) - far[1]) > 5 for g in now)
+        self.wait(marching, timeout=10.0)
+        self.tap('k')                                           # switched off: the party is gone, too
+        self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['raiders'] == '0')
+
     def test_a_slow_click_breaks_or_puts_one_block_only(self):
         self.start('--pitch', '-45')
         self.play()

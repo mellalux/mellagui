@@ -3844,6 +3844,125 @@ static void test_rival(void)
 	bl_world_free(w);
 }
 
+/* run until no raider is left (or `secs`), adding up what happens; returns the seconds it took */
+static float raid_steps(struct bl_mobs *M, struct bl_world *w, const float pl[3], bool alive, float secs, struct bl_mobs_result *S)
+{
+	memset(S, 0, sizeof *S);
+	float t = 0.0f;
+	for (; t < secs && bl_mobs_count_raiders(M) > 0; t += 1.0f / 30.0f) {
+		struct bl_mobs_result R;
+		bl_mobs_step(M, w, pl, alive, 12.0f, 1.0f / 30.0f, &R);
+		for (int k = 0; k < R.nsmash; k++)
+			bl_set(w, R.smash[k].x, R.smash[k].y, R.smash[k].z, BL_AIR);
+		S->keep_damage += R.keep_damage;
+		S->damage += R.damage;
+		S->hits += R.hits;
+		S->guards_slain += R.guards_slain;
+		S->raiders_slain += R.raiders_slain;
+		S->raiders_home += R.raiders_home;
+		S->workers_lost += R.workers_lost;
+		S->siege_hits += R.siege_hits;
+	}
+	return t;
+}
+
+static void test_raiders(void)
+{
+	static struct bl_mobs M;
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	const float away[3] = { 5.5f, 20.0f, 5.5f };
+	struct bl_mobs_result S;
+	bl_mobs_init(&M, 7);
+	M.enabled = false;
+
+	/* counted apart from the camp's guards, with a cap of their own */
+	int camp = 0, out = 0;
+	for (int i = 0; i < 12; i++)
+		camp += bl_mobs_add(&M, w, BL_MOB_GUARD, 20.5f + (float)i * 2.0f, 20.0f, 100.5f);
+	for (int i = 0; i < 12; i++)
+		out += bl_mobs_add_raider(&M, w, 20.5f + (float)i * 2.0f, 20.0f, 104.5f);
+	CHECK(camp == BL_GUARD_MAX && out == BL_RAIDER_MAX && bl_mobs_count_raiders(&M) == BL_RAIDER_MAX, "eight guards and six raiders (%d, %d)", camp, out);
+
+	/* they march 60 blocks to the player's keep and strike it; goblins' target and theirs is the same block */
+	bl_mobs_clear(&M);
+	bl_mobs_set_rival(&M, true, 64.5f, 20.0f, 110.5f);
+	for (int y = 20; y < 23; y++)
+		bl_set(w, 64, y, 30, BL_KEEP);
+	bl_mobs_set_keep(&M, true, 64.5f, 20.0f, 30.5f);
+	bl_mobs_set_raid(&M, 64.5f, 20.0f, 30.5f);
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 90.5f);
+	raid_steps(&M, w, away, false, 18.0f, &S);
+	CHECK(S.keep_damage == 0.0f && M.mob[0].z < 50.0f, "on the way after 18 s (z %.1f)", M.mob[0].z);
+	raid_steps(&M, w, away, false, 15.0f, &S);
+	CHECK(S.keep_damage >= 10.0f && fmodf(S.keep_damage, BL_RAIDER_KEEP_HIT) == 0.0f, "and strikes the keep (%.0f)", S.keep_damage);
+
+	/* a wall in the way with no way round: broken; a gate does not let them through */
+	bl_mobs_clear(&M);
+	for (int x = 0; x < 128; x++)
+		for (int y = 20; y < 22; y++)
+			bl_set(w, x, y, 50, x == 64 ? BL_GATE : BL_PLANKS);
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 62.5f);
+	raid_steps(&M, w, away, false, 60.0f, &S);
+	CHECK(S.siege_hits > 5 && S.keep_damage > 0.0f, "he breaks through and gets to the keep (%d blows at the wall, %.0f at the keep)", S.siege_hits, S.keep_damage);
+	for (int x = 0; x < 128; x++)
+		for (int y = 20; y < 22; y++)
+			bl_set(w, x, y, 50, BL_AIR);
+
+	/* they fight whom they meet; the dead are counted as raiders */
+	bl_mobs_clear(&M);
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 70.5f);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 64.5f, 20.0f, 62.5f);
+	bl_mobs_add(&M, w, BL_MOB_SOLDIER, 66.5f, 20.0f, 62.5f);
+	for (int i = 0; i < 30 * 15; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(&M, w, away, false, 12.0f, 1.0f / 30.0f, &R);
+		S.raiders_slain += R.raiders_slain;
+	}
+	CHECK(bl_mobs_count_raiders(&M) == 0 && S.raiders_slain == 1, "two soldiers stop one (%d)", S.raiders_slain);
+	/* a camp guard and a raider are friends */
+	bl_mobs_clear(&M);
+	bl_mobs_add(&M, w, BL_MOB_GUARD, 64.5f, 20.0f, 108.5f);
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 105.5f);
+	raid_steps(&M, w, away, false, 5.0f, &S);
+	CHECK(bl_mobs_count(&M) == 2 && M.mob[0].hp == BL_GUARD_HP && M.mob[1].hp == BL_GUARD_HP, "they do not fight each other");
+
+	/* no keep to strike (creative): they come for the player near the goal, and with nobody there go home */
+	bl_mobs_clear(&M);
+	bl_mobs_set_keep(&M, false, 64.5f, 20.0f, 30.5f);
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 90.5f);
+	float pl[3] = { 90.5f, 20.0f, 30.5f };                         /* 26 blocks from the goal: hunted */
+	raid_steps(&M, w, pl, true, 45.0f, &S);
+	CHECK(S.hits > 3 && S.keep_damage == 0.0f, "he finds the player and the keep is left alone (%d blows)", S.hits);
+	bl_mobs_clear(&M);
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 90.5f);
+	float t = raid_steps(&M, w, away, false, 400.0f, &S);
+	CHECK(S.raiders_home == 1 && S.keep_damage == 0.0f && t > BL_RAID_IDLE + 30.0f && t < 200.0f, "nobody there: he waits and goes home (%.0f s)", t);
+
+	/* told to turn back, he walks home and is gone near his keep */
+	bl_mobs_clear(&M);
+	bl_mobs_set_keep(&M, true, 64.5f, 20.0f, 30.5f);
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 60.5f);
+	bl_mobs_raid_retreat(&M);
+	raid_steps(&M, w, away, false, 10.0f, &S);
+	CHECK(S.raiders_home == 0 && M.mob[0].z > 80.0f, "on his way back (z %.1f)", M.mob[0].z);
+	raid_steps(&M, w, away, false, 30.0f, &S);
+	CHECK(S.raiders_home == 1 && S.keep_damage == 0.0f && bl_mobs_count(&M) == 0, "home");
+
+	/* shut in by the land itself he gives up and is gone: no party stays for ever */
+	bl_mobs_clear(&M);
+	for (int d = -3; d <= 3; d++)
+		for (int y = 20; y < 24; y++) {
+			bl_set(w, 64 + d, y, 87, BL_STONE);
+			bl_set(w, 64 + d, y, 93, BL_STONE);
+			bl_set(w, 61, y, 90 + d, BL_STONE);
+			bl_set(w, 67, y, 90 + d, BL_STONE);
+		}
+	bl_mobs_add_raider(&M, w, 64.5f, 20.0f, 90.5f);
+	t = raid_steps(&M, w, away, false, BL_RAID_LIMIT + BL_RAID_BACK + 10.0f, &S);
+	CHECK(S.raiders_home == 1 && t < 3.0f * BL_RAID_IDLE + 10.0f, "gone after %.0f s", t);
+	bl_world_free(w);
+}
+
 static void test_workers(void)
 {
 	const float far_pl[3] = { 64.5f, 20.0f, 110.0f };
@@ -4478,6 +4597,7 @@ int main(int argc, char **argv)
 	test_workers();
 	test_raids();
 	test_rival();
+	test_raiders();
 	test_soldiers();
 	test_brutes();
 	printf("building\n");

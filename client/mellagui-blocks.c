@@ -97,6 +97,11 @@ enum {
 #define RIVAL_GUARDS 6                                      /* the guards of their camp besides the archer; one more comes every RIVAL_REINFORCE seconds while there are fewer */
 #define RIVAL_REINFORCE 45.0f
 #define RIVAL_NAME "Red Banner"
+#define RAID_FIRST 300.0f                                   /* seconds of play by day until their first raiding party sets out in survival (time to get soldiers) ... */
+#define RAID_FIRST_CREATIVE 120.0f                          /* ... in creative, where nothing has to be gathered ... */
+#define RAID_PAUSE 240.0f                                   /* ... and from the end of one until the next */
+#define RAID_SMALL 2                                        /* the men of the first one; every party has one more than the one before (BL_RAIDER_MAX at most) */
+#define RAID_NEAR 28.0f                                     /* this near where they are bound: "the raiders are here" */
 
 #define N_SFX 33                                            /* the sounds of k_sfx */
 
@@ -129,6 +134,12 @@ struct app {
 	bool rarcher;                                           /* ... and whether one is on the tower */
 	float rguard_t;                                         /* seconds until the next one comes */
 	float rhit_t;                                           /* seconds the keep's bar shows after a blow at it */
+	int raids;                                              /* raiding parties that have set out */
+	float raid_t;                                           /* seconds of play by day until the next one does */
+	bool raid_out, raid_here, raid_home;                    /* one is out; it has been said that it has come; some of its men went home */
+	float cli_raid;                                         /* --raid-after: seconds until the first one (0 = nothing said) */
+	int nraiders_conf;                                      /* the raiders of the world's file */
+	float raider_conf[BL_RAIDER_MAX][3];
 	int rail_hover;
 	uint32_t saved_rev;
 	int64_t last_save_ms;
@@ -463,6 +474,14 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 				a->rguards = guards;
 				a->rarcher = archer != 0;
 			}
+		} else if (with_player && !strcmp(k, "raid")) {
+			int raids, used = 0;
+			float t;
+			if (sscanf(v, "%d %f%n", &raids, &t, &used) == 2 && used > 0 && raids >= 0 && raids < 100000 && t >= 0.0f && t <= 3600.0f) {
+				a->raids = raids;
+				a->raid_t = t;
+				a->nraiders_conf = parse_units(v + used, a->raider_conf, BL_RAIDER_MAX);
+			}
 		} else if (!strcmp(k, "fov") && d >= 40 && d <= 120)
 			a->fov = (float)(d * M_PI / 180.0);
 		else if (!strcmp(k, "sensitivity") && d >= 0.0005 && d <= 0.02)
@@ -569,12 +588,12 @@ static void conf_load(struct app *a, bool with_player)
 	fclose(f);
 }
 
-/* the Red Banner's guards: those on the tower (`posted`) or those on the ground */
+/* the guards of the Red Banner's camp (raiders are not counted): those on the tower (`posted`) or those on the ground */
 static int rival_count(const struct app *a, bool posted)
 {
 	int n = 0;
 	for (int i = 0; i < BL_MOBS_MAX; i++)
-		n += a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_GUARD && a->mobs.mob[i].posted == posted;
+		n += a->mobs.mob[i].alive && a->mobs.mob[i].kind == BL_MOB_GUARD && !a->mobs.mob[i].raider && a->mobs.mob[i].posted == posted;
 	return n;
 }
 
@@ -622,6 +641,17 @@ static void conf_write(const struct app *a, FILE *f)
 			archer = rival_count(a, true) > 0;
 		}
 		fprintf(f, "\nrival = %d %d %d %d %d %.1f %d %d", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, guards, archer);
+		if (a->rival == 1) {                                    /* the raids so far, the time to the next, and the men who are out (not those on their way home) */
+			fprintf(f, "\nraid = %d %.1f ", a->raids, fmaxf(a->raid_t, 0.0f));     /* (while one is out it has run under 0) */
+			bool first = true;
+			for (int i = 0; i < BL_MOBS_MAX; i++) {
+				const struct bl_mob *m = &a->mobs.mob[i];
+				if (m->alive && m->raider && !m->retreat) {
+					fprintf(f, "%s%.2f:%.2f:%.2f", first ? "" : ",", m->x, m->y, m->z);
+					first = false;
+				}
+			}
+		}
 	}
 	fprintf(f, "\ninv = ");
 	{
@@ -1357,7 +1387,7 @@ static bool rival_guard(struct app *a)
 		bool taken = false;
 		for (int k = 0; k < BL_MOBS_MAX && !taken; k++) {
 			const struct bl_mob *m = &a->mobs.mob[k];
-			taken = m->alive && m->kind == BL_MOB_GUARD && !m->posted && hypotf(m->tx - x, m->tz - z) < 0.5f;
+			taken = m->alive && m->kind == BL_MOB_GUARD && !m->raider && !m->posted && hypotf(m->tx - x, m->tz - z) < 0.5f;
 		}
 		if (!taken && bl_mobs_add(&a->mobs, a->world, BL_MOB_GUARD, x, y, z))
 			return true;
@@ -1382,17 +1412,105 @@ static void rival_sync(struct app *a)
 	bl_mobs_set_rival(&a->mobs, a->rival == 1 && a->rival_on, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[1], (float)a->rkeep[2] + 0.5f);
 }
 
-/* which way their keep is from the player, as he faces, and how far */
-static const char *rival_bearing(const struct app *a, float *dist)
+/* which way (tx, tz) is from the player, as he faces, and how far */
+static const char *bearing_to(const struct app *a, float tx, float tz, float *dist)
 {
-	float x = a->pl.x, z = a->pl.z, yaw = a->pl.yaw;
-	float dx = (float)a->rkeep[0] + 0.5f - x, dz = (float)a->rkeep[2] + 0.5f - z, d = atan2f(dx, dz) - yaw;
+	float dx = tx - a->pl.x, dz = tz - a->pl.z, d = atan2f(dx, dz) - a->pl.yaw;
 	while (d > (float)M_PI)
 		d -= 2.0f * (float)M_PI;
 	while (d < -(float)M_PI)
 		d += 2.0f * (float)M_PI;
 	*dist = hypotf(dx, dz);
 	return fabsf(d) < 0.6f ? "ahead" : fabsf(d) > 2.5f ? "behind" : d > 0.0f ? "to the right" : "to the left";
+}
+
+/* which way their keep is, and how far */
+static const char *rival_bearing(const struct app *a, float *dist)
+{
+	return bearing_to(a, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[2] + 0.5f, dist);
+}
+
+static float raid_first(const struct app *a)
+{
+	return a->cli_raid > 0.0f ? a->cli_raid : a->survival ? RAID_FIRST : RAID_FIRST_CREATIVE;
+}
+
+/* where their raiders are bound: the player's keep, when there is none the player himself */
+static void raid_target(const struct app *a, float at[3])
+{
+	at[0] = a->have_keep ? (float)a->keep[0] + 0.5f : a->pl.x;
+	at[1] = a->have_keep ? (float)a->keep[1] : a->pl.y;
+	at[2] = a->have_keep ? (float)a->keep[2] + 0.5f : a->pl.z;
+}
+
+/* A raiding party comes out of the gateway of the camp that faces where it is bound: RAID_SMALL men the first time, one more every time after. */
+static bool raid_send(struct app *a)
+{
+	static const int k_side[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+	float at[3];
+	raid_target(a, at);
+	float cx = (float)a->rkeep[0] + 0.5f, cz = (float)a->rkeep[2] + 0.5f;
+	int side = 0;
+	float best = -1e9f;
+	for (int k = 0; k < 4; k++) {
+		bool open = bl_get(a->world, a->rkeep[0] + k_side[k][0] * CAMP_WALL, a->rkeep[1], a->rkeep[2] + k_side[k][1] * CAMP_WALL) == BL_AIR;
+		float score = (open ? 1e6f : 0.0f) + (at[0] - cx) * (float)k_side[k][0] + (at[2] - cz) * (float)k_side[k][1];
+		if (score > best) {
+			best = score;
+			side = k;
+		}
+	}
+	const float ox = (float)k_side[side][0], oz = (float)k_side[side][1];
+	int want = LM_MIN(RAID_SMALL + a->raids, BL_RAIDER_MAX), came = 0;
+	bl_mobs_set_raid(&a->mobs, at[0], at[1], at[2]);
+	for (int i = 0; i < 36 && came < want; i++) {               /* three abreast, outside the wall */
+		float along = (float)(CAMP_WALL + 2) + 1.5f * (float)(i / 3), across = 1.4f * (float)(i % 3 - 1);
+		float x = cx + ox * along - oz * across, z = cz + oz * along + ox * across;
+		if (x < 1.0f || z < 1.0f || x >= (float)a->world->w - 1.0f || z >= (float)a->world->d - 1.0f)
+			continue;
+		int g = ground_at(a->world, (int)floorf(x), (int)floorf(z));
+		came += bl_mobs_add_raider(&a->mobs, a->world, x, (float)(g + 1), z);
+	}
+	if (!came)
+		return false;
+	a->raids++;
+	a->raid_out = true;
+	a->raid_here = a->raid_home = false;
+	float dist;
+	const char *way = rival_bearing(a, &dist);
+	say(a, "The %s sends %d raiders at you! Their camp is %s", RIVAL_NAME, came, way);
+	sound(a, "horn");
+	return true;
+}
+
+/* The raids: by day the time to the next one runs; while one is out, its coming and its end are told. */
+static void raid_step(struct app *a, float dt)
+{
+	if (a->rival != 1 || !a->rival_on)
+		return;
+	float at[3];
+	raid_target(a, at);
+	bl_mobs_set_raid(&a->mobs, at[0], at[1], at[2]);
+	if (a->raid_out) {
+		if (bl_mobs_count_raiders(&a->mobs) == 0) {
+			a->raid_out = false;
+			a->raid_t = RAID_PAUSE;
+			say(a, a->raid_home ? "The raiders have gone home" : "The raiding party is beaten");
+			return;
+		}
+		for (int i = 0; i < BL_MOBS_MAX && !a->raid_here; i++) {
+			const struct bl_mob *m = &a->mobs.mob[i];
+			if (m->alive && m->raider && !m->retreat && hypotf(m->x - at[0], m->z - at[2]) < RAID_NEAR) {
+				a->raid_here = true;
+				say(a, "The raiders are here!");
+				sound(a, "alarm");
+			}
+		}
+	} else if (a->hp > 0.0f && bl_daylight(a->time_h) > 0.55f) {
+		a->raid_t -= dt;
+		if (a->raid_t <= 0.0f && !raid_send(a))
+			a->raid_t = 30.0f;                                  /* (no room at the gateway: later) */
+	}
 }
 
 /* The Red Banner comes to this world: its camp is made and manned. */
@@ -1409,6 +1527,9 @@ static bool rival_start(struct app *a)
 	a->rhp = RIVAL_HP;
 	a->rguard_t = RIVAL_REINFORCE;
 	a->rhit_t = 0.0f;
+	a->raids = 0;
+	a->raid_t = raid_first(a);
+	a->raid_out = false;
 	rival_man(a, RIVAL_GUARDS, true);
 	a->rguards = RIVAL_GUARDS;
 	a->rarcher = true;
@@ -1429,10 +1550,12 @@ static void rival_switch(struct app *a)
 		a->rguards = rival_count(a, false);
 		a->rarcher = rival_count(a, true) > 0;
 		a->rival_on = false;
-		bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
+		a->raid_out = false;
+		bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);             /* (a raiding party that is out is gone, too) */
 		say(a, "The %s stands down (K brings it back)", RIVAL_NAME);
 	} else {
 		a->rival_on = true;
+		a->raid_t = raid_first(a);
 		rival_man(a, a->rguards, a->rarcher);
 		say(a, "The %s is back at its camp", RIVAL_NAME);
 	}
@@ -1447,6 +1570,7 @@ static void rival_fall(struct app *a)
 	bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
 	a->rival = 2;
 	a->rival_on = false;
+	a->raid_out = false;
 	a->rhp = 0.0f;
 	rival_sync(a);
 	sound(a, "dawn");
@@ -1480,10 +1604,11 @@ static void rival_strike(struct app *a, int64_t now)
 	rival_hit(a, RIVAL_SWORD);
 }
 
-/* while the camp stands, men come to it again, one at a time */
+/* while the camp stands, men come to it again, one at a time, and raiding parties set out from it */
 static void rival_step(struct app *a, float dt)
 {
 	a->rhit_t = fmaxf(0.0f, a->rhit_t - dt);
+	raid_step(a, dt);
 	if (a->rival != 1 || !a->rival_on || rival_count(a, false) >= RIVAL_GUARDS) {
 		a->rguard_t = RIVAL_REINFORCE;
 		return;
@@ -1525,11 +1650,11 @@ static void apply_build(struct app *a, const struct bl_mobs_result *R, float dt)
 			smashed += bl_set(a->world, c->x, c->y, c->z, BL_AIR);
 	}
 	if (smashed) {
-		say(a, "The goblins have broken through a wall!");
+		say(a, "Your wall has been broken through!");
 		sound(a, "wall-break");
 		a->siege_msg_t = 8.0f;
 	} else if (R->siege_hits > 0 && a->siege_msg_t <= 0.0f) {
-		say(a, "The goblins are hammering at your walls");
+		say(a, "Your walls are being hammered");
 		a->siege_msg_t = 12.0f;
 	}
 	if (R->siege_hits > 0 || R->keep_hits > 0)
@@ -2047,6 +2172,9 @@ static void state_reset(struct app *a)
 	a->rguards = 0;
 	a->rarcher = false;
 	a->rguard_t = RIVAL_REINFORCE;
+	a->raids = a->nraiders_conf = 0;
+	a->raid_t = -1.0f;                                      /* (not said: world_begin, which knows the mode) */
+	a->raid_out = a->raid_here = a->raid_home = false;
 	a->in_night = a->brute_warned = a->wave_msg_done = false;
 	a->cmd = a->drag_sel = false;
 	a->order_mode = 0;
@@ -2113,8 +2241,13 @@ static void world_begin(struct app *a, bool from_file, int mode, int workers, in
 	}
 	if (from_file) {
 		sites_restore(a);
-		if (a->rival == 1 && a->rival_on)
+		if (a->rival == 1 && a->rival_on) {
 			rival_man(a, a->rguards, a->rarcher);
+			for (int i = 0; i < a->nraiders_conf; i++)          /* the party that was out */
+				a->raid_out |= bl_mobs_add_raider(&a->mobs, a->world, a->raider_conf[i][0], a->raider_conf[i][1], a->raider_conf[i][2]);
+		}
+		if ((a->cli_raid > 0.0f && !a->raid_out) || a->raid_t < 0.0f)
+			a->raid_t = raid_first(a);
 	} else if (a->survival && !a->cli_no_rival) {
 		rival_start(a);                                         /* a new world has them from the start */
 	}
@@ -2390,7 +2523,7 @@ static bool sword_swing(struct app *a, int64_t now)
 	int id = bl_mobs_pick(&a->mobs, eye, look, BL_SWORD_REACH, &t);
 	if (id < 0 || (a->mobs.mob[id].kind == BL_MOB_GOBLIN && !a->mobs_on))
 		return false;
-	bool guard = a->mobs.mob[id].kind == BL_MOB_GUARD;
+	bool guard = a->mobs.mob[id].kind == BL_MOB_GUARD, raider = a->mobs.mob[id].raider;
 	if (a->aimed && a->aim.t < t)                           /* a block is in the way (leaves are none: goblins stand among them) */
 		for (float s = 0.0f; s < t; s += 0.1f)
 			if (bl_solid_unit(bl_get(a->world, (int)floorf(eye[0] + look[0] * s), (int)floorf(eye[1] + look[1] * s), (int)floorf(eye[2] + look[2] * s))))
@@ -2403,7 +2536,7 @@ static bool sword_swing(struct app *a, int64_t now)
 	a->hit_t = 0.18f;
 	if (dead && guard) {
 		sound(a, "goblin-die");
-		say(a, "A guard of the %s is down", RIVAL_NAME);
+		say(a, raider ? "A raider of the %s is down" : "A guard of the %s is down", RIVAL_NAME);
 	} else if (dead) {
 		a->kills++;
 		sound(a, "goblin-die");
@@ -2562,11 +2695,13 @@ static void mobs_advance(struct app *a, float dt)
 	if (R.nbreak > 0)
 		apply_breaks(a, &R);
 	apply_build(a, &R, dt);
-	rival_step(a, dt);
 	if (R.guards_slain > 0) {
-		say(a, "Your soldiers brought down a guard of the %s", RIVAL_NAME);
+		say(a, R.raiders_slain ? "Your soldiers brought down a raider of the %s" : "Your soldiers brought down a guard of the %s", RIVAL_NAME);
 		sound(a, "goblin-die");
 	}
+	if (R.raiders_home > 0)
+		a->raid_home = true;
+	rival_step(a, dt);
 	if (R.rkeep_damage > 0.0f)
 		rival_hit(a, R.rkeep_damage);
 	if (R.workers_lost > 0) {
@@ -2645,6 +2780,7 @@ static void respawn(struct app *a)
 	a->hurt_t = a->hit_t = 0.0f;
 	a->regen_t = 0.0f;
 	bl_mobs_clear_kind(&a->mobs, BL_MOB_GOBLIN);
+	bl_mobs_raid_retreat(&a->mobs);                             /* (raiders do not wait for him at the start) */
 	a->mobs.spawn_t = 8.0f;                                    /* a breather before the next one */
 	say(a, "Back at the start");
 }
@@ -2929,7 +3065,7 @@ static int stock_layout(const struct app *a, int *x, int *y, int *wd, int list[B
 		*wd = LM_MAX(*wd, lm_font_text_width(bl_block_name(list[i])));
 	*wd += 72;
 	*x = a->win.bw - *wd - 8;
-	*y = 90;
+	*y = a->rival == 1 && a->rival_on && bl_mobs_count_raiders(&a->mobs) > 0 ? 100 : 90;       /* (under the line about the raiders) */
 	int fit = (a->win.bh - *y - 84) / (LM_FONT_H + 2);          /* (down to the hotbar or the plans) */
 	return n < fit ? n : LM_MAX(fit, 0);
 }
@@ -2973,6 +3109,28 @@ static void paint_rival(struct app *a)
 		wlwin_round_fill(w, x, y, bw, 10, 5, lm_theme.background);
 		if (f > 0.0f)
 			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 10, 5, 0xd02828u);
+	}
+	int n = 0;
+	float near = 1e9f, nx = 0.0f, nz = 0.0f;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *m = &a->mobs.mob[i];
+		if (!m->alive || !m->raider)
+			continue;
+		n++;
+		float d = hypotf(m->x - a->pl.x, m->z - a->pl.z);
+		if (d < near) {
+			near = d;
+			nx = m->x;
+			nz = m->z;
+		}
+	}
+	if (n) {
+		const char *to = bearing_to(a, nx, nz, &near);
+		if (a->cmd)
+			snprintf(l, sizeof l, "Raiders %d", n);
+		else
+			snprintf(l, sizeof l, "Raiders %d: %.0f, %s", n, near, to);
+		shadow_text(w, w->bw - lm_font_text_width(l) - 8, 40 + LM_FONT_H + 6 + 16, l, 0xffb040u);
 	}
 }
 
@@ -3033,7 +3191,7 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 		for (int i = 0; i < BL_MOBS_MAX; i++) {
 			const struct bl_mob *m = &a->mobs.mob[i];
 			if (m->alive && m->kind == BL_MOB_GUARD && cmd_project(a, cam, m->x, m->y + BL_SOLDIER_H + 0.35f, m->z, &sx, &sy)) {
-				wlwin_fill(w, (int)sx - 5, (int)sy - 5, 10, 10, 0xd02828u);
+				wlwin_fill(w, (int)sx - 5, (int)sy - 5, 10, 10, m->raider ? 0xff9820u : 0xd02828u);
 				wlwin_fill(w, (int)sx - 3, (int)sy - 3, 6, 6, 0x18080au);
 			}
 		}
@@ -3287,6 +3445,8 @@ static const char *const HP_RIVAL[] = {
 	"A rival clan. A new survival world has it from the start; in a world you have already, press K (or the flag at the left): it asks, then makes camp 80 to 120 blocks away and levels the ground there. K again sends its men away, and once more brings them back.",
 	"# Their camp",
 	"A wall with a gateway on two sides, their keep with the red banner in the middle, a watchtower with an archer, and six tough guards in black with red helmets (each more than a match for one soldier). A guard fights you, your people and the goblins that come near his post; he does not follow far. While the camp stands, a lost guard is replaced 45 seconds later.",
+	"# Raids",
+	"By day a raiding party sets out for your keep, the first after five minutes of play (two in creative): two men the first time, one more each time after, six at most; the next four minutes after the last one is over. The horn tells you, the top right says how far the nearest raider is and which way. They fight whom they meet, break walls and gates that stop them and, in survival, strike your keep. In creative they cannot hurt the keep: they go after you and your people near it and, with nothing to do, go home. If you die, they go home too.",
 	"# Winning",
 	"Their keep takes 200 hit points. Strike it with the left button (3 a blow), or send soldiers: right-click their keep in the command view and they attack it when no enemy is about. When it falls, you have won.",
 	"# Finding them",
@@ -3450,7 +3610,7 @@ static void paint_card(struct app *a)
 		labels[0] = "New world";
 		cols[0] = lm_theme.btn_amber;
 		char l[120];
-		wlwin_text(w, tx, ty, "The goblins pulled it down. The game is over.", 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty, "Your enemies pulled it down. The game is over.", 1, lm_theme.text, tw);
 		snprintf(l, sizeof l, "Nights survived: %d     Goblins killed: %d", a->nights, a->kills);
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
 	} else if (a->prompt == P_DEAD) {
@@ -3497,7 +3657,7 @@ static void paint_card(struct app *a)
 		cols[0] = lm_theme.btn_slate;
 	} else if (a->prompt == P_CLAN) {
 		wlwin_text(w, tx, ty, "A rival clan makes camp 80 to 120 blocks away.", 1, lm_theme.text, tw);
-		wlwin_text(w, tx, ty + LM_FONT_H + 5, "The ground is levelled there. Guards hold the camp.", 1, lm_theme.text_dim, tw);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, "The ground is levelled there. They will raid you.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Bring down its keep and you have won.", 1, lm_theme.text_dim, tw);
 		labels[1] = "Make camp";
 		cols[0] = lm_theme.btn_slate;
@@ -3660,8 +3820,8 @@ static void write_dump(struct app *a)
 	{
 		float dist = 0.0f;
 		rival_bearing(a, &dist);
-		fprintf(f, "rival state=%d on=%d keep=%d,%d,%d hp=%.1f guards=%d archer=%d dist=%.1f\n", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, rival_count(a, false),
-		        rival_count(a, true), a->rival ? dist : -1.0f);
+		fprintf(f, "rival state=%d on=%d keep=%d,%d,%d hp=%.1f guards=%d archer=%d dist=%.1f raids=%d next=%.1f raiders=%d here=%d\n", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2],
+		        a->rhp, rival_count(a, false), rival_count(a, true), a->rival ? dist : -1.0f, a->raids, a->raid_t, bl_mobs_count_raiders(&a->mobs), a->raid_here);
 		struct bl_camera cam;
 		cmd_camera(a, &cam);
 		for (int i = 0; i < BL_MOBS_MAX; i++) {
@@ -3670,7 +3830,7 @@ static void write_dump(struct app *a)
 			if (!m->alive || m->kind != BL_MOB_GUARD)
 				continue;
 			cmd_project(a, &cam, m->x, m->y + 1.0f, m->z, &sx, &sy);
-			fprintf(f, "guard %d x=%.3f y=%.3f z=%.3f hp=%.1f posted=%d sx=%.1f sy=%.1f\n", i, m->x, m->y, m->z, m->hp, m->posted, sx, sy);
+			fprintf(f, "guard %d x=%.3f y=%.3f z=%.3f hp=%.1f posted=%d sx=%.1f sy=%.1f raider=%d retreat=%d\n", i, m->x, m->y, m->z, m->hp, m->posted, sx, sy, m->raider, m->retreat);
 		}
 	}
 	fprintf(f, "inv");
@@ -5099,6 +5259,86 @@ static int selftest(void)
 		rv.survival = true;
 		new_world(&rv);
 		CHECK(rv.rival == 1 && rv.rival_on && rival_count(&rv, false) == RIVAL_GUARDS, "a new world has the camp");
+
+		/* their raiding parties: by day, in time, bigger each time; saved; to the keep over real ground */
+		CHECK(rv.raids == 0 && rv.raid_t == RAID_FIRST && !rv.raid_out, "the first one in five minutes of survival (%.0f)", rv.raid_t);
+		rv.playing = true;
+		rv.hp = MAX_HP;
+		rv.time_h = 1.0f;
+		rv.raid_t = 1.0f;
+		rival_step(&rv, 5.0f);
+		CHECK(!rv.raid_out && rv.raid_t == 1.0f, "not by night");
+		rv.time_h = 12.0f;
+		rival_step(&rv, 0.5f);
+		CHECK(!rv.raid_out, "not yet");
+		rival_step(&rv, 0.6f);
+		CHECK(rv.raid_out && rv.raids == 1 && bl_mobs_count_raiders(&rv.mobs) == RAID_SMALL && rival_count(&rv, false) == RIVAL_GUARDS,
+		      "two set out, the camp keeps its six (%d)", bl_mobs_count_raiders(&rv.mobs));
+		snprintf(camp, sizeof camp, "%s/raid.bl", rv.dir);
+		snprintf(rv.path, sizeof rv.path, "%s", camp);
+		rv.nosave = false;
+		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.raid_out && rv.raids == 1 && bl_mobs_count_raiders(&rv.mobs) == RAID_SMALL &&
+		      rival_count(&rv, false) == RIVAL_GUARDS, "saved on the way, they are still on it");
+		rv.playing = true;
+		rv.hp = MAX_HP;
+		rv.time_h = 12.0f;
+		rv.mobs.enabled = false;
+		rv.pl.flying = true;
+		bl_mobs_clear_kind(&rv.mobs, BL_MOB_WORKER);
+		for (int i = 0; i < 30 * 120 && !rv.raid_here; i++) {
+			rv.pl.y = 60.0f;
+			mobs_advance(&rv, 1.0f / 30.0f);
+		}
+		CHECK(rv.raid_here, "they get there");
+		for (int i = 0; i < 30 * 60 && rv.prompt != P_LOST; i++) {
+			rv.pl.y = 60.0f;
+			mobs_advance(&rv, 1.0f / 30.0f);
+		}
+		CHECK(rv.prompt == P_LOST && !rv.have_keep, "nobody to hold them: the keep falls (%.0f)", rv.keep_hp);
+		/* K takes a party away; the next one is a man bigger */
+		rival_switch(&rv);
+		CHECK(!rv.raid_out && bl_mobs_count_raiders(&rv.mobs) == 0, "switched off: they are gone");
+		rv.prompt = P_NONE;
+		rival_switch(&rv);
+		rv.raid_t = 0.1f;
+		rival_step(&rv, 0.2f);
+		CHECK(rv.raids == 2 && bl_mobs_count_raiders(&rv.mobs) == RAID_SMALL + 1, "three the second time (%d)", bl_mobs_count_raiders(&rv.mobs));
+		bl_mobs_clear_kind(&rv.mobs, BL_MOB_GUARD);
+		rival_step(&rv, 0.1f);
+		CHECK(!rv.raid_out && rv.raid_t == RAID_PAUSE, "beaten: the next one in four minutes");
+		rv.raids = 20;
+		rv.raid_t = 0.1f;
+		rival_step(&rv, 0.2f);
+		CHECK(bl_mobs_count_raiders(&rv.mobs) == BL_RAIDER_MAX, "never more than six (%d)", bl_mobs_count_raiders(&rv.mobs));
+		/* creative: the keep takes no harm and they go home */
+		rv.survival = false;
+		keep_sync(&rv);
+		new_world(&rv);                                         /* (a new world of survival: no camp in creative) */
+		rv.survival = false;
+		keep_sync(&rv);
+		CHECK(rival_start(&rv) || rv.rival == 1, "a camp");
+		CHECK(rv.raid_t == RAID_FIRST_CREATIVE, "in creative the first one in two minutes (%.0f)", rv.raid_t);
+		rv.playing = true;
+		rv.hp = MAX_HP;
+		rv.time_h = 12.0f;
+		rv.mobs.enabled = false;
+		rv.pl.flying = true;
+		bl_mobs_clear_kind(&rv.mobs, BL_MOB_WORKER);
+		rv.raid_t = 0.1f;
+		float khp = rv.keep_hp;
+		for (int i = 0; i < 30 * 400 && !(rv.raids == 1 && !rv.raid_out); i++) {
+			rv.pl.y = 60.0f;
+			mobs_advance(&rv, 1.0f / 30.0f);
+		}
+		CHECK(rv.raids == 1 && !rv.raid_out && rv.raid_home && rv.keep_hp == khp && rv.prompt != P_LOST, "they find nobody and go home");
+		/* a death sends them home */
+		rv.raid_t = 0.1f;
+		rival_step(&rv, 0.2f);
+		respawn(&rv);
+		int back = 0;
+		for (int k = 0; k < BL_MOBS_MAX; k++)
+			back += rv.mobs.mob[k].alive && rv.mobs.mob[k].raider && rv.mobs.mob[k].retreat;
+		CHECK(back == RAID_SMALL + 1, "respawn: they turn back (%d)", back);
 		bl_world_free(rv.world);
 	}
 
@@ -5889,6 +6129,12 @@ int main(int argc, char **argv)
 			a.cli_rival = true;
 		} else if (!strcmp(argv[i], "--no-rival")) {
 			a.cli_no_rival = true;
+		} else if (!strcmp(argv[i], "--raid-after") && i + 1 < argc) {   /* seconds until the first raiding party (for the tests, and to see one soon) */
+			a.cli_raid = (float)atof(argv[++i]);
+			if (!(a.cli_raid >= 1.0f && a.cli_raid <= 3600.0f)) {
+				fprintf(stderr, "mellagui-blocks: --raid-after wants 1 to 3600 seconds\n");
+				return 2;
+			}
 		} else if (!strcmp(argv[i], "--no-mobs")) {
 			no_mobs = true;
 		} else if (!strcmp(argv[i], "--survival")) {
@@ -5944,7 +6190,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--rival | --no-rival] [--no-body] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--rival | --no-rival] [--raid-after SECONDS] [--no-body] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}

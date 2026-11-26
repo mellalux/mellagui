@@ -46,7 +46,7 @@ struct wlwin_ops {
 
 /* CARD WINDOWS: a part of the picture (a dialog card, a panel) that is a window of its own, so it can be dragged anywhere on the screen. The program
  * goes on drawing it from its paint and hit-testing it in the window's coordinates: see wlwin_pane_begin. */
-enum { WLPANE_CARD, WLPANE_TOOL, WLPANE_N };
+enum { WLPANE_CARD, WLPANE_TOOL, WLPANE_SIDE, WLPANE_N };
 
 struct wlpane {
     struct wlwin *win;
@@ -184,7 +184,9 @@ bool wlwin_panes(const struct wlwin *w);
  * pointer events on it arrive in those coordinates, wherever it has been carried. `modal`: a click on the window where the rectangle was first drawn counts as
  * a click outside it; a card that is not modal (a floating panel) keeps the place the user carried it to while the window lives. `edge` is the colour of its rim, `radius` that of its corners. A pane that a paint does not draw is closed. False (and nothing changes:
  * the drawing goes on in the window) when there are no card windows. WLPANE_TOOL is a panel that stays beside the program: it is carried by a press anywhere
- * on it, and the program gets no pointer events from it. */
+ * on it, and the program gets no pointer events from it. WLPANE_SIDE is a tool panel that the program works with: the compositor treats it like WLPANE_TOOL
+ * (beside the window, under the dialogs, its place remembered) but the pointer events come to the program in the rectangle's coordinates, and the program
+ * carries it itself (wlwin_pane_move on a press on its title). */
 bool wlwin_pane_begin(struct wlwin *w, int pane, int x, int y, int width, int height, int at_x, int at_y, int radius, uint32_t edge, bool modal);
 void wlwin_pane_end(struct wlwin *w);
 /* Is that pane a window on the screen now? */

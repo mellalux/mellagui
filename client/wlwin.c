@@ -373,7 +373,7 @@ static void panes_commit(struct wlwin *w)
         }
         if (!p->surface) {
             char id[64];
-            snprintf(id, sizeof(id), "%s%s", w->app_id, i == WLPANE_TOOL ? ".tool" : p->modal ? ".card" : ".panel");
+            snprintf(id, sizeof(id), "%s%s", w->app_id, i == WLPANE_TOOL || i == WLPANE_SIDE ? ".tool" : p->modal ? ".card" : ".panel");
             p->surface = wlc_alloc(w->c, &lm_wl_surface_interface, NULL, NULL);
             WLC_SEND(w->c, w->compositor, LM_WL_COMPOSITOR_REQ_CREATE_SURFACE, { .n = p->surface });
             p->xsurface = wlc_alloc(w->c, &lm_xdg_surface_interface, pane_xsurface_event, p);
@@ -563,9 +563,10 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         w->rpx = lm_fixed_to_double(m[a].f) / z;
         w->rpy = lm_fixed_to_double(m[a + 1].f) / z;
         const struct wlpane *card = &w->pane[WLPANE_CARD];
-        if (w->on_pane == WLPANE_CARD) {                                /* on the card window: where the program drew it, wherever it is now */
-            m[a].f = lm_fixed_from_double(card->x + w->rpx);
-            m[a + 1].f = lm_fixed_from_double(card->y + w->rpy);
+        if (w->on_pane == WLPANE_CARD || w->on_pane == WLPANE_SIDE) {   /* on a card's window: where the program drew it, wherever it is now */
+            const struct wlpane *on = &w->pane[w->on_pane];
+            m[a].f = lm_fixed_from_double(on->x + w->rpx);
+            m[a + 1].f = lm_fixed_from_double(on->y + w->rpy);
             w->rpx = 100000.0;                                          /* (not over a rail at the left) */
         } else if (card->surface && card->modal && w->rpx - w->inx >= card->x && w->rpx - w->inx < card->x + card->w && w->rpy - w->iny >= card->y &&
                    w->rpy - w->iny < card->y + card->h) {

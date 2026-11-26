@@ -16665,48 +16665,145 @@ class TestPaint(Base):
         entry('Add the other pictures here as layers')
         self.wait(lambda s: s['image']['layers'] == '5')
 
-    def test_a_picture_moves_into_a_window_of_its_own(self):
+    def paint_windows(self, kind='mellagui.paint'):
+        return {w['title'].split(' ')[0]: w for w in ctl.windows()['windows'] if w['app_id'] == kind}
+
+    def moved(self):
+        """The state of the second window (it writes its own dump)."""
+        out = {}
+        for l in open(self.dump + '.moved').read().splitlines():
+            f = l.split()
+            kv = dict(x.split('=', 1) for x in f[1:] if '=' in x)
+            if f[0] in ('tab', 'lrow', 'layer'):
+                out[f[0] + f[1]] = kv
+            else:
+                out[f[0]] = kv
+        return out
+
+    def at_screen(self, win, x, y):
+        return win['x'] + int(x), win['y'] + self.TOP + int(y)
+
+    def in_picture(self, win, st, ix, iy):
+        cv, z = st['canvas'], int(st['state']['zoom']) / 100.0
+        return self.at_screen(win, int(cv['x']) + float(cv['vx']) + ix * z, float(cv['vy']) + iy * z)
+
+    def drag_screen(self, a, b, button=272):
+        ctl.abs(*a)
+        time.sleep(0.1)
+        ctl.button(button, True)
+        time.sleep(0.15)
+        for i in range(1, 9):
+            ctl.abs(a[0] + (b[0] - a[0]) * i // 8, a[1] + (b[1] - a[1]) * i // 8)
+            time.sleep(0.05)
+        time.sleep(0.2)                                         # (a drag between windows is set up while the button is down)
+        ctl.button(button, False)
+        time.sleep(0.3)
+
+    def two_windows(self):
+        """Paint with `one` in the first window and `two` pulled out into a second one beside it."""
         d, one, two = self.two_pictures()
-        p = self.start(one, two)
-        st = self.wait(lambda s: s['tabs']['n'] == '2' and s['image']['w'] == '60')
-        def adopted():
-            """The processes that took a picture over from this test's compositor."""
-            found = []
-            for n in os.listdir('/proc'):
-                try:
-                    if n.isdigit() and b'--adopt\0' + os.environ['XDG_RUNTIME_DIR'].encode() in open('/proc/%s/cmdline' % n, 'rb').read():
-                        found.append(int(n))
-                except OSError:
-                    pass
-            return found
-        def end_adopted():
-            for pid in adopted():
-                os.kill(pid, signal.SIGKILL)
-            self.eventually(lambda: not any(w['app_id'] == 'mellagui.paint' for w in ctl.windows()['windows'] if w['title'].startswith('two.png')))
-        self.addCleanup(end_adopted)
+        p = self.start('--size', '740x440', one, two)
+        self.wait(lambda s: s['tabs']['n'] == '2')
         self.click_at(*self.tab_xy(1))
         st = self.wait(lambda s: s['tabs']['cur'] == '1')
-        self.click_box(self.row('lbtn', 'New'))                                               # a second layer with a line: unsaved changes
+        self.click_box(self.row('lbtn', 'New'))                 # a second layer with a line: changes and an undo history that go along
         st = self.wait(lambda s: s['image']['layers'] == '2')
         self.drag(st, (2, 2), (15, 2))
-        st = self.wait(lambda s: s['image']['modified'] == '1')
-        whole = st['image']['hash']
+        self.wait(lambda s: s['image']['modified'] == '1' and s['state']['undo'] == '2')
         self.click_at(*self.tab_xy(0))
         self.wait(lambda s: s['tabs']['cur'] == '0')
-        wx, wy = self.win_xy()
-        win = wait_for_window('mellagui.paint')
-        self.carry(self.tab_xy(1), (win['w'] + 60, 100))                                      # its tab pulled out of the window
+        first = self.paint_windows()['one.png']
+        self.carry(self.tab_xy(1), (first['w'] + 60, 100))      # its tab pulled out of the window and let go on the desktop
         self.wait(lambda s: s['tabs']['n'] == '1' and s['image']['path'] == one)
-        self.eventually(lambda: sorted(w['title'] for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.paint') == ['one.png - Paint', 'two.png * - Paint'])
-        def moved():
-            out = {}
-            for l in open(self.dump + '.moved').read().splitlines():
-                f = l.split()
-                out[f[0]] = dict(x.split('=', 1) for x in f[1:] if '=' in x)
-            return out
-        self.eventually(lambda: moved()['image']['layers'] == '2')
-        m = moved()['image']
-        self.assertEqual((m['path'], m['modified'], m['cur'], m['hash']), (two, '1', '1', whole))
+        self.eventually(lambda: len(self.paint_windows()) == 2 and self.moved()['image']['layers'] == '2')
+        w2 = self.paint_windows()['two.png']
+        self.drag_screen((w2['x'] + 150, w2['y'] - 12), (w2['x'] + 150 + 280, w2['y'] - 12 + 30))     # the new window beside the first
+        self.eventually(lambda: self.paint_windows()['two.png']['x'] > w2['x'] + 200)
+        return p, d, one, two
+
+    def test_a_picture_moves_into_a_window_of_its_own_and_back(self):
+        p, d, one, two = self.two_windows()
+        m = self.moved()
+        self.assertEqual((m['image']['path'], m['image']['modified'], m['state']['undo']), (two, '1', '2'), 'everything went along')
+        self.assertIsNone(p.poll())
+        # its tab dragged onto the first window's tab bar: a tab there again, and the emptied window closes
+        w1, w2 = self.paint_windows()['one.png'], self.paint_windows()['two.png']
+        t = m['tab0']
+        mine = self.tab_xy(0)
+        self.drag_screen(self.at_screen(w2, int(t['x']) + 40, int(t['y']) + 12), self.at_screen(w1, mine[0] + 250, mine[1]))
+        st = self.wait(lambda s: s['tabs']['n'] == '2' and s['image']['path'] == two)
+        self.assertEqual((st['image']['layers'], st['state']['undo']), ('2', '2'))
+        self.eventually(lambda: len(self.paint_windows()) == 1)
+        self.assertIsNone(p.poll())
+
+    def test_a_tab_drag_called_off_with_esc_stays(self):
+        d, one, two = self.two_pictures()
+        self.start(one, two)
+        self.wait(lambda s: s['tabs']['n'] == '2')
+        win = self.paint_windows()['one.png']
+        wx, wy = self.win_xy()
+        x, y = self.tab_xy(1)
+        ctl.abs(wx + x, wy + y)
+        ctl.button(272, True)
+        time.sleep(0.15)
+        for k in (1, 2):
+            ctl.abs(win['x'] + win['w'] + 30 * k, wy + 100)
+            time.sleep(0.1)
+        time.sleep(0.2)
+        ctl.tap(KEY_ESC)
+        time.sleep(0.2)
+        ctl.button(272, False)
+        time.sleep(0.4)
+        self.assertEqual((len(self.paint_windows()), self.state()['tabs']['n']), (1, '2'))
+
+    def test_the_clone_stamp_copies_from_a_picture_in_another_window(self):
+        p, d, one, two = self.two_windows()
+        w1, w2 = self.paint_windows()['one.png'], self.paint_windows()['two.png']
+        ctl.tap(KEYCODES['k'])
+        self.eventually(lambda: self.moved()['state']['tool'] == 'Clone' and self.state()['state']['tool'] == 'Clone')   # one tool for all windows
+        # take the spot in the red picture (window 2), paint on the white one (window 1)
+        m = self.moved()
+        self.drag_screen(self.in_picture(w2, m, 10, 7), self.in_picture(w2, m, 10, 7), button=273)
+        self.drag_screen((w1['x'] + 150, w1['y'] - 12), (w1['x'] + 150, w1['y'] - 12))        # the first window to the front
+        self.click_box(self.row('toggle', 'Image'))             # copy what is seen there (its chosen layer is an empty one with a line)
+        st = self.wait(lambda s: self.row('toggle', 'Image')['on'] == '1')
+        base = st['image']['hash']
+        self.drag_screen(self.in_picture(w1, st, 30, 22), self.in_picture(w1, st, 33, 22))
+        self.wait(lambda s: s['image']['hash'] != base)
+        out = os.path.join(d, 'cloned.png')
+        self.save_as(out)
+        from PIL import Image
+        got = Image.open(out).convert('RGB')
+        self.assertEqual(got.getpixel((31, 22)), (255, 0, 0), 'the other picture\'s red was copied')
+        self.assertEqual(got.getpixel((5, 35)), (255, 255, 255))
+
+    def test_the_layers_panel_floats_and_a_layer_goes_to_another_window(self):
+        p, d, one, two = self.two_windows()
+        w1 = self.paint_windows()['one.png']
+        self.drag_screen((w1['x'] + 150, w1['y'] - 12), (w1['x'] + 150, w1['y'] - 12))
+        ctl.tap(65)                                             # F7
+        st = self.wait(lambda s: s['layers']['float'] == '1')
+        panel = card_window(ctl, 'mellagui.paint', 'tool')
+        self.assertIsNotNone(panel, 'the panel is a window')
+        self.assertEqual((int(st['canvas']['w']), panel['w']), (w1['w'] - 2 * 52, 184), 'the picture has the panel\'s room')
+        # its buttons work where it is
+        new = self.row('lbtn', 'New')
+        bx, by = panel['x'] + int(new['x']) - 20000 + 20, panel['y'] + int(new['y']) + 10
+        ctl.click(bx, by)
+        self.wait(lambda s: s['image']['layers'] == '2')
+        # carried by its title, the window it belongs to stays
+        self.drag_screen((panel['x'] + 40, panel['y'] + 12), (panel['x'] - 20, panel['y'] + 60))
+        moved = card_window(ctl, 'mellagui.paint', 'tool')
+        self.assertEqual((moved['x'] - panel['x'], moved['y'] - panel['y']), (-60, 48))
+        self.assertEqual((self.paint_windows()['one.png']['x'], self.paint_windows()['one.png']['y']), (w1['x'], w1['y']))
+        # a layer's row dragged from it onto the other window's picture
+        row = self.rows('lrow')[-1]
+        w2 = self.paint_windows()['two.png']
+        m = self.moved()
+        lay = m['layers']                                       # (the part of the second window that shows: its layers panel, which takes a drop too)
+        self.drag_screen((moved['x'] + int(row['x']) - 20000 + 120, moved['y'] + int(row['y']) + 20), (min(w2['x'] + int(lay['x']) + 150, 1015), w2['y'] + self.TOP + 230))
+        self.eventually(lambda: self.moved()['image']['layers'] == '3')
+        self.assertEqual(self.state()['image']['layers'], '2', 'the first picture keeps its layer')
         self.assertIsNone(p.poll())
 
     def test_the_only_picture_does_not_leave_its_window(self):

@@ -44,7 +44,16 @@ struct wlclip {
     uint32_t *drag_clean;               /* the icon as it was made (no badge), to put back when the action changes */
     int drag_iw, drag_ih, drag_k;       /* the icon's size in buffer pixels, and the buffer scale */
     uint32_t drag_action;               /* the action the badge shows: LM_DND_ACTION_COPY gets a green "+", anything else none */
+    /* a drag of the program's own kind, between its windows (wlclip_drag_own / wlclip_accept_own) */
+    const char *own_mime;
+    void (*own_event)(struct wlclip *c, int ev, double x, double y, bool main_surface, void *data);
+    void (*own_done)(struct wlclip *c, int how, void *data);
+    void *own_data;
+    bool own_source, own_dropped, own_target, own_on_main;
 };
+
+enum { WLCLIP_OWN_OVER, WLCLIP_OWN_LEAVE, WLCLIP_OWN_DROP };          /* what happens to a window that a drag of our kind is over */
+enum { WLCLIP_OWN_TAKEN, WLCLIP_OWN_NOWHERE, WLCLIP_OWN_OFF };       /* how our drag ended: a window took it, it was let go on nothing, it was called off (Esc) */
 
 void wlclip_global(struct wlclip *c, struct wlwin *w, uint32_t name, const char *iface, uint32_t ver);
 void wlclip_attach(struct wlclip *c, struct wlwin *w);
@@ -63,6 +72,15 @@ bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, con
  * the icon hangs at the pointer with the name on a chip under it, and is drawn over every window (the compositor paints the drag icon above everything). */
 bool wlclip_drag_files_pic(struct wlclip *c, const char *uris, const char *text, const char *label, const uint32_t *pic, int pw, int ph, int scale);
 bool wlclip_dragging(const struct wlclip *c);
+/* Drags between the windows of one program, of a kind of its own (`mime`, e.g. "application/x-app-tab"): no data travels, the program knows what it is
+ * carrying. Every window that calls wlclip_accept_own takes such a drag: `event` is told while it is over the window (surface coordinates; main_surface
+ * false = over one of its card windows) and when it is let go there. `done` tells the window the drag began in how it ended. */
+void wlclip_accept_own(struct wlclip *c, const char *mime, void (*event)(struct wlclip *c, int ev, double x, double y, bool main_surface, void *data),
+                       void (*done)(struct wlclip *c, int how, void *data), void *data);
+/* Frees what the clipboard of a window holds (before its wlwin_destroy, in a program whose windows come and go). */
+void wlclip_release(struct wlclip *c);
+/* Starts one (while the button is held, like wlclip_drag_files); `label` is on the little icon at the pointer. */
+bool wlclip_drag_own(struct wlclip *c, const char *label);
 /* Take drops of files: a drag of text/uri-list over the window is accepted (copy) and, when it is let go, `drop` gets the local paths (malloc'd, `n` of them,
  * freed by the library) and where the pointer was (surface pixels). Without a call a drag over the window is refused. Needs wlclip_attach to have worked. */
 /* `over` is told while an accepted drag is over the window: inside = true with its place at the enter and at every motion, false when it leaves or ends. Its own

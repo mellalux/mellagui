@@ -1853,6 +1853,8 @@ static void dnd_button(struct lm_seat *seat, uint32_t time_ms, uint32_t button, 
         dnd_end(seat);
         return;
     }
+    if (s && s->res && s->res->version >= 3)            /* let go where nothing takes it: the source hears that the drop was made (and not called off, as */
+        lm_resource_post(s->res, LM_WL_DATA_SOURCE_EVT_DND_DROP_PERFORMED);      /* with Esc) before it hears `cancelled`: a tab let go on the desktop */
     dnd_cancel(seat);
 }
 

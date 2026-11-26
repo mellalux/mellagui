@@ -10,6 +10,9 @@
 #include "protocol.h"
 #include "util.h"
 
+static char *g_proc_text;               /* the text this process copied last (any of its windows) ... */
+static char g_proc_mime[48];            /* ... and the type that marks an offer of it as ours: a pipe to our own source would never be answered */
+
 static void dsrc_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
 {
     struct wlclip *a = data;
@@ -171,7 +174,21 @@ static void ddev_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
     } else if (op == LM_WL_DATA_DEVICE_EVT_ENTER) {
         /* something is dragged over the window: a program that takes drops of files (wlclip_accept_drops) accepts a text/uri-list, the others let the offer go */
         offer_drop(c, &a->drop_offer);
-        if (args[4].o && args[4].o == a->offer_pending) {
+        a->own_target = false;
+        bool own = false;
+        for (int i = 0; a->own_event && args[4].o && args[4].o == a->offer_pending && i < a->n_pend_mimes; i++)
+            own = own || !strcmp(a->pend_mimes[i], a->own_mime);
+        if (own) {
+            a->drop_offer = a->offer_pending;
+            a->offer_pending = 0;
+            a->own_target = true;
+            a->own_on_main = args[1].o == a->win->surface;
+            a->drop_x = lm_fixed_to_double(args[2].f);
+            a->drop_y = lm_fixed_to_double(args[3].f);
+            WLC_SEND(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_SET_ACTIONS, { .u = LM_DND_ACTION_COPY | LM_DND_ACTION_MOVE }, { .u = LM_DND_ACTION_MOVE });
+            WLC_SEND(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_ACCEPT, { .u = args[0].u }, { .s = a->own_mime });
+            a->own_event(a, WLCLIP_OWN_OVER, a->drop_x, a->drop_y, a->own_on_main, a->own_data);
+        } else if (args[4].o && args[4].o == a->offer_pending) {
             bool uris = false;
             for (int i = 0; i < a->n_pend_mimes; i++)
                 uris = uris || !strcmp(a->pend_mimes[i], "text/uri-list");
@@ -192,12 +209,21 @@ static void ddev_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
     } else if (op == LM_WL_DATA_DEVICE_EVT_MOTION) {
         a->drop_x = lm_fixed_to_double(args[1].f);
         a->drop_y = lm_fixed_to_double(args[2].f);
-        if (a->drop_offer && a->drag_over)
+        if (a->drop_offer && a->own_target)
+            a->own_event(a, WLCLIP_OWN_OVER, a->drop_x, a->drop_y, a->own_on_main, a->own_data);
+        else if (a->drop_offer && a->drag_over)
             a->drag_over(a, true, a->drop_x, a->drop_y, a->drop_data);
     } else if (op == LM_WL_DATA_DEVICE_EVT_LEAVE) {
-        if (a->drop_offer && a->drag_over)
+        if (a->drop_offer && a->own_target)
+            a->own_event(a, WLCLIP_OWN_LEAVE, a->drop_x, a->drop_y, a->own_on_main, a->own_data);
+        else if (a->drop_offer && a->drag_over)
             a->drag_over(a, false, a->drop_x, a->drop_y, a->drop_data);
         offer_drop(c, &a->drop_offer);
+    } else if (op == LM_WL_DATA_DEVICE_EVT_DROP && a->drop_offer && a->own_target) {
+        a->own_event(a, WLCLIP_OWN_DROP, a->drop_x, a->drop_y, a->own_on_main, a->own_data);
+        WLC_SEND0(c, a->drop_offer, LM_WL_DATA_OFFER_REQ_FINISH);
+        offer_drop(c, &a->drop_offer);
+        wlc_roundtrip(c);                               /* (the finish is with the compositor before a window of ours that this emptied is destroyed) */
     } else if (op == LM_WL_DATA_DEVICE_EVT_DROP && a->drop_offer) {
         drop_receive(a);
     }
@@ -233,6 +259,10 @@ void wlclip_copy(struct wlclip *c, const char *text)
     WLC_SEND(w->c, c->ddm, LM_WL_DATA_DEVICE_MANAGER_REQ_CREATE_DATA_SOURCE, { .n = c->dsrc });
     WLC_SEND(w->c, c->dsrc, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = "text/plain;charset=utf-8" });
     WLC_SEND(w->c, c->dsrc, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = "text/plain" });
+    free(g_proc_text);
+    g_proc_text = strdup(text);
+    snprintf(g_proc_mime, sizeof(g_proc_mime), "application/x-mellagui-own-%ld", (long)getpid());
+    WLC_SEND(w->c, c->dsrc, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = g_proc_mime });
     WLC_SEND(w->c, c->ddev, LM_WL_DATA_DEVICE_REQ_SET_SELECTION, { .o = c->dsrc }, { .u = c->serial });
 }
 
@@ -244,6 +274,9 @@ char *wlclip_paste(struct wlclip *c, size_t *len_out)
     size_t len = 0;
     if (c->dsrc && c->out) {                                            /* our own copy: no round trip through the compositor */
         text = strdup(c->out);
+        len = text ? strlen(text) : 0;
+    } else if (c->offer && g_proc_text && wlclip_has_mime(c, g_proc_mime)) {      /* copied in another window of ours */
+        text = strdup(g_proc_text);
         len = text ? strlen(text) : 0;
     } else if (c->offer) {
         const char *mime = NULL;
@@ -450,8 +483,15 @@ static void drag_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_a
         close(args[1].h);                               /* (a handler owns the fds it is given: the reader sees the end of the data) */
     } else if (op == LM_WL_DATA_SOURCE_EVT_ACTION) {
         drag_badge(a, args[0].u);
+    } else if (op == LM_WL_DATA_SOURCE_EVT_DND_DROP_PERFORMED) {
+        a->own_dropped = true;
     } else if (op == LM_WL_DATA_SOURCE_EVT_CANCELLED || op == LM_WL_DATA_SOURCE_EVT_DND_FINISHED) {
+        bool own = a->own_source;
+        int how = op == LM_WL_DATA_SOURCE_EVT_DND_FINISHED ? WLCLIP_OWN_TAKEN : a->own_dropped ? WLCLIP_OWN_NOWHERE : WLCLIP_OWN_OFF;
+        a->own_source = false;
         drag_cleanup(a);
+        if (own && a->own_done)
+            a->own_done(a, how, a->own_data);
     }
 }
 
@@ -560,6 +600,7 @@ bool wlclip_drag_files_pic(struct wlclip *c, const char *uris, const char *text,
     struct wlwin *w = c->win;
     if (c->drag_src)                                    /* the last drop was never finished by its target: that drag is over */
         drag_cleanup(c);
+    c->own_source = false;
     c->drag_uris = strdup(uris);
     c->drag_text = strdup(text ? text : uris);
     if (!c->drag_uris || !c->drag_text) {
@@ -582,4 +623,41 @@ bool wlclip_drag_files_pic(struct wlclip *c, const char *uris, const char *text,
 bool wlclip_drag_files(struct wlclip *c, const char *uris, const char *text, const char *label)
 {
     return wlclip_drag_files_pic(c, uris, text, label, NULL, 0, 0, 1);
+}
+
+void wlclip_accept_own(struct wlclip *c, const char *mime, void (*event)(struct wlclip *c, int ev, double x, double y, bool main_surface, void *data),
+                       void (*done)(struct wlclip *c, int how, void *data), void *data)
+{
+    c->own_mime = mime;
+    c->own_event = event;
+    c->own_done = done;
+    c->own_data = data;
+}
+
+bool wlclip_drag_own(struct wlclip *c, const char *label)
+{
+    if (!c->win || !c->ddm || !c->ddev || !c->own_mime)
+        return false;
+    struct wlwin *w = c->win;
+    if (c->drag_src)
+        drag_cleanup(c);
+    bool icon = drag_icon(c, label, NULL, 0, 0, w->scale > 1 ? w->scale : 1);
+    c->own_source = true;
+    c->own_dropped = false;
+    c->drag_src = wlc_alloc(w->c, &lm_wl_data_source_interface, drag_event, c);
+    WLC_SEND(w->c, c->ddm, LM_WL_DATA_DEVICE_MANAGER_REQ_CREATE_DATA_SOURCE, { .n = c->drag_src });
+    WLC_SEND(w->c, c->drag_src, LM_WL_DATA_SOURCE_REQ_OFFER, { .s = c->own_mime });
+    WLC_SEND(w->c, c->drag_src, LM_WL_DATA_SOURCE_REQ_SET_ACTIONS, { .u = LM_DND_ACTION_COPY | LM_DND_ACTION_MOVE });
+    WLC_SEND(w->c, c->ddev, LM_WL_DATA_DEVICE_REQ_START_DRAG, { .o = c->drag_src }, { .o = w->surface },
+             { .o = icon ? c->drag_surf : 0 }, { .u = c->ptr_serial ? c->ptr_serial : c->serial });
+    wlc_flush(w->c);
+    return true;
+}
+
+void wlclip_release(struct wlclip *c)
+{
+    if (c->win && c->win->c)
+        drag_cleanup(c);
+    free(c->out);
+    c->out = NULL;
 }

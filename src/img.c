@@ -312,6 +312,7 @@ static void fail(char *err, size_t n, const char *msg)
 }
 
 static int g_keep_alpha;                                /* lm_img_load_alpha: PNG pixels keep their alpha (ARGB, not premultiplied) */
+static int g_real_alpha;                                /* the decoder wrote an alpha for every pixel: a picture that is all see-through really is */
 
 static uint32_t over_checker(int x, int y, int r, int g, int b, int a)
 {
@@ -484,6 +485,7 @@ static int decode_png(const uint8_t *d, size_t len, struct lm_image *img, char *
     img->h = (int)h;
     img->px = px;
     px = NULL;
+    g_real_alpha = 1;
     rc = 0;
 out:
     free(idat);
@@ -1649,9 +1651,10 @@ int lm_img_load(const char *path, struct lm_image *img, char *err, size_t errsz)
 int lm_img_load_alpha(const char *path, struct lm_image *img, char *err, size_t errsz)
 {
     g_keep_alpha = 1;
+    g_real_alpha = 0;
     int rc = lm_img_load(path, img, err, errsz);
     g_keep_alpha = 0;
-    if (rc == 0 && img->px) {                           /* JPEG and PPM have no alpha: make them opaque */
+    if (rc == 0 && img->px && !g_real_alpha) {          /* JPEG and PPM have no alpha: make them opaque (not an empty PNG: that one is see-through) */
         size_t n = (size_t)img->w * (size_t)img->h;
         if (!(img->px[0] >> 24) && !(img->px[n - 1] >> 24)) {
             bool any = false;

@@ -291,7 +291,7 @@ void damage_frame(struct lm_wm *wm, const struct lm_window *w)
     struct lm_rect r = frame_outer(w);
     damage_rect(wm, &r);
     if (!win_is_card(w))
-        cards_follow(wm, w);                                    /* (whatever moved, hid or showed the window is followed here) */
+        cards_follow(wm, w);                                    /* (whatever moved, hid or showed the window is looked after here) */
 }
 
 void cards_follow(struct lm_wm *wm, const struct lm_window *w)
@@ -302,9 +302,12 @@ void cards_follow(struct lm_wm *wm, const struct lm_window *w)
             continue;
         struct lm_rect r = frame_outer(c);
         damage_rect(wm, &r);
-        if (!(wm->grab_kind == GRAB_MOVE && wm->grab_win == c)) {
-            c->x = w->x + WIN(c)->card_x;
-            c->y = w->y + WIN(c)->card_y;
+        /* A card (a dialog, a floating panel, a tool panel) stays where it is on the screen when its window is moved: only its offset from the window's corner is
+         * noted, and from then on it counts as put there. */
+        if (!(wm->grab_kind == GRAB_MOVE && wm->grab_win == c) && (c->x != w->x + WIN(c)->card_x || c->y != w->y + WIN(c)->card_y)) {
+            WIN(c)->card_x = c->x - w->x;
+            WIN(c)->card_y = c->y - w->y;
+            WIN(c)->card_moved = true;
         }
         c->workspace = w->workspace;
         r = frame_outer(c);
@@ -778,6 +781,30 @@ void lm_wm_config_changed(struct lm_wm *wm)
     lm_wm_output_changed(wm, NULL);
 }
 
+/* A card that does not go where its window goes may be left where no screen is any more: it comes back over its window. */
+static void cards_rescue(struct lm_wm *wm)
+{
+    struct lm_window *c;
+    lm_list_for_each(c, &wm->windows, link) {
+        if (!win_is_card(c) || !c->parent || !c->mapped)
+            continue;
+        struct lm_rect r = frame_outer(c);
+        bool seen = false;
+        struct lm_output *o;
+        lm_list_for_each(o, &wm->srv->backend->outputs, link) {
+            struct lm_rect orect = lm_output_rect(o);
+            seen = seen || lm_rect_overlaps(&r, &orect);
+        }
+        if (seen)
+            continue;
+        damage_rect(wm, &r);
+        WIN(c)->card_placed = WIN(c)->card_moved = false;
+        card_arrange(wm, c);
+        damage_frame(wm, c);
+        update_outputs(wm, c);
+    }
+}
+
 void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)
 {
     (void)out;
@@ -789,6 +816,7 @@ void lm_wm_output_changed(struct lm_wm *wm, struct lm_output *out)
         overview_finish(wm);                                    /* its output went away */
     else
         overview_changed(wm);
+    cards_rescue(wm);
     desktop_fit(wm);                                            /* the icons cover the output under the panel */
     if (wm->desk_started)
         lm_wm_desktops_sync(wm);                                /* a desktop for every output */

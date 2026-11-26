@@ -37,6 +37,12 @@ static int content_w(const struct wlwin *w)
     return LM_MAX(content_len(w, w->w) - w->inx, 1);
 }
 
+/* The drawing area's height: the window's, divided by the zoom, less the top strip's. */
+static int content_h(const struct wlwin *w)
+{
+    return LM_MAX(content_len(w, w->h) - w->iny, 1);
+}
+
 static int P(double f, int v)
 {
     return (int)lround(v * f);
@@ -45,6 +51,12 @@ static int P(double f, int v)
 void wlwin_set_inset(struct wlwin *w, int left)
 {
     w->inx = LM_MAX(left, 0);
+    w->redraw = true;
+}
+
+void wlwin_set_top(struct wlwin *w, int top)
+{
+    w->iny = LM_MAX(top, 0);
     w->redraw = true;
 }
 
@@ -64,7 +76,7 @@ static void setup_buffer(struct wlwin *w)
     if (w->pixels)
         munmap(w->pixels, w->map_size);
     w->bw = content_w(w);
-    w->bh = content_len(w, w->h);
+    w->bh = content_h(w);
     w->scale = 1;
     if (w->hidpi)
         for (int i = 0; i < w->nout; i++)                       /* the biggest scale of any screen: a window may be dragged to it */
@@ -286,7 +298,7 @@ bool wlwin_pane_begin(struct wlwin *w, int i, int x, int y, int width, int heigh
     p->h = height;
     p->r = radius;
     p->modal = modal;
-    int ax = at_x + w->inx, ay = at_y;
+    int ax = at_x + w->inx, ay = at_y + w->iny;
     if (p->surface && (ax != p->at_x || ay != p->at_y)) {
         p->at_x = ax;
         p->at_y = ay;
@@ -300,6 +312,7 @@ bool wlwin_pane_begin(struct wlwin *w, int i, int x, int y, int width, int heigh
     w->main_pw = w->pw;
     w->main_ph = w->ph;
     w->main_inx = w->inx;
+    w->main_iny = w->iny;
     w->pixels = p->img;
     w->pw = sw;
     w->ph = sh;
@@ -337,7 +350,7 @@ void wlwin_pane_end(struct wlwin *w)
     w->pw = w->main_pw;
     w->ph = w->main_ph;
     w->inx = w->main_inx;
-    w->iny = 0;
+    w->iny = w->main_iny;
     w->cur_pane = -1;
     for (size_t k = 0, n = (size_t)p->sw * (size_t)p->sh; k < n; k++)
         p->img[k] |= 0xff000000u;                                       /* (what was blended may have lost its alpha) */
@@ -385,7 +398,7 @@ static void panes_commit(struct wlwin *w)
 
 static void draw(struct wlwin *w)
 {
-    if (w->bw != content_w(w) || w->bh != content_len(w, w->h) || w->pw != w->w * w->scale || !w->pixels || w->scale != wanted_scale(w)) {
+    if (w->bw != content_w(w) || w->bh != content_h(w) || w->pw != w->w * w->scale || !w->pixels || w->scale != wanted_scale(w)) {
         setup_buffer(w);
         WLC_SEND(w->c, w->surface, LM_WL_SURFACE_REQ_SET_BUFFER_SCALE, { .i = w->scale });
     }
@@ -554,12 +567,13 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
             m[a].f = lm_fixed_from_double(card->x + w->rpx);
             m[a + 1].f = lm_fixed_from_double(card->y + w->rpy);
             w->rpx = 100000.0;                                          /* (not over a rail at the left) */
-        } else if (card->surface && card->modal && w->rpx - w->inx >= card->x && w->rpx - w->inx < card->x + card->w && w->rpy >= card->y && w->rpy < card->y + card->h) {
+        } else if (card->surface && card->modal && w->rpx - w->inx >= card->x && w->rpx - w->inx < card->x + card->w && w->rpy - w->iny >= card->y &&
+                   w->rpy - w->iny < card->y + card->h) {
             m[a].f = lm_fixed_from_double(-10000.0);                    /* on the window, where the card was drawn but is not: outside it */
             m[a + 1].f = lm_fixed_from_double(-10000.0);
-        } else if (z != 1.0 || w->inx) {
+        } else if (z != 1.0 || w->inx || w->iny) {
             m[a].f = lm_fixed_from_double(w->rpx - w->inx);
-            m[a + 1].f = lm_fixed_from_double(w->rpy);
+            m[a + 1].f = lm_fixed_from_double(w->rpy - w->iny);
         }
     }
     w->ops->pointer(w, op, args);

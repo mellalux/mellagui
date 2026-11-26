@@ -14408,6 +14408,7 @@ class TestPaint(Base):
     """mellagui-paint: the picture editor. The engine through `--apply` (compared with Pillow), the window through its dump."""
     PAINT = os.environ.get('MELLAGUI_PAINT_BIN', os.path.join(ROOT, 'build', 'mellagui-paint'))
     KEY_Z, KEY_S, KEY_N, KEY_O, KEY_A, KEY_P, KEY_E, KEY_DELETE = 44, 31, 49, 24, 30, 25, 18, 111
+    TOP = 24                                    # the tabs lie above the drawing area: the dump's y is counted from under them
 
     def setUp(self):
         super().setUp()
@@ -14578,12 +14579,12 @@ class TestPaint(Base):
         z = int(st['state']['zoom']) / 100.0
         w = ctl.windows()['windows']
         win = [x for x in w if x['app_id'] == 'mellagui.paint'][0]
-        return win['x'] + int(cv['x']) + float(cv['vx']) + ix * z, win['y'] + float(cv['vy']) + iy * z
+        return win['x'] + int(cv['x']) + float(cv['vx']) + ix * z, win['y'] + self.TOP + float(cv['vy']) + iy * z
 
     def click_button(self, st, name):
         win = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
         x, y, w, h = st['btn'][name]
-        ctl.click(win['x'] + x + w // 2, win['y'] + y + h // 2)
+        ctl.click(win['x'] + x + w // 2, win['y'] + self.TOP + y + h // 2)
 
     def chord(self, code, *mods):
         for m in mods:
@@ -14687,9 +14688,20 @@ class TestPaint(Base):
                 return r
         self.fail('no %s %s line in %r' % (prefix, ident, open(self.dump).read()))
 
+    def eventually(self, pred, timeout=4.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                if pred():
+                    return
+            except (KeyError, IndexError, ValueError, OSError):
+                pass
+            time.sleep(0.03)
+        self.fail('it never became so')
+
     def win_xy(self):
         w = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
-        return w['x'], w['y']
+        return w['x'], w['y'] + self.TOP
 
     def click_at(self, x, y, button=272):
         wx, wy = self.win_xy()
@@ -14897,7 +14909,7 @@ class TestPaint(Base):
     def test_ora_keeps_the_layers_and_opens_again(self):
         import zipfile
         out = os.path.join(tmp, 'paint-layers.ora')
-        self.start('--new', '30x20')
+        p = self.start('--new', '30x20')
         st = self.wait(lambda s: s['image']['w'] == '30')
         self.click_box(self.row('lbtn', 'New'))
         st = self.wait(lambda s: s['image']['layers'] == '2')
@@ -14920,22 +14932,21 @@ class TestPaint(Base):
         self.assertEqual(top.getpixel((10, 10)), (0, 0, 0, 255))
         self.assertEqual(top.getpixel((10, 2))[3], 0)                                         # the new layer was empty round the line
         self.assertEqual(Image.open(io.BytesIO(z.read('mergedimage.png'))).size, (30, 20))
-        hashes = [r['hash'] for r in self.rows('layer')]
+        drawn, whole = self.rows('layer')[1]['hash'], self.state()['image']['hash']
         # open it again: the layers, their opacity and their pixels are all there
-        self.chord(self.KEY_N, KEY_LEFTCTRL)                                                  # (a new picture so that Open below is a real change)
-        self.wait(lambda s: s['state']['prompt'] in ('3', '5'))
-        if self.state()['state']['prompt'] == '5':
-            ctl.tap(32)
-        self.wait(lambda s: s['state']['prompt'] == '3')
-        ctl.tap(KEY_ESC)
-        self.wait(lambda s: s['state']['prompt'] == '0')
+        self.chord(KEYCODES['w'], KEY_LEFTCTRL)                                               # close the only picture (it is saved): the window goes
+        self.assertEqual(p.wait(timeout=5), 0)
+        self.eventually(lambda: not any(w['app_id'] == 'mellagui.paint' for w in ctl.windows()['windows']))
+        self.start('--new', '8x8')
+        self.wait(lambda s: s['image']['w'] == '8')
         self.chord(24, KEY_LEFTCTRL)                                                          # Ctrl+O, type the path
         self.wait(lambda s: s['state']['prompt'] == '1')
         self.chord(KEYCODES['a'], KEY_LEFTCTRL)
         self.type_text(out)
         ctl.tap(KEY_ENTER)
         st = self.wait(lambda s: s['image']['layers'] == '2' and s['image']['path'] == out)
-        self.assertEqual([r['hash'] for r in self.rows('layer')], hashes)
+        self.assertEqual(self.rows('layer')[1]['hash'], drawn)                                # (an empty layer's see-through pixels may come back with other colours)
+        self.assertEqual(st['image']['hash'], whole)
         self.assertEqual(self.rows('layer')[1]['opacity'], str(opacity))
 
     def test_text_is_typed_on_the_picture_and_put_down(self):
@@ -14991,11 +15002,11 @@ class TestPaint(Base):
             self.assertTrue(path.startswith(base + '.'), path)
             self.chord(self.KEY_S, KEY_LEFTCTRL, KEY_LEFTSHIFT)
             st = self.wait(lambda s: s['state']['prompt'] in ('2', '6'))
-            if st['state']['prompt'] == '2':
-                pass
             if self.state()['state']['prompt'] == '6':                                        # (the same name again: asked before it is replaced - not here, it is the file's own name)
                 ctl.tap(KEY_ENTER)
                 self.wait(lambda s: s['state']['prompt'] == '2')
+            self.assertIsNotNone(card_window(ctl, 'mellagui.paint'))                          # the card is a window: a click before it is there would be one beside it
+            time.sleep(0.15)
         ctl.tap(KEY_ESC)
 
     def test_a_name_given_on_the_command_line_decides_the_format(self):
@@ -16022,7 +16033,7 @@ class TestPaint(Base):
         self.wait(lambda s: s['image']['w'] == '80')
         wx, wy = self.win_xy()
         shot = os.path.join(tmp, 'paint-float.ppm')
-        probes = ((70, 120), (26, 250), (150, 60))                                            # the rail and the sheet's surroundings, outside where the panel goes
+        probes = ((70, 120), (26, 250), (60, 12))                                             # the rail and the sheet's surroundings, outside where the panel goes
         before = [ctl.dump(shot).px(wx + x, wy + y) for x, y in probes]
         self.click_button(self.state(), 'Effects')
         self.wait(lambda s: s['state']['prompt'] == '14')
@@ -16499,20 +16510,238 @@ class TestPaint(Base):
         self.assertEqual(st['image']['h'], '25')
 
     def test_changes_are_not_thrown_away_without_asking(self):
-        self.start('--new', '30x30')
+        p = self.start('--new', '30x30')
         st = self.wait(lambda s: s['image']['w'] == '30')
         self.drag(st, (5, 5), (20, 20))
         st = self.wait(lambda s: s['image']['modified'] == '1')
-        self.chord(self.KEY_N, KEY_LEFTCTRL)                                                  # a new picture: asks first
-        st = self.wait(lambda s: s['state']['prompt'] == '5')
+        self.chord(self.KEY_N, KEY_LEFTCTRL)                                                  # a new picture is a new tab: nothing is lost, nothing is asked
+        self.wait(lambda s: s['state']['prompt'] == '3')
+        ctl.tap(KEY_ENTER)
+        self.wait(lambda s: s['tabs']['n'] == '2' and s['tabs']['cur'] == '1' and s['image']['modified'] == '0')
+        self.chord(KEYCODES['q'], KEY_LEFTCTRL)                                               # quit: the changed picture comes to the front and is asked about
+        self.wait(lambda s: s['state']['prompt'] == '5' and s['tabs']['cur'] == '0')
         ctl.tap(KEY_ESC)                                                                      # Cancel
         st = self.wait(lambda s: s['state']['prompt'] == '0')
-        self.assertEqual((st['image']['w'], st['image']['modified']), ('30', '1'))
-        self.chord(self.KEY_N, KEY_LEFTCTRL)
+        self.assertEqual((st['tabs']['n'], st['image']['modified']), ('2', '1'))
+        self.chord(KEYCODES['w'], KEY_LEFTCTRL)                                               # close it: asks too
         self.wait(lambda s: s['state']['prompt'] == '5')
-        ctl.tap(32)                                                                           # D: discard, and the size card of the new picture comes
-        st = self.wait(lambda s: s['state']['prompt'] == '3')
+        ctl.tap(32)                                                                           # D: discard, the tab goes
+        st = self.wait(lambda s: s['tabs']['n'] == '1' and s['state']['prompt'] == '0')
         self.assertEqual(st['image']['modified'], '0')
+        self.assertIsNone(p.poll())
+        self.chord(KEYCODES['q'], KEY_LEFTCTRL)                                               # nothing unsaved: it ends
+        self.assertEqual(p.wait(timeout=5), 0)
+
+    def test_giving_up_at_a_later_picture_keeps_the_earlier_changes(self):
+        p = self.start('--new', '30x30')
+        st = self.wait(lambda s: s['image']['w'] == '30')
+        self.drag(st, (5, 5), (20, 20))
+        self.wait(lambda s: s['image']['modified'] == '1')
+        self.chord(self.KEY_N, KEY_LEFTCTRL)
+        self.wait(lambda s: s['state']['prompt'] == '3')
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: s['tabs']['n'] == '2' and s['image']['modified'] == '0')
+        self.drag(st, (5, 5), (20, 20))
+        self.wait(lambda s: s['image']['modified'] == '1')
+        self.chord(KEYCODES['q'], KEY_LEFTCTRL)
+        self.wait(lambda s: s['state']['prompt'] == '5' and s['tabs']['cur'] == '1')
+        ctl.tap(32)                                                                           # discard this one ...
+        self.wait(lambda s: s['state']['prompt'] == '5' and s['tabs']['cur'] == '0')
+        ctl.tap(KEY_ESC)                                                                      # ... and give up at the other: both are still unsaved
+        self.wait(lambda s: s['state']['prompt'] == '0')
+        self.assertEqual([t['modified'] for t in self.rows('tab')], ['1', '1'])
+        self.assertIsNone(p.poll())
+
+    def two_pictures(self):
+        """A 60 x 40 white picture with a name and a 20 x 10 red one."""
+        from PIL import Image
+        d = tempfile.mkdtemp(prefix='paint-tabs-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        one, two = os.path.join(d, 'one.png'), os.path.join(d, 'two.png')
+        Image.new('RGB', (60, 40), (255, 255, 255)).save(one)
+        Image.new('RGB', (20, 10), (255, 0, 0)).save(two)
+        return d, one, two
+
+    def tab_xy(self, i):
+        t = self.rows('tab')[i]
+        return int(t['x']) + int(t['w']) // 2 - 10, int(t['y']) + int(t['h']) // 2
+
+    def carry(self, a, b):
+        wx, wy = self.win_xy()
+        ctl.abs(wx + int(a[0]), wy + int(a[1]))
+        time.sleep(0.05)
+        ctl.button(272, True)
+        for i in range(1, 5):
+            ctl.abs(wx + int(a[0] + (b[0] - a[0]) * i / 4), wy + int(a[1] + (b[1] - a[1]) * i / 4))
+            time.sleep(0.03)
+        ctl.button(272, False)
+
+    def test_several_files_open_in_tabs_with_their_names(self):
+        d, one, two = self.two_pictures()
+        p = self.start(one, two, one)                                                         # (a file named twice is one tab)
+        st = self.wait(lambda s: s['tabs']['n'] == '2' and s['image']['path'] == one)
+        self.assertEqual([t['name'] for t in self.rows('tab')], ['one.png', 'two.png'])
+        self.assertEqual(wait_for_window('mellagui.paint')['title'], 'one.png - Paint')
+        self.click_at(*self.tab_xy(1))
+        self.wait(lambda s: s['tabs']['cur'] == '1' and s['image']['path'] == two and s['image']['w'] == '20')
+        self.chord(KEY_TAB, KEY_LEFTCTRL)
+        self.wait(lambda s: s['tabs']['cur'] == '0')
+        self.chord(KEYCODES['2'], KEY_LEFTALT)
+        st = self.wait(lambda s: s['tabs']['cur'] == '1')
+        self.drag(st, (2, 2), (15, 2))                                                        # each picture has its own changes and undo
+        self.wait(lambda s: s['image']['modified'] == '1' and s['state']['undo'] == '1')
+        self.assertEqual([t['modified'] for t in self.rows('tab')], ['0', '1'])
+        self.chord(KEYCODES['1'], KEY_LEFTALT)
+        self.wait(lambda s: s['state']['undo'] == '0' and s['image']['modified'] == '0')
+        self.carry(self.tab_xy(1), self.tab_xy(0))                                            # a tab dragged along the bar changes places
+        self.wait(lambda s: [t['name'] for t in self.rows('tab')] == ['two.png', 'one.png'])
+        self.assertEqual(self.state()['image']['path'], one)
+        self.assertEqual(self.state()['tabs']['cur'], '1')
+        self.click_at(*self.tab_xy(1), button=274)                                            # the middle button closes an unchanged one at once
+        self.wait(lambda s: s['tabs']['n'] == '1' and s['image']['path'] == two)
+        self.click_box(self.row('tabplus'))
+        self.wait(lambda s: s['state']['prompt'] == '3')
+        ctl.tap(KEY_ENTER)
+        self.wait(lambda s: s['tabs']['n'] == '2' and s['image']['path'] == '-')
+        self.assertEqual(self.rows('tab')[1]['name'], 'Untitled')
+        self.assertIsNone(p.poll())
+
+    def test_pictures_are_combined_between_tabs(self):
+        d, one, two = self.two_pictures()
+        self.start(one, two)
+        self.wait(lambda s: s['tabs']['n'] == '2' and s['image']['w'] == '60')
+        # copy in one, paste in the other
+        self.click_at(*self.tab_xy(1))
+        self.wait(lambda s: s['tabs']['cur'] == '1')
+        self.chord(self.KEY_A, KEY_LEFTCTRL)
+        self.chord(KEYCODES['c'], KEY_LEFTCTRL)
+        self.click_at(*self.tab_xy(0))
+        self.wait(lambda s: s['tabs']['cur'] == '0')
+        self.chord(KEYCODES['v'], KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['layers'] == '2')
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        st = self.wait(lambda s: s['image']['layers'] == '1')
+        # the other tab dragged onto the picture: a layer where it is let go
+        x, y = self.screen(st, 40, 20)
+        wx, wy = self.win_xy()
+        self.carry(self.tab_xy(1), (x - wx, y - wy))
+        self.wait(lambda s: s['image']['layers'] == '2')
+        self.assertEqual(self.rows('layer')[1]['name'], 'two.png')
+        self.assertEqual(self.state()['tabs']['cur'], '0', 'the picture in front stays in front')
+        out = os.path.join(d, 'both.png')
+        self.save_as(out)
+        from PIL import Image
+        got = Image.open(out).convert('RGB')
+        self.assertEqual(got.getpixel((40, 20)), (255, 0, 0))
+        self.assertEqual(got.getpixel((31, 16)), (255, 0, 0))                                 # 20 x 10, its middle where it was let go
+        self.assertEqual(got.getpixel((20, 20)), (255, 255, 255))
+        # a layer's row dragged onto the other tab: the layer is copied there
+        row = self.rows('lrow')[0]
+        self.carry((int(row['x']) + 120, int(row['y']) + 20), self.tab_xy(1))
+        self.wait(lambda s: [t['modified'] for t in self.rows('tab')][1] == '1')
+        self.assertEqual(self.state()['tabs']['cur'], '0')
+        self.click_at(*self.tab_xy(1))
+        self.wait(lambda s: s['tabs']['cur'] == '1' and s['image']['layers'] == '2' and s['state']['undo'] == '1')
+        # the menu of the other tab: all its layers, in a group
+        self.click_at(*self.tab_xy(0), button=273)
+        def entry(label):
+            self.eventually(lambda: any(label in l for l in ctl.cmd('dockmenu')))
+            l = [l for l in ctl.cmd('dockmenu') if l.startswith('entry') and label in l][0]
+            kv = dict(x.split('=') for x in l.split() if x.startswith(('x=', 'y=')))
+            ctl.click(int(kv['x']) + 10, int(kv['y']) + 10)
+        entry('Add all its layers here')
+        self.wait(lambda s: s['image']['layers'] == '4')
+        self.assertEqual([r['group'] != '0' for r in self.rows('layer')], [False, False, True, True])
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['layers'] == '2')
+        # the difference, and a copy of the picture
+        self.click_at(*self.tab_xy(0), button=273)
+        entry('difference')
+        self.wait(lambda s: s['image']['layers'] == '3' and any(r['blend'] == 'Difference' for r in self.rows('layer')))
+        self.click_at(*self.tab_xy(1), button=273)
+        entry('Duplicate')
+        self.wait(lambda s: s['tabs']['n'] == '3' and s['tabs']['cur'] == '2' and s['image']['layers'] == '3')
+        self.click_at(*self.tab_xy(2), button=273)
+        entry('Add the other pictures here as layers')
+        self.wait(lambda s: s['image']['layers'] == '5')
+
+    def test_a_picture_moves_into_a_window_of_its_own(self):
+        d, one, two = self.two_pictures()
+        p = self.start(one, two)
+        st = self.wait(lambda s: s['tabs']['n'] == '2' and s['image']['w'] == '60')
+        def adopted():
+            """The processes that took a picture over from this test's compositor."""
+            found = []
+            for n in os.listdir('/proc'):
+                try:
+                    if n.isdigit() and b'--adopt\0' + os.environ['XDG_RUNTIME_DIR'].encode() in open('/proc/%s/cmdline' % n, 'rb').read():
+                        found.append(int(n))
+                except OSError:
+                    pass
+            return found
+        def end_adopted():
+            for pid in adopted():
+                os.kill(pid, signal.SIGKILL)
+            self.eventually(lambda: not any(w['app_id'] == 'mellagui.paint' for w in ctl.windows()['windows'] if w['title'].startswith('two.png')))
+        self.addCleanup(end_adopted)
+        self.click_at(*self.tab_xy(1))
+        st = self.wait(lambda s: s['tabs']['cur'] == '1')
+        self.click_box(self.row('lbtn', 'New'))                                               # a second layer with a line: unsaved changes
+        st = self.wait(lambda s: s['image']['layers'] == '2')
+        self.drag(st, (2, 2), (15, 2))
+        st = self.wait(lambda s: s['image']['modified'] == '1')
+        whole = st['image']['hash']
+        self.click_at(*self.tab_xy(0))
+        self.wait(lambda s: s['tabs']['cur'] == '0')
+        wx, wy = self.win_xy()
+        win = wait_for_window('mellagui.paint')
+        self.carry(self.tab_xy(1), (win['w'] + 60, 100))                                      # its tab pulled out of the window
+        self.wait(lambda s: s['tabs']['n'] == '1' and s['image']['path'] == one)
+        self.eventually(lambda: sorted(w['title'] for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.paint') == ['one.png - Paint', 'two.png * - Paint'])
+        def moved():
+            out = {}
+            for l in open(self.dump + '.moved').read().splitlines():
+                f = l.split()
+                out[f[0]] = dict(x.split('=', 1) for x in f[1:] if '=' in x)
+            return out
+        self.eventually(lambda: moved()['image']['layers'] == '2')
+        m = moved()['image']
+        self.assertEqual((m['path'], m['modified'], m['cur'], m['hash']), (two, '1', '1', whole))
+        self.assertIsNone(p.poll())
+
+    def test_the_only_picture_does_not_leave_its_window(self):
+        self.start('--new', '30x30')
+        self.wait(lambda s: s['tabs']['n'] == '1')
+        win = wait_for_window('mellagui.paint')
+        self.carry(self.tab_xy(0), (win['w'] + 60, 100))
+        time.sleep(0.4)
+        self.assertEqual(len([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.paint']), 1)
+        self.assertEqual(self.state()['tabs']['n'], '1')
+
+    def test_the_open_card_marks_several_files(self):
+        d, one, two = self.two_pictures()
+        self.start('--new', '10x10')
+        self.wait(lambda s: s['image']['w'] == '10')
+        self.chord(24, KEY_LEFTCTRL)
+        self.wait(lambda s: s['state']['prompt'] == '1')
+        self.chord(KEYCODES['a'], KEY_LEFTCTRL)
+        self.type_text(d + '/')
+        self.wait(lambda s: int(s['clist']['count']) == 3)
+        def rows():
+            return {l.split('name=', 1)[1]: l for l in open(self.dump).read().splitlines() if l.startswith('crow ')}
+        lx = int([l for l in open(self.dump).read().splitlines() if l.startswith('clist ')][0].split()[1])
+        def click_row(name):
+            y = int(rows()[name].split('y=')[1].split()[0])
+            self.click_at(lx + 60, y + 10)
+        click_row('one.png')
+        ctl.key(KEY_LEFTCTRL, True)
+        click_row('two.png')
+        ctl.key(KEY_LEFTCTRL, False)
+        self.eventually(lambda: all('mark=1' in rows()[n] for n in ('one.png', 'two.png')))
+        ctl.tap(KEY_ENTER)
+        self.wait(lambda s: s['state']['prompt'] == '0' and s['tabs']['n'] == '3')
+        self.assertEqual([t['name'] for t in self.rows('tab')], ['Untitled', 'one.png', 'two.png'])
+        self.assertEqual(self.state()['image']['path'], one)
 
     def test_the_wheel_zooms_and_the_middle_button_moves_the_picture(self):
         self.start('--new', '400x300')
@@ -20234,9 +20463,10 @@ class TestBlocks(Base):
         moved = self.own('card')
         self.assertEqual((moved['x'] - card['x'], moved['y'] - card['y']), (300, 80))
         self.assertGreater(moved['x'] + moved['w'], main['x'] + main['w'], 'part of it is outside the game window')
-        self.carry(main['x'] + 100, main['y'] - 12, 40, 20)     # the game window is dragged by its title bar: the card goes along
+        self.carry(main['x'] + 100, main['y'] - 12, 40, 20)     # the game window is dragged by its title bar: the card stays where it is
+        self.assertEqual((wait_for_window('mellagui.blocks')['x'], wait_for_window('mellagui.blocks')['y']), (main['x'] + 40, main['y'] + 20))
         after = self.own('card')
-        self.assertEqual((after['x'] - moved['x'], after['y'] - moved['y']), (40, 20))
+        self.assertEqual((after['x'], after['y']), (moved['x'], moved['y']))
         b = self.state()['cbtn']
         play = b[max(b)]                                        # a button works where the card is now
         view = self.view(wait_for_window('mellagui.blocks'))
@@ -20260,6 +20490,10 @@ class TestBlocks(Base):
         moved = self.own('tool')
         self.assertEqual((moved['x'] - panel['x'], moved['y'] - panel['y']), (-150, 30))
         self.assertEqual((self.state()['cmd']['on'], self.state()['state']['playing']), ('1', '1'), 'carrying it neither pauses the game nor orders anything')
+        main = wait_for_window('mellagui.blocks')
+        self.carry(main['x'] + 100, main['y'] - 12, 40, 20)     # the game window is dragged by its title bar: the panel stays where it is
+        self.assertEqual((wait_for_window('mellagui.blocks')['x'], wait_for_window('mellagui.blocks')['y']), (main['x'] + 40, main['y'] + 20))
+        self.assertEqual((self.own('tool')['x'], self.own('tool')['y']), (moved['x'], moved['y']))
         self.tap('i')
         self.until(lambda: not self.own('tool'))
         self.assertEqual(self.state()['panel']['on'], '0')

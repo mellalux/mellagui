@@ -107,7 +107,7 @@ struct wlwin {
     bool no_panes;                  /* set by a program whose cards stay inside its window (the desktop) */
     int iny;                        /* (while a pane is painted: the y its picture starts at, negated; inx likewise) */
     uint32_t *main_px;              /* (and the window's own drawing target, put aside) */
-    int main_pw, main_ph, main_inx;
+    int main_pw, main_ph, main_inx, main_iny;
     uint32_t button_serial;         /* of the last button press: a pane is carried with it */
     bool card_float;                /* set by a program while it draws a card that floats: the window stays in use, and the card keeps the place it was carried to */
 };
@@ -210,6 +210,10 @@ void wlwin_dim(struct wlwin *w, double t);
  * smaller, every wlwin_* call is shifted, pointer positions are too), and keeps the rail to itself: it paints it with wlrail_paint (which draws in window
  * pixels) and finds the pointer over it through w->rpx / w->rpy. Call before wlwin_open (the default and minimum width grow by `left`). */
 void wlwin_set_inset(struct wlwin *w, int left);
+/* A strip at the top of the window that is not part of the drawing area (a tab bar): bh is smaller by it, drawing is shifted down and the pointer's y up by it,
+ * so the program paints the strip at negative y. Unlike the left inset it is taken from the window's height. Call it after wlwin_connect() (which clears the window), before
+ * wlwin_open(). */
+void wlwin_set_top(struct wlwin *w, int top);
 /* The scale factor of the buffer (1 when the program is not hidpi or the screen is not scaled): a program that makes pictures for its window
  * (an image viewer, a camera) makes them wlwin_scale() times as big as their logical size and puts them with wlwin_blit_px. */
 static inline int wlwin_scale(const struct wlwin *w) { return w->scale > 1 ? w->scale : 1; }

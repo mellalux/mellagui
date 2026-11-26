@@ -38,6 +38,7 @@
 #include <ftw.h>
 #include <limits.h>
 #include <math.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -45,6 +46,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -69,6 +71,7 @@
 #include "wlcard.h"
 #include "wlpicker.h"
 #include "wlsbar.h"
+#include "wltabs.h"
 #include "wlrail.h"
 #include "wltext.h"
 #include "wlwin.h"
@@ -2663,7 +2666,7 @@ static const uint32_t QUICK[N_QUICK] = {
 };
 
 enum prompt { P_NONE, P_OPEN, P_SAVEAS, P_NEW, P_RESIZE, P_DISCARD, P_REPLACE, P_HELP, P_COLOUR, P_CANVAS, P_ADJUST, P_LAYERNAME, P_PLACE, P_FONT, P_EFFECTS };
-enum after { AF_NONE, AF_OPEN, AF_NEW, AF_QUIT, AF_CLIPNEW };
+enum after { AF_NONE, AF_OPEN, AF_NEW, AF_QUIT, AF_CLIPNEW, AF_CLOSE };       /* (AF_CLOSE: close the picture in front) */
 
 /* The two rails' buttons. */
 enum btn { B_SELECT, B_MOVE, B_PEN, B_RETOUCH, B_ERASER, B_SHAPES, B_FILL, B_GRADIENT, B_TEXT, B_PICK,        /* the left rail: the tools */
@@ -2740,6 +2743,34 @@ struct cpick {
     int drag;                                   /* 1 the square, 2 the hue bar, 3 the alpha bar */
 };
 
+/* Several pictures can be open at once, each in a tab. What belongs to a picture (not to the program) is one list, used twice: the picture in front lies in
+ * `struct app` itself, under these names; the others wait in app.docs[] (the slot of the one in front is stale until it goes to the back). */
+#define MAX_DOCS 16
+#define PDOC_FIELDS \
+    struct doc doc; \
+    struct pix flat;                            /* the layers composited: what the view shows, what a save writes */ \
+    struct irect fdirty;                        /* the part of `flat` that has to be made again */ \
+    char path[PATH_MAX]; \
+    bool modified; \
+    int untitled;                               /* the number in "Untitled 2" */ \
+    bool scratch;                               /* the empty picture the program started with: the first file opened takes its place */ \
+    bool discard_ok;                            /* quitting: the question about its changes was answered with "Discard" */ \
+    struct snap undo[MAX_UNDO], redo[MAX_UNDO]; \
+    int nundo, nredo; \
+    struct sel sel; \
+    double zoom, vx, vy;                        /* logical screen pixels per picture pixel; where the picture's top left lies in the canvas */ \
+    bool fitted;                                /* the zoom is "fit the window": it follows the window's size */ \
+    int nguides; \
+    struct { bool vert; int pos; } guide[32]; \
+    int mask_edit;                              /* the layer whose MASK the tools paint on (-1: none, they paint on the layer) */ \
+    int gsel;                                   /* the group the panel has chosen (slot + 1; 0 = a layer is chosen): its opacity, blend mode and eye are what the panel's controls show \
+                                                   and the buttons act on the whole group; drawing on the picture goes back to the layer */ \
+    int lay_top;                                /* the first row of the layers' list that shows (from the top of the stack) */ \
+    bool clone_have, clone_off_set;             /* the clone stamp: the spot it copies from and the shift from where the stroke began */ \
+    double clone_sx, clone_sy, clone_ox, clone_oy;
+
+struct pdoc { PDOC_FIELDS };
+
 struct app {
     struct wlwin win;
     struct wlclip clip;
@@ -2749,14 +2780,19 @@ struct app {
     double px, py;                              /* the pointer in drawing coordinates */
     bool has_pointer;
 
-    struct doc doc;
-    struct pix flat;                            /* the layers composited: what the view shows, what a save writes */
-    struct irect fdirty;                        /* the part of `flat` that has to be made again */
-    char path[PATH_MAX];
-    bool modified;
-
-    struct snap undo[MAX_UNDO], redo[MAX_UNDO];
-    int nundo, nredo;
+    union {
+        struct pdoc front;                      /* the picture in front, as one thing ... */
+        struct { PDOC_FIELDS };                 /* ... and field by field */
+    };
+    struct pdoc *docs;                          /* every open picture (MAX_DOCS slots; NULL in the self test, which has the one in front only) */
+    int ndocs, cdoc, nuntitled;
+    struct wltabs_drag tdrag;                   /* a tab that is held: moved along the bar, or let go on the picture */
+    int tab_hover;                              /* the tab under the pointer (-1 none, WLTABS_PLUS) */
+    bool ldrag, ldrag_on;                       /* a row of the layers panel is held; it has moved: letting go on a tab copies the layer there */
+    double ldrag_x, ldrag_y;
+    int tab_menu_doc;                           /* the tab whose menu is open and what its entries do (TA_*) */
+    int tmenu[12], ntmenu;
+    char title_sent[160];                       /* the window title the compositor has */
 
     enum tool tool;
     enum tool grp[G_COUNT];                     /* the variant each grouped rail button stands for */
@@ -2781,21 +2817,16 @@ struct app {
     bool curve_on;                              /* a curve: the two ends and the two handles; phase 0 draws the ends, 1 and 2 pull the handles */
     int curve_phase;
     double cv_pt[4][2];
-    bool clone_have, clone_off_set;             /* the clone stamp: the spot it copies from and the shift from where the stroke began */
-    double clone_sx, clone_sy, clone_ox, clone_oy;
     struct pix finger;                          /* the smudge: the colours the finger carries */
     int64_t last_click_ms;
     double last_click_x, last_click_y;
     bool rulers, snap;                          /* rulers and guides on the picture; tools snap to the guides, the edges and the middle */
     int ruler_unit, ruler_dpi;                  /* the rulers' unit (RU_*) and how many pixels make an inch (what mm, cm, in and pt are worth in pixels) */
-    int nguides, guide_drag;
-    struct { bool vert; int pos; } guide[32];
+    int guide_drag;
     int sel_mode;                               /* a selection being made: 0 replaces, 1 adds, 2 takes away, 3 keeps what both have */
     struct sel sel_base;                        /* ... and the selection it works on */
     bool tg[TG_COUNT];
 
-    double zoom, vx, vy;                        /* logical screen pixels per picture pixel; where the picture's top left lies in the canvas */
-    bool fitted;                                /* the zoom is "fit the window": it follows the window's size */
     bool grid;
     uint32_t *vbuf;
     size_t vbuf_cap;
@@ -2819,8 +2850,6 @@ struct app {
     int64_t spray_ms;
     uint32_t rnd;
 
-    struct sel sel;
-
     struct {
         bool on;
         int x, y;                               /* where the text starts (picture pixels) */
@@ -2830,10 +2859,7 @@ struct app {
     struct pix tbefore;                         /* the layer as it was when the text began */
     int anim_delay, anim_loops;                 /* the animation card's answers ... */
     bool anim_bg, anim_ping, anim_go, anim_save;  /* ... and where it stands: go = ask for the file, save = the next Save as writes an animation */
-    int gsel;                                   /* the group the panel has chosen (slot + 1; 0 = a layer is chosen): its opacity, blend mode and eye are what the panel's controls show
-                                                   and the buttons act on the whole group; drawing on the picture goes back to the layer */
     int lmenu[16], nlmenu;                      /* what each entry of the open layer / group menu does (LA_* / GA_*) */
-    int mask_edit;                              /* the layer whose MASK the tools paint on (-1: none, they paint on the layer) */
     int txt_edit;                               /* the text layer that is being typed into again (-1: a new text) */
     struct pix tx_orig;                         /* ... and its pixels as they were, for Esc */
 
@@ -2872,7 +2898,6 @@ struct app {
     int64_t lay_click_ms;
     int lay_click_idx;
     int cur_kind;                               /* the pointer's shape now (CUR_*), -1 = none sent yet */
-    int lay_top;                                /* the first row of the layers' list that shows (from the top of the stack) */
 
     char msg[160];
     int64_t msg_ms;
@@ -3293,6 +3318,8 @@ static void new_doc(struct app *a, int w, int h, const char *path, bool transpar
     drop_snaps(a->undo, &a->nundo);
     drop_snaps(a->redo, &a->nredo);
     snprintf(a->path, sizeof(a->path), "%s", path ? path : "");
+    if (!a->path[0] && !a->untitled)
+        a->untitled = ++a->nuntitled;                                   /* ("Untitled 2": pictures with no file are numbered) */
     a->modified = false;
     sel_clear(&a->sel);
     a->lay_top = 0;
@@ -3321,6 +3348,8 @@ static void new_from_clipboard(struct app *a)
     drop_snaps(a->undo, &a->nundo);
     drop_snaps(a->redo, &a->nredo);
     a->path[0] = 0;
+    if (!a->untitled)
+        a->untitled = ++a->nuntitled;
     a->modified = true;
     sel_clear(&a->sel);
     a->lay_top = 0;
@@ -6053,6 +6082,7 @@ static void prompt_open(struct app *a, enum prompt p, const char *initial)
     a->perr[0] = 0;
     a->pcard_hover = a->pcard_down = -1;
     wlpicker_reset(&a->pk);                                                     /* (the folder list is read again) */
+    a->pk.multi = p == P_OPEN;                                                  /* several pictures can be marked and opened at once */
     wltext_end(a->pbuf);
     a->win.redraw = true;
 }
@@ -6271,6 +6301,22 @@ static const char *const HP_RULERS[] = {
 };
 
 static const char *const HP_FILES[] = {
+    "# Several pictures at once",
+    "- Every open picture has a tab with its file name above the drawing area; a dot says it is not saved. Each has its own undo, selection, zoom and guides.",
+    "|Ctrl+O, Ctrl+N|Open or make a picture in a new tab (the empty picture Paint started with gives up its place).",
+    "- In the Open card Ctrl+click or Shift+click (or Shift+Up / Down) marks several files: Open opens them all. From the command line: mellagui-paint a.png b.png.",
+    "|Click a tab|Show that picture (the wheel over the tabs, Ctrl+Tab, Ctrl+PageUp / PageDown and Alt+1..9 do too). Drag a tab along the bar to move it (Ctrl+Shift+PageUp / PageDown).",
+    "|x, Ctrl+W|Close the picture (the middle button too); it asks about unsaved changes.",
+    "# Several pictures side by side",
+    "- Drag a tab out of the window (or right click it: Open it in a window of its own): the picture gets a Paint window to itself, with its layers and unsaved changes. Its undo history, selection and guides stay behind.",
+    "- Put the windows side by side by dragging them to the edges of the screen. Between windows, Ctrl+C and Ctrl+V carry pictures.",
+    "# From one picture to another",
+    "- Ctrl+C in one picture, Ctrl+V in another: the selection (or the layer) becomes a new layer there.",
+    "- Drag another picture's tab onto the picture: it becomes a layer where you let go.",
+    "- Drag a layer (or a group) from the layers panel onto another tab: it is copied into that picture.",
+    "- Right click another tab: add it here as one layer or with all its layers, lay it over this one as a difference (black is where they are the same), or copy the chosen layer into it.",
+    "- Right click the tab in front: duplicate the picture, or add all the other pictures as layers (then Effects > Animation... makes an animation of them).",
+    "- A layer is as big as its canvas: what reaches past it is cut off (the other picture keeps it). Transform > Canvas size makes room first.",
     "# Files",
     "|Ctrl+O|Open: a list of the folder you type, filtering as you type (Up, Down, Enter; Tab completes the name).",
     "|Ctrl+S|Save. A picture with no name asks for one.",
@@ -6346,6 +6392,11 @@ static const char *const HP_KEYS[] = {
     "|Ctrl+Enter|Put the text down",
     "|F1|This help",
     "|Ctrl+Q|Quit (asks about unsaved changes)",
+    "# Tabs",
+    "|Ctrl+W|Close the picture",
+    "|Ctrl+Tab|The next picture (Shift: the one before)",
+    "|Ctrl+PageUp PageDown|The picture to the left or right (Shift: move the tab)",
+    "|Alt+1 .. 9|Go to a tab",
 };
 
 #define HP_N(arr) ((int)(sizeof(arr) / sizeof(arr[0])))
@@ -6819,15 +6870,613 @@ static void ask_canvas(struct app *a)
 
 static void new_from_clipboard(struct app *a);
 
-/* Something that would throw the picture away: ask once when it has unsaved changes. */
+/* ---- the open pictures: tabs ------------------------------------------------------------------------------------------------------- */
+
+static void end_drag(struct app *a);
+static void stroke_end(struct app *a);
+
+static const struct pdoc *doc_at(const struct app *a, int i)
+{
+    return !a->docs || i == a->cdoc ? &a->front : &a->docs[i];
+}
+
+static int doc_count(const struct app *a) { return a->docs ? a->ndocs : 1; }
+
+static void pdoc_blank(struct pdoc *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->zoom = 1.0;
+    p->fitted = true;
+    p->mask_edit = -1;
+}
+
+static void pdoc_free(struct pdoc *p)
+{
+    drop_snaps(p->undo, &p->nundo);
+    drop_snaps(p->redo, &p->nredo);
+    doc_free(&p->doc);
+    pix_free(&p->flat);
+    sel_clear(&p->sel);
+}
+
+/* The file's name, or "Untitled 2". */
+static void pdoc_name(const struct pdoc *p, char *out, size_t n)
+{
+    if (p->path[0]) {
+        const char *s = strrchr(p->path, '/');
+        snprintf(out, n, "%s", s ? s + 1 : p->path);
+    } else if (p->untitled > 1)
+        snprintf(out, n, "Untitled %d", p->untitled);
+    else
+        snprintf(out, n, "Untitled");
+}
+
+/* The name on a tab: two files of one name show their folder too. */
+static void tab_label(const struct app *a, int i, char *out, size_t n)
+{
+    const struct pdoc *p = doc_at(a, i);
+    pdoc_name(p, out, n);
+    if (!p->path[0])
+        return;
+    for (int j = 0; j < doc_count(a); j++) {
+        char other[PATH_MAX];
+        if (j == i || !doc_at(a, j)->path[0])
+            continue;
+        pdoc_name(doc_at(a, j), other, sizeof(other));
+        if (strcmp(other, out))
+            continue;
+        char dir[PATH_MAX];
+        snprintf(dir, sizeof(dir), "%s", p->path);
+        char *last = strrchr(dir, '/');
+        if (last) {
+            *last = 0;
+            char *up = strrchr(dir, '/');
+            char both[PATH_MAX];
+            snprintf(both, sizeof(both), "%.200s/%.200s", up ? up + 1 : dir, last + 1);
+            snprintf(out, n, "%s", both);
+        }
+        return;
+    }
+}
+
+/* What is under way on the picture in front is finished before it goes to the back. */
+static void doc_leave(struct app *a)
+{
+    if (a->drag)
+        end_drag(a);
+    finish_pending(a);
+    stroke_end(a);
+    a->pan = false;
+    a->guide_drag = -1;
+    a->sl_drag = -1;
+    a->lay_grab = -1;
+}
+
+static void doc_arrive(struct app *a)
+{
+    a->txt_edit = -1;
+    a->lay_seen = -1;
+    a->lay_n = -1;
+    a->lay_click_idx = -1;
+    if (a->doc.n) {
+        if (a->fitted)
+            view_fit(a);
+        else
+            view_clamp(a);
+    }
+    a->vdirty = true;
+    a->win.redraw = true;
+}
+
+static void tab_switch(struct app *a, int i)
+{
+    if (!a->docs || i < 0 || i >= a->ndocs || i == a->cdoc)
+        return;
+    doc_leave(a);
+    a->docs[a->cdoc] = a->front;
+    a->cdoc = i;
+    a->front = a->docs[i];
+    doc_arrive(a);
+}
+
+/* A new tab at the end, which comes to the front with no picture in it yet: the caller puts one there (or takes the tab away with tab_remove). */
+static bool tab_add(struct app *a)
+{
+    if (!a->docs || a->ndocs >= MAX_DOCS) {
+        say(a, "No more than %d pictures at once", MAX_DOCS);
+        return false;
+    }
+    doc_leave(a);
+    a->docs[a->cdoc] = a->front;
+    a->cdoc = a->ndocs++;
+    pdoc_blank(&a->front);
+    a->lay_seen = -1;
+    a->win.redraw = true;
+    return true;
+}
+
+/* Takes picture `i` away, its changes with it; the last one takes the window. */
+static void tab_remove(struct app *a, int i)
+{
+    if (!a->docs || i < 0 || i >= a->ndocs)
+        return;
+    if (a->ndocs == 1) {
+        a->win.running = false;
+        return;
+    }
+    if (i == a->cdoc)
+        tab_switch(a, i + 1 < a->ndocs ? i + 1 : i - 1);
+    pdoc_free(&a->docs[i]);
+    memmove(&a->docs[i], &a->docs[i + 1], sizeof(a->docs[0]) * (size_t)(a->ndocs - i - 1));
+    a->ndocs--;
+    if (a->cdoc > i)
+        a->cdoc--;
+    a->win.redraw = true;
+}
+
+static void tab_move(struct app *a, int from, int to)
+{
+    if (!a->docs || from == to || from < 0 || to < 0 || from >= a->ndocs || to >= a->ndocs)
+        return;
+    a->docs[a->cdoc] = a->front;
+    static struct pdoc held;
+    held = a->docs[from];
+    if (from < to)
+        memmove(&a->docs[from], &a->docs[from + 1], sizeof(a->docs[0]) * (size_t)(to - from));
+    else
+        memmove(&a->docs[to + 1], &a->docs[to], sizeof(a->docs[0]) * (size_t)(from - to));
+    a->docs[to] = held;
+    if (a->cdoc == from)
+        a->cdoc = to;
+    else if (from < a->cdoc && to >= a->cdoc)
+        a->cdoc--;
+    else if (from > a->cdoc && to <= a->cdoc)
+        a->cdoc++;
+    a->win.redraw = true;
+}
+
+/* The empty picture the program started with, still untouched: something opened takes its place. */
+static bool doc_is_scratch(const struct app *a)
+{
+    return a->scratch && !a->modified && !a->nundo && !a->nredo && !a->txt.on;
+}
+
+static int tab_of_path(const struct app *a, const char *path)
+{
+    char real[PATH_MAX];
+    const char *want = realpath(path, real) ? real : path;
+    for (int i = 0; i < doc_count(a); i++)
+        if (doc_at(a, i)->path[0] && !strcmp(doc_at(a, i)->path, want))
+            return i;
+    return -1;
+}
+
+/* Opens a file in a tab of its own (the untouched starting picture gives up its place; a file that is open already just comes to the front). */
+static bool open_in_tab(struct app *a, const char *path)
+{
+    int have = tab_of_path(a, path);
+    if (have >= 0) {
+        tab_switch(a, have);
+        char nm[PATH_MAX];
+        pdoc_name(&a->front, nm, sizeof(nm));
+        say(a, "%s is open already", nm);
+        return true;
+    }
+    if (!a->docs || doc_is_scratch(a)) {
+        if (!open_image(a, path))
+            return false;
+        a->scratch = false;
+        return true;
+    }
+    int was = a->cdoc;
+    if (!tab_add(a)) {
+        snprintf(a->perr, sizeof(a->perr), "No more than %d pictures at once", MAX_DOCS);
+        return false;
+    }
+    if (open_image(a, path))
+        return true;
+    tab_remove(a, a->cdoc);
+    tab_switch(a, was);
+    return false;
+}
+
+static void new_in_tab(struct app *a, int w, int h, bool transparent)
+{
+    if (!a->docs || doc_is_scratch(a)) {
+        new_doc(a, w, h, "", transparent);
+        a->scratch = false;
+        return;
+    }
+    int was = a->cdoc;
+    if (!tab_add(a))
+        return;
+    new_doc(a, w, h, "", transparent);
+    if (!a->doc.n) {
+        tab_remove(a, a->cdoc);
+        tab_switch(a, was);
+    }
+}
+
+static void clip_in_tab(struct app *a)
+{
+    if (!a->docs || doc_is_scratch(a)) {
+        new_from_clipboard(a);
+        if (a->modified)
+            a->scratch = false;
+        return;
+    }
+    int was = a->cdoc;
+    if (!tab_add(a))
+        return;
+    new_from_clipboard(a);
+    if (!a->doc.n) {
+        tab_remove(a, a->cdoc);
+        tab_switch(a, was);
+        say(a, "No picture on the clipboard");
+    }
+}
+
+/* ---- from one picture to another --------------------------------------------------------------------------------------------------- */
+
+/* The box of what is not see-through. */
+static bool ink_box(const struct pix *im, struct irect *r)
+{
+    *r = (struct irect){ im->w, im->h, 0, 0 };
+    for (int y = 0; y < im->h; y++)
+        for (int x = 0; x < im->w; x++)
+            if (im->p[(size_t)y * (size_t)im->w + (size_t)x] >> 24) {
+                r->x0 = LM_MIN(r->x0, x);
+                r->y0 = LM_MIN(r->y0, y);
+                r->x1 = LM_MAX(r->x1, x + 1);
+                r->y1 = LM_MAX(r->y1, y + 1);
+            }
+    return r->x1 > r->x0;
+}
+
+/* `src` laid with its top left corner at (ox, oy) on the empty `dst`; true when something drawn fell outside. */
+static bool pix_put(struct pix *dst, const struct pix *src, int ox, int oy)
+{
+    bool cut = false;
+    for (int y = 0; y < src->h; y++)
+        for (int x = 0; x < src->w; x++) {
+            uint32_t c = src->p[(size_t)y * (size_t)src->w + (size_t)x];
+            int tx = x + ox, ty = y + oy;
+            if (tx >= 0 && ty >= 0 && tx < dst->w && ty < dst->h)
+                dst->p[(size_t)ty * (size_t)dst->w + (size_t)tx] = c;
+            else if (c >> 24)
+                cut = true;
+        }
+    return cut;
+}
+
+/* A new layer above the chosen one, holding `src` at (ox, oy). */
+static bool layer_from_pix(struct app *a, const struct pix *src, const char *name, int ox, int oy, bool *cut)
+{
+    if (!doc_add(&a->doc, name, 0))
+        return false;
+    *cut = pix_put(&a->doc.L[a->doc.cur].im, src, ox, oy) || *cut;
+    return true;
+}
+
+/* Picture `from`, as it is seen, becomes one layer of the picture in front, its middle at (cx, cy); `mode` is the layer's blend mode. */
+static void add_flattened(struct app *a, int from, int cx, int cy, int mode)
+{
+    finish_pending(a);
+    if (from == a->cdoc || from < 0 || from >= doc_count(a))
+        return;
+    char nm[PATH_MAX], lname[40];
+    pdoc_name(doc_at(a, from), nm, sizeof(nm));
+    snprintf(lname, sizeof(lname), "%.36s", nm);
+    if (a->doc.n >= MAX_LAYERS) {
+        say(a, "No more than %d layers", MAX_LAYERS);
+        return;
+    }
+    struct pix flat = { 0 };
+    if (!doc_flatten(&doc_at(a, from)->doc, &flat)) {
+        say(a, "Not possible (out of memory?)");
+        return;
+    }
+    a->mask_edit = -1;
+    a->gsel = 0;
+    checkpoint_doc(a);
+    bool cut = false, ok = layer_from_pix(a, &flat, lname, cx - flat.w / 2, cy - flat.h / 2, &cut);
+    pix_free(&flat);
+    if (!ok) {
+        say(a, "Not possible (out of memory?)");
+        return;
+    }
+    a->doc.L[a->doc.cur].blend = mode;
+    changed(a);
+    tool_set(a, T_MOVE);
+    say(a, "%s is a new layer%s%s", lname, mode == BM_DIFFERENCE ? " laid over as a difference: black is where they are the same" : "",
+        cut ? " (what reached past the canvas was cut off)" : "");
+}
+
+/* Every other picture, flattened, a layer each on top of this one, in the tabs' order (the frames of an animation from files). One undo step. */
+static void add_others(struct app *a)
+{
+    finish_pending(a);
+    if (doc_count(a) < 2)
+        return;
+    if (a->doc.n + doc_count(a) - 1 > MAX_LAYERS) {
+        say(a, "No more than %d layers", MAX_LAYERS);
+        return;
+    }
+    a->mask_edit = -1;
+    a->gsel = 0;
+    checkpoint_doc(a);
+    a->doc.cur = a->doc.n - 1;
+    int made = 0;
+    bool cut = false;
+    for (int j = 0; j < doc_count(a); j++) {
+        if (j == a->cdoc)
+            continue;
+        char nm[PATH_MAX], lname[40];
+        pdoc_name(doc_at(a, j), nm, sizeof(nm));
+        snprintf(lname, sizeof(lname), "%.36s", nm);
+        struct pix flat = { 0 };
+        if (!doc_flatten(&doc_at(a, j)->doc, &flat))
+            continue;
+        a->doc.L[a->doc.cur].gid = 0;                                   /* (they lie on top, outside any group) */
+        if (layer_from_pix(a, &flat, lname, (CW(a) - flat.w) / 2, (CH(a) - flat.h) / 2, &cut)) {
+            a->doc.L[a->doc.cur].gid = 0;
+            made++;
+        }
+        pix_free(&flat);
+    }
+    changed(a);
+    say(a, "%d picture%s added as layers%s", made, made == 1 ? "" : "s", cut ? " (what reached past the canvas was cut off)" : "");
+}
+
+/* Layers lo .. hi of another picture, with their masks, settings and groups, into the picture in front. With `wrap` they go into a new group of that name, on
+ * top; one layer alone goes above the chosen one. `top_group` (a slot + 1 of the source, or 0) is the group that is copied with them, nothing above it. */
+static bool layers_copy(struct app *a, const struct pdoc *src, int lo, int hi, int top_group, const char *wrap, bool *cut)
+{
+    const struct doc *s = &src->doc;
+    int k = hi - lo + 1;
+    if (k < 1 || lo < 0 || hi >= s->n)
+        return false;
+    if (a->doc.n + k > MAX_LAYERS) {
+        say(a, "No more than %d layers", MAX_LAYERS);
+        return false;
+    }
+    bool same = doc_w(s) == CW(a) && doc_h(s) == CH(a);
+    int ox = 0, oy = 0;
+    if (!same && k == 1) {                                              /* one layer of another size: what is drawn on it comes to the middle */
+        struct irect r;
+        if (ink_box(&s->L[lo].im, &r)) {
+            ox = (CW(a) - (r.x1 - r.x0)) / 2 - r.x0;
+            oy = (CH(a) - (r.y1 - r.y0)) / 2 - r.y0;
+        }
+    } else if (!same) {                                                 /* several: middle on middle, so they stay where they are to each other */
+        ox = (CW(a) - doc_w(s)) / 2;
+        oy = (CH(a) - doc_h(s)) / 2;
+    }
+    /* which groups of the source come along, and whether there is room for them */
+    bool take[MAX_GROUPS + 1] = { false };
+    int need = wrap ? 1 : 0;
+    for (int i = lo; i <= hi && (wrap || top_group); i++)
+        for (int g = s->L[i].gid, n = 0; g > 0 && g <= MAX_GROUPS && s->G[g - 1].used && n < MAX_GROUPS; n++) {
+            if (!take[g]) {
+                take[g] = true;
+                need++;
+            }
+            if (g == top_group)
+                break;
+            g = s->G[g - 1].parent;
+        }
+    bool groups = groups_used(&a->doc) + need <= MAX_GROUPS;
+    a->mask_edit = -1;
+    a->gsel = 0;
+    checkpoint_doc(a);
+    int map[MAX_GROUPS + 1] = { 0 }, outer = 0;
+    if (wrap && groups) {
+        outer = g_new_slot(&a->doc);
+        group_init(&a->doc.G[outer - 1], wrap, 0);
+    }
+    for (int g = 1; g <= MAX_GROUPS && groups; g++)
+        if (take[g]) {
+            map[g] = g_new_slot(&a->doc);
+            a->doc.G[map[g] - 1].used = true;                           /* (taken at once, so that the next one is another slot) */
+        }
+    for (int g = 1; g <= MAX_GROUPS; g++)
+        if (map[g]) {
+            struct lgroup *ng = &a->doc.G[map[g] - 1];
+            *ng = s->G[g - 1];
+            int up = s->G[g - 1].parent;
+            ng->parent = g != top_group && up > 0 && map[up] ? map[up] : outer;
+        }
+    bool single = !wrap && !top_group;
+    int made = 0;
+    if (!single)
+        a->doc.cur = a->doc.n - 1;                                      /* a block goes on top */
+    for (int i = lo; i <= hi; i++) {
+        const struct layer *sl = &s->L[i];
+        struct pix mask = { 0 };
+        if (sl->mask.p) {                                               /* (see-through in a mask counts as white, so what is new round it shows) */
+            if (!pix_alloc(&mask, CW(a), CH(a), 0))
+                break;
+            pix_put(&mask, &sl->mask, ox, oy);
+        }
+        int at_gid = a->doc.L[a->doc.cur].gid;
+        if (!layer_from_pix(a, &sl->im, sl->name, ox, oy, cut)) {
+            pix_free(&mask);
+            break;
+        }
+        struct layer *dl = &a->doc.L[a->doc.cur];
+        dl->mask = mask;
+        dl->opacity = sl->opacity;
+        dl->visible = sl->visible;
+        dl->blend = sl->blend;
+        dl->gid = single ? at_gid : sl->gid > 0 && map[sl->gid] ? map[sl->gid] : outer;
+        if (sl->tx.on && pix_hash_ink(&sl->im) == sl->tx.hash) {        /* a text stays one that can be typed into */
+            dl->tx = sl->tx;
+            dl->tx.x += ox;
+            dl->tx.y += oy;
+            dl->tx.hash = pix_hash_ink(&dl->im);
+        }
+        made++;
+    }
+    doc_prune_groups(&a->doc);
+    changed(a);
+    if (made < k)
+        say(a, "Not possible (out of memory?)");
+    return made == k;
+}
+
+/* All the layers of picture `from` into the one in front, in a group named after it. */
+static void add_all_layers(struct app *a, int from)
+{
+    finish_pending(a);
+    if (from == a->cdoc || from < 0 || from >= doc_count(a))
+        return;
+    char nm[PATH_MAX], gname[40];
+    pdoc_name(doc_at(a, from), nm, sizeof(nm));
+    snprintf(gname, sizeof(gname), "%.36s", nm);
+    const struct pdoc *src = doc_at(a, from);
+    int n = src->doc.n;
+    bool cut = false;
+    if (layers_copy(a, src, 0, n - 1, 0, gname, &cut))
+        say(a, "The %d layer%s of %s %s here%s", n, n == 1 ? "" : "s", gname, n == 1 ? "is" : "are", cut ? " (what reached past the canvas was cut off)" : "");
+}
+
+/* The chosen layer (or group) of the picture in front goes into picture `to`; the one in front stays in front. */
+static void copy_chosen_to(struct app *a, int to)
+{
+    finish_pending(a);
+    if (!a->docs || to == a->cdoc || to < 0 || to >= a->ndocs)
+        return;
+    int lo = a->doc.cur, hi = a->doc.cur, grp = a->gsel;
+    if (grp && !group_range(&a->doc, grp, &lo, &hi))
+        grp = 0, lo = hi = a->doc.cur;
+    char what[40], nm[PATH_MAX], msg[sizeof(a->msg)];
+    snprintf(what, sizeof(what), "%.39s", grp ? a->doc.G[grp - 1].name : a->doc.L[lo].name);
+    int back = a->cdoc;
+    tab_switch(a, to);
+    pdoc_name(&a->front, nm, sizeof(nm));
+    a->msg[0] = 0;
+    bool cut = false;
+    if (layers_copy(a, &a->docs[back], lo, hi, grp, NULL, &cut))
+        snprintf(msg, sizeof(msg), "Copied %s to %.60s%s", what, nm, cut ? " (cut to its canvas)" : "");
+    else
+        snprintf(msg, sizeof(msg), "%s", a->msg);                       /* (why not) */
+    tab_switch(a, back);
+    say(a, "%s", msg);
+}
+
+/* A copy of the picture in front in a tab of its own. */
+static void tab_duplicate(struct app *a)
+{
+    finish_pending(a);
+    struct doc d;
+    if (!doc_copy(&a->doc, &d)) {
+        say(a, "Not possible (out of memory?)");
+        return;
+    }
+    if (!tab_add(a)) {
+        doc_free(&d);
+        return;
+    }
+    a->doc = d;
+    a->modified = true;
+    a->untitled = ++a->nuntitled;
+    flat_mark_all(a);
+    view_fit(a);
+    say(a, "A copy of the picture");
+}
+
+/* ---- a picture in a window of its own ----------------------------------------------------------------------------------------------- */
+
+/* Starts `mellagui-paint --size WxH --adopt FILE FD ...` (this very program, a window as big as this one) on its own and waits until it says it has the
+ * picture; false when it never did. */
+static bool spawn_adopter(const char *ora, const struct pdoc *p, int w, int h)
+{
+    int ack[2];
+    if (pipe2(ack, O_CLOEXEC) != 0)
+        return false;
+    char fdtext[16], modified[4], untitled[16], layer[16], size[40];
+    snprintf(size, sizeof(size), "%dx%d", LM_MAX(w, 680), LM_MAX(h, 460));
+    snprintf(fdtext, sizeof(fdtext), "%d", ack[1]);
+    snprintf(modified, sizeof(modified), "%d", p->modified ? 1 : 0);
+    snprintf(untitled, sizeof(untitled), "%d", p->untitled);
+    snprintf(layer, sizeof(layer), "%d", p->doc.cur);
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {                                              /* (nobody's child: it lives its own life) */
+            setsid();
+            if (fcntl(ack[1], F_SETFD, 0) == 0)
+                execl("/proc/self/exe", "mellagui-paint", "--size", size, "--adopt", ora, fdtext, modified, untitled, layer, p->path, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    close(ack[1]);
+    bool ok = false;
+    if (pid > 0) {
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+            ;
+        struct pollfd pf = { .fd = ack[0], .events = POLLIN };
+        int64_t end = now_ms() + 10000;
+        int r;
+        do
+            r = poll(&pf, 1, (int)LM_MAX(end - now_ms(), 0));
+        while (r < 0 && errno == EINTR);
+        char c = 0;
+        ok = r > 0 && read(ack[0], &c, 1) == 1 && c == 'k';             /* (the end of the pipe with nothing said: it failed) */
+    }
+    close(ack[0]);
+    return ok;
+}
+
+/* Picture `i` moves into a window of its own, with its layers (they travel as an OpenRaster file); its tab goes only when the new window has it. What does
+ * not travel: the undo history, the selection and the guides. */
+static void tab_detach(struct app *a, int i)
+{
+    if (!a->docs || i < 0 || i >= a->ndocs)
+        return;
+    if (a->ndocs < 2) {
+        say(a, "This is the only picture in the window");
+        return;
+    }
+    if (i == a->cdoc)
+        doc_leave(a);                                                   /* (what is being typed or drawn is put down first) */
+    static unsigned count;
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    char tmp[PATH_MAX], err[160] = "", nm[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s/mellagui-paint-move-%ld-%u.ora", rt && *rt ? rt : "/tmp", (long)getpid(), ++count);
+    const struct pdoc *p = doc_at(a, i);
+    pdoc_name(p, nm, sizeof(nm));
+    bool ok = write_ora(&p->doc, tmp, err, sizeof(err)) && spawn_adopter(tmp, p, a->win.w, a->win.h);
+    unlink(tmp);
+    if (!ok) {
+        say(a, "Could not open a new window%s%.100s: the picture stays here", err[0] ? ": " : "", err);
+        return;
+    }
+    tab_remove(a, i);
+    say(a, "%.100s is in a window of its own", nm);
+}
+
+static bool any_unsaved(const struct app *a)
+{
+    for (int i = 0; i < doc_count(a); i++)
+        if (doc_at(a, i)->modified && !doc_at(a, i)->discard_ok)
+            return true;
+    return false;
+}
+
+/* The question about unsaved changes was given up: nothing is thrown away. */
+static void discard_cancel(struct app *a)
+{
+    a->after = AF_NONE;
+    a->discard_ok = false;
+    for (int i = 0; a->docs && i < a->ndocs; i++)
+        a->docs[i].discard_ok = false;
+}
+
+/* What the buttons ask for; closing a picture or the program asks first about changes that are not saved. */
 static void guard(struct app *a, enum after what)
 {
     finish_pending(a);
-    if (a->modified) {
-        a->after = what;
-        prompt_open(a, P_DISCARD, "");
-        return;
-    }
     switch (what) {
     case AF_OPEN: ask_open(a); break;
     case AF_NEW: {
@@ -6836,10 +7485,41 @@ static void guard(struct app *a, enum after what)
         prompt_open(a, P_NEW, s);
         break;
     }
-    case AF_QUIT: a->win.running = false; break;
-    case AF_CLIPNEW: new_from_clipboard(a); break;
+    case AF_CLIPNEW: clip_in_tab(a); break;
+    case AF_CLOSE:
+        if (a->modified) {
+            a->after = what;
+            prompt_open(a, P_DISCARD, "");
+        } else
+            tab_remove(a, a->cdoc);
+        break;
+    case AF_QUIT:
+        if (!(a->modified && !a->discard_ok))
+            for (int i = 0; a->docs && i < a->ndocs; i++)
+                if (i != a->cdoc && a->docs[i].modified && !a->docs[i].discard_ok) {
+                    tab_switch(a, i);                                   /* the question is about the picture that shows */
+                    break;
+                }
+        if (a->modified && !a->discard_ok) {
+            a->after = what;
+            prompt_open(a, P_DISCARD, "");
+        } else
+            a->win.running = false;
+        break;
     default: break;
     }
+}
+
+static void tab_close(struct app *a, int i)
+{
+    if (!a->docs || i < 0 || i >= a->ndocs)
+        return;
+    if (doc_at(a, i)->modified)
+        tab_switch(a, i);
+    if (i == a->cdoc)
+        guard(a, AF_CLOSE);
+    else
+        tab_remove(a, i);
 }
 
 /* Puts a picture on a layer of its own, at the top left. */
@@ -6887,7 +7567,8 @@ static void prompt_close(struct app *a, bool apply)
     if (a->prompt == P_ADJUST)
         fx_close(a, apply);
     a->prompt = P_NONE;
-    a->after = AF_NONE;
+    if (!apply)
+        discard_cancel(a);
     if (saving)
         a->anim_save = false;                                           /* (the animation's Save as card was given up) */
     a->win.redraw = true;
@@ -6895,6 +7576,15 @@ static void prompt_close(struct app *a, bool apply)
         a->anim_go = false;
         ask_saveas_anim(a);
     }
+}
+
+/* The picture was saved because of a question (close it, quit): that goes on now. */
+static void carry_on(struct app *a)
+{
+    enum after what = a->after;
+    a->after = AF_NONE;
+    if (what != AF_NONE)
+        guard(a, what);
 }
 
 static void prompt_accept(struct app *a)
@@ -6914,12 +7604,39 @@ static void prompt_accept(struct app *a)
         s = text;
     }
     switch (a->prompt) {
-    case P_OPEN:
+    case P_OPEN: {
+        int marked = wlpicker_marked(&a->pk);
+        if (marked) {                                                   /* several pictures: each in a tab, the first of them in front */
+            static char list[MAX_DOCS][PATH_MAX];
+            int n = 0, opened = 0;
+            while (n < MAX_DOCS && wlpicker_marked_path(&a->pk, n, list[n], sizeof(list[n])))
+                n++;
+            char first[PATH_MAX] = "", bad[sizeof(a->perr)] = "";
+            for (int i = 0; i < n; i++) {
+                if (open_in_tab(a, list[i])) {
+                    if (!opened++)
+                        memcpy(first, list[i], sizeof(first));
+                } else
+                    snprintf(bad, sizeof(bad), "%s", a->perr);
+            }
+            if (!opened) {
+                snprintf(a->perr, sizeof(a->perr), "%s", bad);
+                return;
+            }
+            a->prompt = P_NONE;
+            tab_switch(a, tab_of_path(a, first));
+            if (opened < marked)
+                say(a, "Opened %d of %d pictures%s%.80s", opened, marked, bad[0] ? ": " : "", bad);
+            else
+                say(a, "Opened %d pictures", opened);
+            break;
+        }
         if (!*s)
             return;
-        if (open_image(a, s))
+        if (open_in_tab(a, s))
             a->prompt = P_NONE;
         break;
+    }
     case P_PLACE:
         if (!*s || s[strlen(s) - 1] == '/')
             return;
@@ -6940,13 +7657,17 @@ static void prompt_accept(struct app *a)
             a->prompt = P_REPLACE;
             return;
         }
-        if (write_image(a, path))
+        if (write_image(a, path)) {
             a->prompt = P_NONE;
+            carry_on(a);
+        }
         break;
     }
     case P_REPLACE:
-        if (write_image(a, a->pbuf))
+        if (write_image(a, a->pbuf)) {
             a->prompt = P_NONE;
+            carry_on(a);
+        }
         break;
     case P_NEW: {
         int w, h;
@@ -6955,7 +7676,7 @@ static void prompt_accept(struct app *a)
             return;
         }
         a->prompt = P_NONE;
-        new_doc(a, w, h, "", a->new_transparent);
+        new_in_tab(a, w, h, a->new_transparent);
         break;
     }
     case P_RESIZE: {
@@ -7043,8 +7764,14 @@ static void discard_chosen(struct app *a, bool save_first)
         if (!write_image(a, a->path))
             return;
     }
-    a->modified = false;
     a->after = AF_NONE;
+    if (!save_first) {
+        if (what == AF_CLOSE) {
+            tab_remove(a, a->cdoc);
+            return;
+        }
+        a->discard_ok = true;                                           /* (it stays "modified": giving up at a later picture throws nothing away) */
+    }
     guard(a, what);
 }
 
@@ -7518,7 +8245,8 @@ static void rails(const struct app *a, struct wlrail *L, struct wlrail *R)
     L->x = 0;
     R->x = a->win.bw > 0 ? a->win.bw - WLRAIL_W : 0;
     L->y0 = R->y0 = 0;
-    L->y1 = R->y1 = a->win.bh > 0 ? a->win.bh - PAL_H - STAT_H : 400;      /* (the rails keep their height when the text bar is up: it lies between them) */
+    L->y1 = R->y1 = a->win.bh > 0 ? a->win.bh - PAL_H - STAT_H + WLTABS_H : 400;      /* (in WINDOW pixels: they begin beside the tabs; they keep their height when the
+                                                                                          text bar is up: it lies between them) */
     L->n = N_LEFT;
     for (int i = 0; i < N_LEFT; i++) {
         int id = LEFT_IDS[i];
@@ -7562,15 +8290,15 @@ static int rail_hover_of(const struct app *a, bool right)
     return -1;
 }
 
-/* The button under a point (a B_* id), -1 for none. */
+/* The button under a point (drawing coordinates; a B_* id), -1 for none. */
 static int button_at(const struct app *a, double x, double y)
 {
     struct wlrail L, R;
     rails(a, &L, &R);
-    int i = wlrail_at(&L, x, y);
+    int i = wlrail_at(&L, x, y + WLTABS_H);
     if (i >= 0)
         return LEFT_IDS[i];
-    int j = wlrail_at(&R, x, y);
+    int j = wlrail_at(&R, x, y + WLTABS_H);
     return j >= 0 ? RIGHT_IDS[j] : -1;
 }
 
@@ -8474,12 +9202,133 @@ static void paint_layers(struct app *a)
     wlsbar_paint(w, &lsb, a->lay_grab >= 0 || (a->has_pointer && wlsbar_has(&lsb, a->px, a->py)));
 }
 
+/* ---- the tabs: the open pictures' names, between the rails, above the drawing area (negative y) -------------------------------------- */
+
+static int tabs_w(const struct app *a) { return LM_MAX(a->win.bw - 2 * WLRAIL_W, 1); }
+
+/* The tab under a point (an index, WLTABS_PLUS or WLTABS_NONE). */
+static int tabs_hit(const struct app *a, double x, double y, bool *on_close)
+{
+    return wltabs_hit(x, y, WLRAIL_W, -WLTABS_H, tabs_w(a), doc_count(a), on_close);
+}
+
+/* A name cut to `w` pixels, with dots where it was cut. */
+static void tab_fit(const char *name, int w, char *out, size_t n)
+{
+    snprintf(out, n, "%.280s", name);
+    if (wlcard_text_w(out) <= w)
+        return;
+    size_t len = strlen(out);
+    while (len > 0) {
+        do
+            len--;
+        while (len > 0 && ((unsigned char)out[len] & 0xc0) == 0x80);                /* (not inside a letter) */
+        snprintf(out + len, n - len, "...");
+        if (wlcard_text_w(out) <= w)
+            return;
+    }
+}
+
+static void paint_tabs(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int n = doc_count(a), tw = wltabs_tw(tabs_w(a), n), y = -WLTABS_H;
+    wlwin_fill(w, WLRAIL_W, y, tabs_w(a), WLTABS_H, COL_BAR);
+    wlwin_fill(w, WLRAIL_W, -1, tabs_w(a), 1, lm_theme.border);
+    for (int i = 0; i < n; i++) {
+        int x = wltabs_x(WLRAIL_W, tw, i);
+        bool cur = i == a->cdoc, hot = a->tab_hover == i || (a->tdrag.active && a->tdrag.moved && a->tdrag.idx == i);
+        bool target = a->ldrag_on && hot && !cur;                       /* a layer held over it would go there */
+        wlwin_round_fill(w, x, y + 2, tw, WLTABS_H - 2, 7, target ? lm_theme.btn_teal : cur ? lm_theme.button_hover : hot ? lm_theme.panel_line : COL_FIELD);
+        if (cur)
+            wlwin_fill(w, x + 6, -3, LM_MAX(tw - 12, 1), 2, COL_ACCENT);
+        char label[PATH_MAX], shown[300];
+        tab_label(a, i, label, sizeof(label));
+        bool closer = tw >= 60;
+        int tx = x + 8;
+        if (doc_at(a, i)->modified) {                                   /* a dot: not saved */
+            wlwin_round_fill(w, tx, y + 2 + (WLTABS_H - 2 - 7) / 2, 7, 7, 3, lm_theme.caution);
+            tx += 11;
+        }
+        int room = x + tw - tx - (closer ? WLTABS_CLOSE_W + 2 : 4);
+        if (room > 4) {
+            tab_fit(label, room, shown, sizeof(shown));
+            wlwin_text(w, tx, y + 2 + (WLTABS_H - 2 - LM_FONT_H) / 2, shown, 1, cur ? lm_theme.on_colour : COL_TEXT, room);
+        }
+        if (closer)
+            wlwin_text(w, x + tw - WLTABS_CLOSE_W + 2, y + 2 + (WLTABS_H - 2 - LM_FONT_H) / 2, "x", 1, hot || cur ? COL_TEXT : COL_DIM, 0);
+    }
+    int px = wltabs_plus_x(WLRAIL_W, tw, n);
+    wlwin_round_fill(w, px, y + 3, WLTABS_PLUS_W - 2, WLTABS_H - 5, 7, a->tab_hover == WLTABS_PLUS ? lm_theme.button_hover : COL_FIELD);
+    wlwin_text(w, px + (WLTABS_PLUS_W - 2 - wlcard_text_w("+")) / 2, y + 3 + (WLTABS_H - 5 - LM_FONT_H) / 2, "+", 1, COL_TEXT, 0);
+}
+
+/* The pointer (of a drag) is past the window's edges, or above the tabs. */
+static bool outside_window(const struct app *a)
+{
+    return a->px < 0 || a->px >= a->win.bw || a->py >= a->win.bh || a->py < -WLTABS_H - 6;
+}
+
+/* What letting go of the held tab or layer would do, written beside the pointer. */
+static const char *drag_label(const struct app *a)
+{
+    if (a->tdrag.active && a->tdrag.moved && outside_window(a))
+        return doc_count(a) > 1 ? "Let go: open it in a window of its own" : "This is the only picture in the window";
+    if (a->tdrag.active && a->tdrag.moved && a->py >= 0 && a->py < cv_h(a) && a->px >= cv_x(a) && a->px < a->win.bw - WLRAIL_W)
+        return a->tdrag.idx == a->cdoc ? "This is the picture itself" : "Let go: add it here as a layer";
+    if (a->ldrag_on) {
+        bool c;
+        int t = tabs_hit(a, a->px, a->py, &c);
+        return t >= 0 && t != a->cdoc ? "Let go: copy it into this picture" : "Drag onto another picture's tab";
+    }
+    return NULL;
+}
+
+static void paint_drag_label(struct app *a)
+{
+    const char *t = drag_label(a);
+    if (!t || (!a->has_pointer && !a->tdrag.active))
+        return;
+    int tw = wlcard_text_w(t) + 16, x = LM_CLAMP((int)a->px + 14, WLRAIL_W, LM_MAX(a->win.bw - WLRAIL_W - tw, WLRAIL_W)),
+        y = LM_CLAMP((int)a->py + 18, 2, LM_MAX(a->win.bh - 28, 2));
+    wlwin_round_fill(&a->win, x, y, tw + 2, 26, 13, COL_ACCENT);
+    wlwin_round_fill(&a->win, x + 1, y + 1, tw, 24, 12, COL_BAR);
+    wlwin_text(&a->win, x + 9, y + (26 - LM_FONT_H) / 2, t, 1, lm_theme.text, 0);
+}
+
+static void window_title(struct app *a)
+{
+    char nm[PATH_MAX], t[160];
+    pdoc_name(&a->front, nm, sizeof(nm));
+    snprintf(t, sizeof(t), "%.120s%s - Paint", nm, a->modified ? " *" : "");
+    if (strcmp(t, a->title_sent) && a->win.toplevel) {
+        snprintf(a->title_sent, sizeof(a->title_sent), "%s", t);
+        WLC_SEND(a->win.c, a->win.toplevel, LM_XDG_TOPLEVEL_REQ_SET_TITLE, { .s = t });
+    }
+}
+
 /* ---- the status line ------------------------------------------------------------------------------------------------------------- */
 
 static const char *hover_hint(const struct app *a)
 {
     if (!a->has_pointer)
         return NULL;
+    if (a->py < 0) {                                                    /* over the tabs */
+        static char hint[PATH_MAX + 120];
+        bool on_close;
+        int t = tabs_hit(a, a->px, a->py, &on_close);
+        if (t == WLTABS_PLUS)
+            return "A new picture, in a tab of its own (Ctrl+N)";
+        if (t < 0)
+            return NULL;
+        if (on_close)
+            return "Close this picture (Ctrl+W)";
+        const struct pdoc *p = doc_at(a, t);
+        char nm[PATH_MAX];
+        pdoc_name(p, nm, sizeof(nm));
+        snprintf(hint, sizeof(hint), "%s  -  %s", p->path[0] ? p->path : nm, t == a->cdoc ? "right click: more" : "drag onto the picture: add it as a layer; right click: more");
+        return hint;
+    }
     int idx;
     int lh = lp_hit(a, a->px, a->py, &idx);
     if (lh == LH_BTN)
@@ -8697,13 +9546,13 @@ static void paint_status(struct app *a)
 {
     struct wlwin *w = &a->win;
     wlwin_fill(w, 0, stat_y(a), w->bw, STAT_H, COL_BAR);
-    char left[200], right[200];
+    char left[600], right[200];
     double ix, iy;
     to_pic(a, a->px, a->py, &ix, &iy);
     bool msg = a->msg[0] && now_ms() - a->msg_ms < 6000;
     const char *hint = hover_hint(a);
     const char *text = msg ? a->msg : hint ? hint : TOOL_HINTS[a->tool];
-    snprintf(left, sizeof(left), "%s", text);
+    snprintf(left, sizeof(left), "%.590s", text);
     if (a->has_pointer && in_canvas(a, a->px, a->py) && ix >= 0 && iy >= 0 && ix < CW(a) && iy < CH(a))
     {
         char ux[24] = "", uy[24] = "", where[80];
@@ -9011,7 +9860,15 @@ static void paint_card(struct app *a)
     int nb = 2;
     bool field = true;
     switch (a->prompt) {
-    case P_OPEN: snprintf(title, sizeof(title), "Open a picture"); line = "Pick a picture below or type its path (Tab completes); an .ora file brings its layers"; labels[1] = "Open"; break;
+    case P_OPEN: {
+        static char many[24];
+        int marked = wlpicker_marked(&a->pk);
+        snprintf(title, sizeof(title), "Open a picture");
+        line = "Ctrl or Shift + click marks several; or type a path (Tab completes)";
+        snprintf(many, sizeof(many), "Open %d", marked);
+        labels[1] = marked ? many : "Open";
+        break;
+    }
     case P_PLACE: snprintf(title, sizeof(title), "Place a picture as a layer"); line = "Pick a picture below or type its path: it becomes a new layer"; labels[1] = "Place"; cols[1] = lm_theme.btn_teal; break;
     case P_SAVEAS: snprintf(title, sizeof(title), "Save as"); line = ""; labels[1] = "Save"; cols[1] = lm_theme.btn_amber; break;
     case P_NEW: snprintf(title, sizeof(title), "New picture"); line = "The size in pixels, like 800x600"; labels[1] = "Create"; cols[1] = lm_theme.btn_green; break;
@@ -9293,15 +10150,21 @@ static void paint(struct wlwin *w)
     paint_tbar(a);
     paint_bbar(a);
     paint_strip(a);
+    paint_tabs(a);
     struct wlrail L, R;                                                 /* the rails after the rulers and the panels: a button's name lies beside it, over them */
     rails(a, &L, &R);
     int64_t now = now_ms();
+    int top = w->iny;
+    w->iny = 0;                                                         /* (they begin at the very top of the window) */
     wlrail_paint(w, &L, &a->ran[0], rail_hover_of(a, false), now, COL_BAR, COL_BAR, COL_ACCENT, lm_theme.text);
     wlrail_paint(w, &R, &a->ran[1], rail_hover_of(a, true), now, COL_BAR, COL_BAR, COL_ACCENT, lm_theme.text);
+    w->iny = top;
+    paint_drag_label(a);
     paint_status(a);
     if (a->prompt != P_NONE)
         paint_card(a);
     cursor_update(a);
+    window_title(a);
     write_dump(a);
 }
 
@@ -9317,6 +10180,16 @@ static void write_dump(struct app *a)
     flat_refresh(a);
     fprintf(f, "image w=%d h=%d hash=%016llx modified=%d path=%s layers=%d cur=%d paper=%08x\n", CW(a), CH(a), (unsigned long long)pix_hash(&a->flat), a->modified ? 1 : 0, a->path[0] ? a->path : "-", a->doc.n,
             a->doc.cur, a->doc.paper);
+    fprintf(f, "tabs n=%d cur=%d top=%d\n", doc_count(a), a->cdoc, WLTABS_H);
+    for (int i = 0, tw = wltabs_tw(tabs_w(a), doc_count(a)); i < doc_count(a); i++) {       /* (blanks in a name as _) */
+        char label[PATH_MAX];
+        tab_label(a, i, label, sizeof(label));
+        for (char *q = label; *q; q++)
+            if (*q == ' ')
+                *q = '_';
+        fprintf(f, "tab %d x=%d y=%d w=%d h=%d modified=%d name=%s\n", i, wltabs_x(WLRAIL_W, tw, i), -WLTABS_H, tw, WLTABS_H, doc_at(a, i)->modified ? 1 : 0, label);
+    }
+    fprintf(f, "tabplus x=%d y=%d w=%d h=%d\n", wltabs_plus_x(WLRAIL_W, wltabs_tw(tabs_w(a), doc_count(a)), doc_count(a)), -WLTABS_H, WLTABS_PLUS_W, WLTABS_H);
     fprintf(f, "state tool=%s fg=%08x bg=%08x size=%d filled=%d zoom=%d fitted=%d undo=%d redo=%d prompt=%d opacity=%d hardness=%d tolerance=%d corner=%d sides=%d density=%d tsize=%d grid=%d\n",
             TOOL_NAMES[a->tool], a->fg, a->bg, a->val[S_SIZE], a->tg[TG_FILLED] ? 1 : 0, (int)(a->zoom * 100.0 + 0.5), a->fitted ? 1 : 0, a->nundo, a->nredo, (int)a->prompt, a->val[S_OPACITY],
             a->val[S_HARD], a->val[S_TOL], a->val[S_CORNER], a->val[S_SIDES], a->val[S_DENSITY], a->tsize, a->grid ? 1 : 0);
@@ -9389,12 +10262,12 @@ static void write_dump(struct app *a)
     static const char *const lnames[N_LEFT] = { "Select", "Move", "Pen", "Retouch", "Eraser", "Shapes", "Fill", "Gradient", "Text", "Picker" };
     for (int i = 0; i < L.n; i++)
         if (ys[i] >= 0)
-            fprintf(f, "btn %s x=%d y=%d w=%d h=%d\n", lnames[i], L.x + (WLRAIL_W - WLRAIL_D) / 2, ys[i], WLRAIL_D, WLRAIL_D);
+            fprintf(f, "btn %s x=%d y=%d w=%d h=%d\n", lnames[i], L.x + (WLRAIL_W - WLRAIL_D) / 2, ys[i] - WLTABS_H, WLRAIL_D, WLRAIL_D);
     wlrail_layout(&R, ys);
     static const char *const names[] = { "New", "Open", "Save", "Undo", "Redo", "Transform", "Effects", "Crop", "Fit", "Help" };
     for (int j = 0; j < R.n; j++)
         if (ys[j] >= 0)
-            fprintf(f, "btn %s x=%d y=%d w=%d h=%d\n", names[j], R.x + (WLRAIL_W - WLRAIL_D) / 2, ys[j], WLRAIL_D, WLRAIL_D);
+            fprintf(f, "btn %s x=%d y=%d w=%d h=%d\n", names[j], R.x + (WLRAIL_W - WLRAIL_D) / 2, ys[j] - WLTABS_H, WLRAIL_D, WLRAIL_D);
     struct strip_g s;
     strip_layout(a, &s);
     fprintf(f, "fgbox x=%d y=%d w=%d h=%d\n", s.fgx, s.fgy, s.fgs, s.fgs);
@@ -11249,6 +12122,10 @@ static int selftest(void)
     return 0;
 }
 
+enum tab_act { TA_ADD_FLAT, TA_ADD_LAYERS, TA_DIFF, TA_COPY, TA_SAVE, TA_SAVEAS, TA_DUP, TA_OTHERS, TA_DETACH, TA_CLOSE };
+#define MENU_TAB 20
+static void tab_action(struct app *a, int act);
+
 static void menu_event(struct wlwin *w, int index)
 {
     struct app *a = w->data;
@@ -11273,6 +12150,8 @@ static void menu_event(struct wlwin *w, int index)
             a->ruler_dpi = RU_DPI[index - RU_COUNT];
         a->vdirty = true;
         say(a, "Rulers in %s at %d dpi", RU_NAME[a->ruler_unit], a->ruler_dpi);
+    } else if (kind == MENU_TAB && index >= 0 && index < a->ntmenu) {
+        tab_action(a, a->tmenu[index]);
     } else if ((kind == 6 || kind == 8) && index >= 0 && index < a->nlmenu) {
         item_action(a, a->lmenu[index]);
     } else if (kind == 7 && index >= 0 && index <= BM_COUNT && a->gsel) {      /* the group's blend mode: 0 = pass through */
@@ -11511,7 +12390,9 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             else if (crows) {
                 char base[PATH_MAX];
                 default_dir(a, base, sizeof(base));
-                if (wlpicker_press(&a->pk, base, a->pbuf, sizeof(a->pbuf), fx, ly, fw, crows, a->px, a->py, args[1].u, (uint32_t)lm_metrics.double_click_ms) == WLPICKER_OPEN)
+                if (a->prompt == P_OPEN && (a->win.mods & (LM_MOD_CTRL | LM_MOD_SHIFT)) && wlpicker_inside(fx, ly, fw, crows, a->px, a->py))
+                    wlpicker_mark_click(&a->pk, base, a->pbuf, fx, ly, fw, crows, a->px, a->py, (a->win.mods & LM_MOD_SHIFT) != 0);
+                else if (wlpicker_press(&a->pk, base, a->pbuf, sizeof(a->pbuf), fx, ly, fw, crows, a->px, a->py, args[1].u, (uint32_t)lm_metrics.double_click_ms) == WLPICKER_OPEN)
                     prompt_accept(a);
                 a->perr[0] = 0;
             } else if (a->prompt == P_NEW) {
@@ -11536,6 +12417,100 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
         a->win.redraw = true;
     } else if (args[2].u == 273 && field && a->py >= c.y + 42 + LM_FONT_H + 8 && a->py < c.y + 42 + LM_FONT_H + 34) {
         wlwin_menu(&a->win, wltext_menu(a->pbuf));
+    }
+}
+
+/* ---- the tabs: pointer and menu ----------------------------------------------------------------------------------------------------- */
+
+static void tab_menu(struct app *a, int t)
+{
+    finish_pending(a);
+    char m[600] = "";
+    a->ntmenu = 0;
+    a->tab_menu_doc = t;
+#define ENTRY(act, ...) do { \
+        snprintf(m + strlen(m), sizeof(m) - strlen(m), "%s", a->ntmenu ? "\n" : ""); \
+        snprintf(m + strlen(m), sizeof(m) - strlen(m), __VA_ARGS__); \
+        a->tmenu[a->ntmenu++] = (act); \
+    } while (0)
+    if (t != a->cdoc) {
+        ENTRY(TA_ADD_FLAT, "Add it here as one layer");
+        ENTRY(TA_ADD_LAYERS, "Add all its layers here");
+        ENTRY(TA_DIFF, "Lay it over this one as a difference");
+        ENTRY(TA_COPY, "Copy the chosen %s into it", a->gsel ? "group" : "layer");
+        ENTRY(TA_SAVE, "Save");
+    } else {
+        ENTRY(TA_SAVE, "Save");
+        ENTRY(TA_SAVEAS, "Save as...");
+        ENTRY(TA_DUP, "Duplicate the picture");
+        ENTRY(TA_OTHERS, "%sAdd the other pictures here as layers", doc_count(a) > 1 ? "" : "~");
+    }
+    ENTRY(TA_DETACH, "%sOpen it in a window of its own", doc_count(a) > 1 ? "" : "~");
+    ENTRY(TA_CLOSE, "Close");
+#undef ENTRY
+    if (!wlwin_menu(&a->win, m))
+        say(a, "The compositor has no menu service");
+    else
+        a->menu_kind = MENU_TAB;
+}
+
+static void tab_action(struct app *a, int act)
+{
+    int t = a->tab_menu_doc;
+    if (t < 0 || t >= doc_count(a))
+        return;
+    switch (act) {
+    case TA_ADD_FLAT: add_flattened(a, t, CW(a) / 2, CH(a) / 2, BM_NORMAL); break;
+    case TA_ADD_LAYERS: add_all_layers(a, t); break;
+    case TA_DIFF: add_flattened(a, t, CW(a) / 2, CH(a) / 2, BM_DIFFERENCE); break;
+    case TA_COPY: copy_chosen_to(a, t); break;
+    case TA_SAVE:
+        tab_switch(a, t);                                               /* (a picture with no name asks for one: it should be the one that shows) */
+        do_save(a);
+        break;
+    case TA_SAVEAS: tab_switch(a, t); ask_saveas(a); break;
+    case TA_DUP: tab_duplicate(a); break;
+    case TA_OTHERS: add_others(a); break;
+    case TA_DETACH: tab_detach(a, t); break;
+    case TA_CLOSE: tab_close(a, t); break;
+    default: break;
+    }
+}
+
+static void tabs_press(struct app *a, uint32_t button)
+{
+    bool on_close;
+    int t = tabs_hit(a, a->px, a->py, &on_close);
+    if (t == WLTABS_PLUS) {
+        if (button == 272)
+            guard(a, AF_NEW);
+    } else if (t >= 0) {
+        if (button == 274 || (button == 272 && on_close))
+            tab_close(a, t);
+        else if (button == 273)
+            tab_menu(a, t);
+        else if (button == 272)                                         /* held: it comes to the front when it is let go where it was */
+            wltabs_press(&a->tdrag, t, a->px, a->py, WLRAIL_W, tabs_w(a), doc_count(a));
+    }
+    a->win.redraw = true;
+}
+
+static void tabs_release(struct app *a)
+{
+    int idx = a->tdrag.idx, r = wltabs_release(&a->tdrag);
+    if (r == WLTABS_CLICK)
+        tab_switch(a, idx);
+    else if (outside_window(a))
+        tab_detach(a, idx);                                             /* pulled out of the window: a window of its own */
+    else if (a->py >= 0 && a->py < cv_h(a) && a->px >= cv_x(a) && a->px < a->win.bw - WLRAIL_W) {      /* let go on the picture: it becomes a layer there */
+        if (idx == a->cdoc)
+            say(a, "Drag another picture's tab here to add it as a layer");
+        else {
+            double ix = CW(a) / 2.0, iy = CH(a) / 2.0;
+            if (in_canvas(a, a->px, a->py))
+                to_pic(a, a->px, a->py, &ix, &iy);                      /* (over the layers panel: to the middle) */
+            add_flattened(a, idx, (int)lround(ix), (int)lround(iy), BM_NORMAL);
+        }
     }
 }
 
@@ -11608,6 +12583,12 @@ static void layers_press(struct app *a, uint32_t button)
         a->lay_click_idx = button == 272 ? 1000 + idx : -1;
         a->lay_click_ms = now;
         group_select(a, idx);
+        if (button == 272 && !dbl) {                                    /* it may be dragged onto another picture's tab */
+            a->ldrag = true;
+            a->ldrag_on = false;
+            a->ldrag_x = a->px;
+            a->ldrag_y = a->py;
+        }
         if (dbl) {
             prompt_open(a, P_LAYERNAME, a->doc.G[idx - 1].name);
             wltext_select_all(a->pbuf);
@@ -11631,6 +12612,12 @@ static void layers_press(struct app *a, uint32_t button)
         a->lay_click_idx = button == 272 ? idx : -1;
         a->lay_click_ms = now;
         layer_select(a, idx);
+        if (button == 272 && !dbl) {
+            a->ldrag = true;
+            a->ldrag_on = false;
+            a->ldrag_x = a->px;
+            a->ldrag_y = a->py;
+        }
         if (dbl) {
             prompt_open(a, P_LAYERNAME, a->doc.L[a->doc.cur].name);
             wltext_select_all(a->pbuf);
@@ -11745,6 +12732,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_LEAVE:
         a->has_pointer = false;
         a->hover = -1;
+        a->tab_hover = -1;
         wlrail_release(&a->ran[0]);
         wlrail_release(&a->ran[1]);
         w->redraw = true;
@@ -11765,7 +12753,17 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         int h = button_at(a, a->px, a->py);
         if (h != a->hover)
             a->hover = h;
-        if (a->guide_drag >= 0) {                                      /* a guide follows the pointer */
+        {
+            bool c;
+            a->tab_hover = tabs_hit(a, a->px, a->py, &c);
+        }
+        if (a->ldrag && !a->ldrag_on && hypot(a->px - a->ldrag_x, a->py - a->ldrag_y) >= 6)
+            a->ldrag_on = true;
+        if (a->tdrag.active) {                                          /* a held tab moves along the bar */
+            int from = a->tdrag.idx, to = wltabs_motion(&a->tdrag, a->px, a->py, WLRAIL_W, -WLTABS_H, tabs_w(a), doc_count(a));
+            if (to >= 0)
+                tab_move(a, from, to);
+        } else if (a->guide_drag >= 0) {                                      /* a guide follows the pointer */
             double ix, iy;
             to_pic(a, a->px, a->py, &ix, &iy);
             a->guide[a->guide_drag].pos = (int)lround(a->guide[a->guide_drag].vert ? ix : iy);
@@ -11801,6 +12799,20 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             wlrail_release(&a->ran[0]);
             wlrail_release(&a->ran[1]);
             a->lay_grab = -1;
+            if (button == 272) {
+                if (a->ldrag_on) {                                      /* a layer let go on another picture's tab */
+                    bool c;
+                    int t = tabs_hit(a, a->px, a->py, &c);
+                    if (t >= 0 && t != a->cdoc)
+                        copy_chosen_to(a, t);
+                }
+                a->ldrag = a->ldrag_on = false;
+                if (a->tdrag.active) {
+                    tabs_release(a);
+                    w->redraw = true;
+                    break;
+                }
+            }
             if (a->sl_drag >= 0) {
                 a->sl_drag = -1;
                 a->modified = a->modified || false;
@@ -11840,6 +12852,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             int idx = rail_hover_of(a, right);
             if (idx < 0 || !r->it[idx].idle)
                 press_button(a, bi);
+            break;
+        }
+        if (a->py < 0) {
+            tabs_press(a, button);
             break;
         }
         if (layers_on(a) && a->px >= panel_x(a) && a->px < panel_x(a) + LP_W && a->py < cv_h(a)) {
@@ -11911,6 +12927,11 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
             int sidx, lidx;
             if (v == 0)
                 break;
+            if (a->py < 0) {                                            /* the wheel over the tabs: the next picture */
+                int n = doc_count(a);
+                tab_switch(a, LM_CLAMP(a->cdoc + (v < 0 ? -1 : 1), 0, n - 1));
+                break;
+            }
             int hit = strip_hit(a, a->px, a->py, &sidx);
             struct strip_g s;
             strip_layout(a, &s);
@@ -11967,7 +12988,7 @@ static void prompt_key(struct app *a, uint32_t ks)
     if (a->prompt == P_DISCARD) {
         if (ks == LM_KS_Escape || ks == 'c' || ks == 'C') {
             a->prompt = P_NONE;
-            a->after = AF_NONE;
+            discard_cancel(a);
         } else if (ks == 'd' || ks == 'D')
             discard_chosen(a, false);
         else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter || ks == 's' || ks == 'S')
@@ -11975,9 +12996,10 @@ static void prompt_key(struct app *a, uint32_t ks)
         return;
     }
     if (a->prompt == P_REPLACE) {
-        if (ks == LM_KS_Escape || ks == 'n' || ks == 'N')
+        if (ks == LM_KS_Escape || ks == 'n' || ks == 'N') {
             a->prompt = P_NONE;
-        else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter || ks == 'y' || ks == 'Y')
+            discard_cancel(a);
+        } else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter || ks == 'y' || ks == 'Y')
             prompt_accept(a);
         return;
     }
@@ -12037,8 +13059,12 @@ static void prompt_key(struct app *a, uint32_t ks)
             if (cp_parse_hex(a->pbuf, &c))
                 cp_set(a, c, false);
         }
+    } else if (a->prompt == P_OPEN && card_list_rows(a) && (a->win.mods & LM_MOD_SHIFT) && (ks == LM_KS_Up || ks == LM_KS_Down)) {
+        char base[PATH_MAX];
+        default_dir(a, base, sizeof(base));
+        wlpicker_extend(&a->pk, base, a->pbuf, card_list_rows(a), ks);        /* Shift marks the files it passes */
     } else if (card_list_rows(a) && (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down ||
-                                     ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0))) {
+                                     ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0 && !wlpicker_marked(&a->pk)))) {
         char base[PATH_MAX];
         default_dir(a, base, sizeof(base));
         if (wlpicker_key(&a->pk, base, a->pbuf, sizeof(a->pbuf), card_list_rows(a), ks) == WLPICKER_OPEN)
@@ -12091,6 +13117,19 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         prompt_key(a, ks);
         return;
     }
+    if (ctrl && (ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || ks == LM_KS_Tab)) {          /* the tabs */
+        bool tabk = ks == LM_KS_Tab;
+        int d = tabk ? (shift ? -1 : 1) : ks == LM_KS_Page_Up ? -1 : 1, n = doc_count(a);
+        if (shift && !tabk)
+            tab_move(a, a->cdoc, LM_CLAMP(a->cdoc + d, 0, n - 1));
+        else
+            tab_switch(a, (a->cdoc + d + n) % n);
+        return;
+    }
+    if (alt && !ctrl && ks >= '1' && ks <= '9') {
+        tab_switch(a, (int)(ks - '1'));
+        return;
+    }
     if (a->txt.on && text_key(a, ks, w->mods))
         return;
     char txt[8];
@@ -12122,6 +13161,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         case 'z': do_undo(a, shift); break;
         case 'y': do_undo(a, true); break;
         case 'q': guard(a, AF_QUIT); break;
+        case 'w': guard(a, AF_CLOSE); break;
         case 'r': finish_pending(a); ask_resize(a); break;
         case 'a': finish_pending(a); sel_all(a); break;
         case 'd': finish_pending(a); sel_clear(&a->sel); a->vdirty = true; break;
@@ -12208,8 +13248,10 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 static bool close_event(struct wlwin *w)
 {
     struct app *a = w->data;
+    if (a->prompt != P_NONE)
+        prompt_close(a, false);
     finish_pending(a);
-    if (!a->modified)
+    if (!any_unsaved(a))
         return true;
     guard(a, AF_QUIT);                                                  /* asks; the window stays until the answer */
     w->redraw = true;
@@ -12441,10 +13483,20 @@ int main(int argc, char **argv)
         return animate_cmd(argc - 2, argv + 2);
     static struct app a;
     wlpicker_init(&a.pk, card_name_ok);
-    int nw = 0, nh = 0, win_w = 1000, win_h = 680;
-    const char *file = NULL;
+    int nw = 0, nh = 0, win_w = 1000, win_h = 680, nfiles = 0;
+    static const char *files[256];
+    const char *adopt = NULL, *adopt_path = "";             /* a picture handed over by another Paint window (spawn_adopter) */
+    int adopt_fd = -1, adopt_modified = 0, adopt_untitled = 0, adopt_layer = 0;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--new") && i + 1 < argc) {
+        if (!strcmp(argv[i], "--adopt") && i + 6 < argc) {
+            adopt = argv[i + 1];
+            adopt_fd = atoi(argv[i + 2]);
+            adopt_modified = atoi(argv[i + 3]);
+            adopt_untitled = atoi(argv[i + 4]);
+            adopt_layer = atoi(argv[i + 5]);
+            adopt_path = argv[i + 6];
+            i += 6;
+        } else if (!strcmp(argv[i], "--new") && i + 1 < argc) {
             char junk;
             if (sscanf(argv[++i], "%dx%d%c", &nw, &nh, &junk) != 2 || nw < 1 || nh < 1) {
                 fprintf(stderr, "mellagui-paint: --new wants a size like 800x600\n");
@@ -12457,16 +13509,31 @@ int main(int argc, char **argv)
                 return 2;
             }
         } else if (argv[i][0] == '-') {
-            fprintf(stderr, "usage: mellagui-paint [--size WxH] [FILE | --new WxH [FILE]] | --apply IN OUT OP... | --selftest\n");
+            fprintf(stderr, "usage: mellagui-paint [--size WxH] [FILE... | --new WxH [FILE]] | --apply IN OUT OP... | --selftest\n");
             return 2;
-        } else if (!file) {
-            file = argv[i];
-        } else {
-            fprintf(stderr, "usage: mellagui-paint [FILE | --new WxH [FILE] | --apply IN OUT OP... | --selftest]\n");
-            return 2;
+        } else if (nfiles < (int)LM_ARRAY_LEN(files)) {
+            files[nfiles++] = argv[i];
         }
     }
+    if (nw > 0 && nfiles > 1) {
+        fprintf(stderr, "mellagui-paint: --new takes one file name at most\n");
+        return 2;
+    }
     g_dump = getenv("MELLAGUI_PAINT_DUMP");
+    if (adopt && g_dump) {                                          /* (a second window of one test run writes its own state) */
+        static char dump2[PATH_MAX + 16];
+        snprintf(dump2, sizeof(dump2), "%s.moved", g_dump);
+        g_dump = dump2;
+    }
+    struct doc adopted;
+    if (adopt) {                                                    /* read it at once: the sender waits, and takes the file away when we answer */
+        char err[160];
+        memset(&adopted, 0, sizeof(adopted));
+        if (!load_doc(adopt, &adopted, err, sizeof(err))) {
+            fprintf(stderr, "mellagui-paint: the picture could not be taken over: %s\n", err);
+            return 1;
+        }
+    }
     if (!getcwd(g_startdir, sizeof(g_startdir)))
         g_startdir[0] = 0;
     a.hover = -1;
@@ -12501,24 +13568,60 @@ int main(int argc, char **argv)
     static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .close = close_event, .menu = menu_event };
     a.zoom = 1.0;
     a.fitted = true;
+    a.docs = calloc(MAX_DOCS, sizeof(a.docs[0]));
+    if (!a.docs)
+        return 1;
+    a.ndocs = 1;
+    a.tab_hover = -1;
     if (wlwin_connect(&a.win, "mellagui-paint", &ops, &a) < 0)
         return 1;
+    wlwin_set_top(&a.win, WLTABS_H);                                    /* the tabs with the pictures' names lie above the drawing area (after the connect, which clears the window) */
     if (wlwin_open(&a.win, "Paint", "mellagui.paint", win_w, win_h, 680, 460) < 0)
         return 1;
     wlclip_attach(&a.clip, &a.win);
-    if (nw > 0) {
-        new_doc(&a, nw, nh, file ? file : "", false);
-    } else if (file) {
-        if (!open_image(&a, file)) {                                    /* a name that does not exist yet: an empty picture that Save puts there */
-            struct stat st;
-            if (stat(file, &st) != 0)
-                new_doc(&a, 800, 600, file, false);
-            else
-                new_doc(&a, 800, 600, "", false);
-            say(&a, "Could not open %s: it is a new picture", file);
+    if (adopt) {
+        a.doc = adopted;
+        a.doc.cur = LM_CLAMP(adopt_layer, 0, a.doc.n - 1);
+        snprintf(a.path, sizeof(a.path), "%s", adopt_path);
+        a.modified = adopt_modified != 0;
+        a.untitled = a.nuntitled = adopt_untitled;
+        flat_mark_all(&a);
+        view_fit(&a);
+        if (adopt_fd > 2) {
+            if (write(adopt_fd, "k", 1) != 1)
+                return 1;                                           /* (the sender gave up: the picture is still there) */
+            close(adopt_fd);
         }
+    } else if (nw > 0) {
+        new_doc(&a, nw, nh, nfiles ? files[0] : "", false);
+    } else if (nfiles) {
+        char bad[sizeof(a.msg)] = "";
+        for (int i = 0; i < nfiles; i++) {
+            if (a.doc.n && tab_of_path(&a, files[i]) >= 0)
+                continue;
+            if (a.doc.n && !tab_add(&a))
+                break;
+            if (open_image(&a, files[i]))
+                continue;
+            struct stat st;
+            if (stat(files[i], &st) != 0) {                             /* a name that does not exist yet: an empty picture that Save puts there */
+                new_doc(&a, 800, 600, files[i], false);
+            } else if (a.ndocs > 1) {
+                tab_remove(&a, a.cdoc);
+            }
+            snprintf(bad, sizeof(bad), "Could not open %.100s: %s", files[i], stat(files[i], &st) != 0 && a.path[0] ? "it is a new picture" : "left out");
+        }
+        if (!a.doc.n) {                                                 /* nothing could be opened */
+            new_doc(&a, 800, 600, "", false);
+            if (nfiles == 1)
+                snprintf(bad, sizeof(bad), "Could not open %.100s: it is a new picture", files[0]);
+        }
+        tab_switch(&a, 0);
+        if (bad[0])
+            say(&a, "%s", bad);
     } else {
         new_doc(&a, 800, 600, "", false);
+        a.scratch = true;
     }
     while (a.win.running) {
         int timeout = -1;
@@ -12545,10 +13648,11 @@ int main(int argc, char **argv)
     }
     conf_save(&a);
     text_end(&a);
-    drop_snaps(a.undo, &a.nundo);
-    drop_snaps(a.redo, &a.nredo);
-    doc_free(&a.doc);
-    pix_free(&a.flat);
+    for (int i = 0; i < a.ndocs; i++)
+        if (i != a.cdoc)
+            pdoc_free(&a.docs[i]);
+    pdoc_free(&a.front);
+    free(a.docs);
     stroke_end(&a);
     move_end(&a);
     pix_free(&a.clipimg);
@@ -12558,7 +13662,6 @@ int main(int argc, char **argv)
     sel_clear(&a.sel_base);
     if (a.fx_snap_ok)
         snap_free(&a.fx_snap);
-    sel_clear(&a.sel);
     free(a.lx_pts);
     free(a.ly_pts);
     free(a.vbuf);

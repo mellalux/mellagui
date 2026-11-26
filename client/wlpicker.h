@@ -16,6 +16,9 @@
  *   wlpicker_typed(&p)                  the field was edited: the list follows what is typed
  *   wlpicker_dump(...)                  the `clist` / `crow` lines of the programs' test dumps
  *
+ *   multi = true                        several files: the program calls wlpicker_mark_click for a click with Ctrl (toggles one) or Shift (a run) and
+ *                                       wlpicker_extend for Shift+Up / Down; wlpicker_marked counts them, wlpicker_marked_path names the k-th
+ *
  * `base` is the folder a relative path (and the empty field) means. `~/` and absolute paths are understood (pathcomp.h).
  */
 #ifndef MELLAGUI_WLPICKER_H
@@ -48,6 +51,7 @@
 struct wlpicker_ent {
     char name[256];
     bool dir;
+    bool mark;                          /* chosen together with others (multi) */
 };
 
 struct wlpicker {
@@ -58,6 +62,7 @@ struct wlpicker {
     uint32_t click_ms;                  /* when the last row was clicked (double clicks) */
     char dir[PATH_MAX];                 /* the folder `ent` was read from ("" = read it again) */
     bool (*want)(const char *name);
+    bool multi;                         /* several files may be marked: wlpicker_mark_click / wlpicker_extend; a plain click forgets the marks */
 };
 
 enum { WLPICKER_NOTHING = 0, WLPICKER_MOVED = 1, WLPICKER_OPEN = 2 };     /* what a click or a key did: nothing / changed the field / a file was taken */
@@ -159,6 +164,7 @@ static inline void wlpicker_load(struct wlpicker *p, const char *base, const cha
         struct wlpicker_ent *c = &p->ent[p->n++];
         snprintf(c->name, sizeof(c->name), "%s", e->d_name);
         c->dir = dir;
+        c->mark = false;
     }
     closedir(d);
     if (p->n > 1)
@@ -252,6 +258,81 @@ static inline int wlpicker_key(struct wlpicker *p, const char *base, char *field
     return WLPICKER_NOTHING;
 }
 
+static inline bool wlpicker_inside(int x, int y, int wd, int rows, double px, double py)
+{
+    return px >= x && px < x + wd && py >= y + 4 && py < y + 4 + rows * WLPICKER_ROW_H;
+}
+
+/* ---- several files at once (multi) ---- */
+
+static inline int wlpicker_marked(const struct wlpicker *p)
+{
+    int n = 0;
+    for (int i = 0; i < p->n; i++)
+        n += p->ent[i].mark;
+    return n;
+}
+
+/* The whole path of the k-th marked file (in the list's order); false when there are not that many. */
+static inline bool wlpicker_marked_path(const struct wlpicker *p, int k, char *out, size_t n)
+{
+    for (int i = 0; i < p->n; i++)
+        if (p->ent[i].mark && !k--) {
+            snprintf(out, n, "%.*s/%s", (int)(strlen(p->dir) < n ? strlen(p->dir) : n), strcmp(p->dir, "/") ? p->dir : "", p->ent[i].name);
+            return true;
+        }
+    return false;
+}
+
+/* Marks the file of the list row `row` (a folder and ".." are never marked); `on` = 0 off, 1 on, 2 the other way. */
+static inline void wlpicker_mark_row(struct wlpicker *p, const int *idx, int n, int row, int on)
+{
+    if (row < 0 || row >= n || idx[row] < 0 || p->ent[idx[row]].dir)
+        return;
+    p->ent[idx[row]].mark = on == 2 ? !p->ent[idx[row]].mark : on != 0;
+}
+
+/* A click with Ctrl (`range` false: the file is added or taken away) or Shift (`range` true: everything from the chosen row to here). The field stays. */
+static inline int wlpicker_mark_click(struct wlpicker *p, const char *base, const char *field, int x, int y, int wd, int rows, double px, double py, bool range)
+{
+    if (rows <= 0 || !wlpicker_inside(x, y, wd, rows, px, py) || px >= x + wd - lm_metrics.scrollbar_width - 4)
+        return WLPICKER_NOTHING;
+    int idx[WLPICKER_MAX_ENTRIES + 1];
+    int n = wlpicker_list(p, base, field, idx, WLPICKER_MAX_ENTRIES), row = p->top + ((int)py - y - 4) / WLPICKER_ROW_H;
+    if (row >= n || idx[row] < 0 || p->ent[idx[row]].dir)
+        return WLPICKER_NOTHING;
+    if (!wlpicker_marked(p))
+        wlpicker_mark_row(p, idx, n, p->sel, 1);                                /* (the one that was chosen with a plain click comes along) */
+    if (range && p->sel >= 0)
+        for (int k = p->sel < row ? p->sel : row; k <= (p->sel < row ? row : p->sel); k++)
+            wlpicker_mark_row(p, idx, n, k, 1);
+    else
+        wlpicker_mark_row(p, idx, n, row, 2);
+    p->sel = row;
+    p->click_ms = 0;
+    return WLPICKER_MOVED;
+}
+
+/* Shift+Up / Down: the chosen row moves and the files it passes are marked. */
+static inline int wlpicker_extend(struct wlpicker *p, const char *base, const char *field, int rows, uint32_t ks)
+{
+    if (rows <= 0 || (ks != LM_KS_Up && ks != LM_KS_Down))
+        return WLPICKER_NOTHING;
+    int idx[WLPICKER_MAX_ENTRIES + 1];
+    int n = wlpicker_list(p, base, field, idx, WLPICKER_MAX_ENTRIES);
+    if (n == 0)
+        return WLPICKER_MOVED;
+    wlpicker_mark_row(p, idx, n, p->sel, 1);
+    p->sel = p->sel < 0 ? 0 : p->sel + (ks == LM_KS_Up ? -1 : 1);
+    p->sel = p->sel < 0 ? 0 : p->sel > n - 1 ? n - 1 : p->sel;
+    wlpicker_mark_row(p, idx, n, p->sel, 1);
+    if (p->sel < p->top)
+        p->top = p->sel;
+    if (p->sel >= p->top + rows)
+        p->top = p->sel - rows + 1;
+    return WLPICKER_MOVED;
+}
+
 /* ---- painting ---- */
 
 static inline void wlpicker_paint(struct wlwin *w, struct wlpicker *p, const char *base, const char *field, int x, int y, int wd, int rows,
@@ -269,7 +350,12 @@ static inline void wlpicker_paint(struct wlwin *w, struct wlpicker *p, const cha
         bool dir = e < 0 || p->ent[e].dir;
         bool over = has_pointer && px >= x && px < x + wd - 10 && py >= ry && py < ry + WLPICKER_ROW_H;
         bool named = e >= 0 && !strcmp(p->ent[e].name, tail ? tail + 1 : field);            /* the file in the field */
-        if (k == p->sel || named || over)
+        bool mark = e >= 0 && p->ent[e].mark;
+        if (p->multi && wlpicker_marked(p))
+            named = false;                                                      /* (the marks say what is chosen) */
+        if (mark)
+            wlwin_round_fill(w, x + 4, ry + 1, wd - 8 - (n > rows ? lm_metrics.scrollbar_width : 0), WLPICKER_ROW_H - 2, 10, lm_theme.btn_blue);
+        else if (k == p->sel || named || over)
             wlwin_round_fill(w, x + 4, ry, wd - 8 - (n > rows ? lm_metrics.scrollbar_width : 0), WLPICKER_ROW_H, 11,
                              k == p->sel || named ? lm_theme.button_hover : lm_theme.panel_line);
         int ix = x + 14, iy = ry + 4;
@@ -281,7 +367,7 @@ static inline void wlpicker_paint(struct wlwin *w, struct wlpicker *p, const cha
             wlwin_fill(w, ix + 4, iy + 5, 6, 1, lm_theme.bar);
             wlwin_fill(w, ix + 4, iy + 8, 6, 1, lm_theme.bar);
         }
-        wlwin_text(w, ix + 24, ry + (WLPICKER_ROW_H - LM_FONT_H) / 2, e < 0 ? ".." : p->ent[e].name, 1, dir ? lm_theme.accent : lm_theme.text_soft, wd - 60);
+        wlwin_text(w, ix + 24, ry + (WLPICKER_ROW_H - LM_FONT_H) / 2, e < 0 ? ".." : p->ent[e].name, 1, mark ? lm_theme.on_colour : dir ? lm_theme.accent : lm_theme.text_soft, wd - 60);
     }
     if (n > rows) {                                                             /* a thin scroll bar */
         int sbw = lm_metrics.scrollbar_width, th = (rows * WLPICKER_ROW_H) * rows / n;
@@ -292,11 +378,6 @@ static inline void wlpicker_paint(struct wlwin *w, struct wlpicker *p, const cha
 }
 
 /* ---- the pointer ---- */
-
-static inline bool wlpicker_inside(int x, int y, int wd, int rows, double px, double py)
-{
-    return px >= x && px < x + wd && py >= y + 4 && py < y + 4 + rows * WLPICKER_ROW_H;
-}
 
 /* A left button press at (px, py); `time_ms` and `dbl_ms` decide a double click. */
 static inline int wlpicker_press(struct wlpicker *p, const char *base, char *field, size_t fsz, int x, int y, int wd, int rows, double px, double py,
@@ -321,6 +402,8 @@ static inline int wlpicker_press(struct wlpicker *p, const char *base, char *fie
     }
     if (row >= n)
         return WLPICKER_NOTHING;
+    for (int i = 0; i < p->n; i++)                                              /* a plain click starts over */
+        p->ent[i].mark = false;
     bool dbl = time_ms - p->click_ms < dbl_ms;
     p->click_ms = time_ms;
     bool file = idx[row] >= 0 && !p->ent[idx[row]].dir, was = p->sel == row;
@@ -368,7 +451,8 @@ static inline void wlpicker_dump(FILE *f, struct wlpicker *p, const char *base, 
     int n = wlpicker_list(p, base, field, idx, WLPICKER_MAX_ENTRIES);
     fprintf(f, "clist %d %d %d %d csel=%d count=%d\n", x + xoff, y + 4, wd, rows * WLPICKER_ROW_H, p->sel, n);
     for (int k = p->top; k < n && k < p->top + rows; k++)
-        fprintf(f, "crow %d y=%d dir=%d name=%s\n", k, y + 4 + (k - p->top) * WLPICKER_ROW_H, idx[k] < 0 || p->ent[idx[k]].dir, idx[k] < 0 ? ".." : p->ent[idx[k]].name);
+        fprintf(f, "crow %d y=%d dir=%d %sname=%s\n", k, y + 4 + (k - p->top) * WLPICKER_ROW_H, idx[k] < 0 || p->ent[idx[k]].dir, idx[k] >= 0 && p->ent[idx[k]].mark ? "mark=1 " : "",
+                idx[k] < 0 ? ".." : p->ent[idx[k]].name);                      /* (the extra word only on a marked row) */
 }
 
 #endif

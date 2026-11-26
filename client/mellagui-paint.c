@@ -549,32 +549,239 @@ static void cov_commit(struct pix *dst, const struct pix *before, const struct c
         }
 }
 
-/* A gradient from `c0` to `c1` along (x0,y0) - (x1,y1), or round about (x0,y0) with the radius to (x1,y1). */
-static void gradient_commit(struct pix *dst, const struct pix *before, struct irect r, double x0, double y0, double x1, double y1, bool radial, uint32_t c0, uint32_t c1,
-                            int opacity, const struct sel *sel)
+/* A fill of empty room goes UNDER the soft edge of the lines round it too, or a light seam would stay between the fill and the line. The pixels of that edge
+ * are marked UNDER in the coverage: from the filled pixels (255) outwards as long as the pixels get more solid, so it ends in the middle of a line and does
+ * not come out on its other side. */
+#define UNDER 1
+static void cov_under_edges(const struct pix *before, struct cov *c, struct irect *dirty)
 {
+    int w = before->w, h = before->h;
+    size_t n = 0, cap = 4096;
+    uint32_t *q = malloc(cap * sizeof(*q));
+    struct irect d = *dirty;
+    irect_clip(&d, w, h);
+    if (!q)
+        return;
+    for (int y = d.y0; y < d.y1; y++)                                   /* the filled pixels that have a neighbour which is not */
+        for (int x = d.x0; x < d.x1; x++) {
+            size_t i = (size_t)y * (size_t)w + (size_t)x;
+            if (c->p[i] != 255 || !((x > 0 && !c->p[i - 1]) || (x < w - 1 && !c->p[i + 1]) || (y > 0 && !c->p[i - (size_t)w]) || (y < h - 1 && !c->p[i + (size_t)w])))
+                continue;
+            if (n == cap) {
+                uint32_t *nq = realloc(q, (cap *= 2) * sizeof(*q));
+                if (!nq)
+                    goto out;
+                q = nq;
+            }
+            q[n++] = (uint32_t)i;
+        }
+    for (size_t at = 0; at < n; at++) {
+        size_t i = q[at];
+        int x = (int)(i % (size_t)w), y = (int)(i / (size_t)w), from = ch_a(before->p[i]);
+        for (int k = 0; k < 4; k++) {
+            int nx = x + (k == 0) - (k == 1), ny = y + (k == 2) - (k == 3);
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h)
+                continue;
+            size_t j = (size_t)ny * (size_t)w + (size_t)nx;
+            int al = ch_a(before->p[j]);
+            if (c->p[j] || al >= 255 || al == 0 || (c->p[i] != 255 && al <= from))
+                continue;
+            c->p[j] = UNDER;
+            irect_add(dirty, nx, ny, nx + 1, ny + 1);
+            if (n == cap) {
+                uint32_t *nq = realloc(q, (cap *= 2) * sizeof(*q));
+                if (!nq)
+                    goto out;
+                q = nq;
+            }
+            q[n++] = (uint32_t)j;
+        }
+    }
+out:
+    free(q);
+}
+
+/* `col` laid under a pixel with strength `k` (0..255). */
+static uint32_t blend_under(uint32_t px, uint32_t col, int k) { return blend(blend(0, col, k), px, 255); }
+
+/* ---- the gradient: colour stops along a line, in one of several shapes ------------------------------------------------------------- */
+
+enum { GS_OWN, GS_FG, GS_BG, GS_FGCLEAR };                             /* a stop has a colour of its own, or follows the pen / the second colour */
+enum { GR_LINEAR, GR_RADIAL, GR_ANGLE, GR_DIAMOND, GR_MIRRORED, GR_SHAPES };
+enum { GR_ONCE, GR_REPEAT, GR_PINGPONG, GR_REPEATS };
+#define MAX_STOPS 16
+#define GR_END 10000                                                    /* a stop's place: 0 .. GR_END along the line; the first is at 0, the last at the end */
+static const char *const GR_SHAPE_NAMES[GR_SHAPES] = { "Linear", "Radial", "Angle", "Diamond", "Mirrored" };
+static const char *const GR_REPEAT_NAMES[GR_REPEATS] = { "Once", "Repeat", "Ping-pong" };
+
+struct gstop { int pos; uint32_t c; int src; };
+struct grad { int n, shape, repeat; struct gstop s[MAX_STOPS]; };       /* (all ints: it is compared byte for byte) */
+
+/* The colour at `t` (0..1) as four numbers (a, r, g, b; 0..255). Mixed by alpha, so a see-through stop does not tint its neighbour's colour. */
+static void grad_at(const struct grad *g, double t, double out[4])
+{
+    double p = t * GR_END;
+    int i = 0;
+    while (i < g->n - 2 && p >= g->s[i + 1].pos)
+        i++;
+    const struct gstop *l = &g->s[i], *r = &g->s[i + 1];
+    double k = r->pos > l->pos ? (p - l->pos) / (r->pos - l->pos) : p >= r->pos ? 1.0 : 0.0;
+    k = k < 0 ? 0 : k > 1 ? 1 : k;
+    double la = ch_a(l->c), ra = ch_a(r->c), a = la + (ra - la) * k;
+    double lw = a > 0 ? la * (1.0 - k) / a : 1.0 - k, rw = a > 0 ? ra * k / a : k;
+    out[0] = a;
+    out[1] = ch_r(l->c) * lw + ch_r(r->c) * rw;
+    out[2] = ch_g(l->c) * lw + ch_g(r->c) * rw;
+    out[3] = ch_b(l->c) * lw + ch_b(r->c) * rw;
+}
+
+static uint32_t grad_colour(const struct grad *g, double t)
+{
+    double v[4];
+    grad_at(g, t, v);
+    return argb((int)(v[0] + 0.5), (int)(v[1] + 0.5), (int)(v[2] + 0.5), (int)(v[3] + 0.5));
+}
+
+/* Where on the line a point lies: (px, py) from the start, (dx, dy) the line. */
+static double grad_param(int shape, int repeat, double px, double py, double dx, double dy)
+{
+    double len2 = dx * dx + dy * dy, t;
+    if (len2 <= 0)
+        return 1.0;
+    double u = (px * dx + py * dy) / len2, v = (py * dx - px * dy) / len2;
+    switch (shape) {
+    case GR_RADIAL: t = sqrt(u * u + v * v); break;
+    case GR_ANGLE:                                                      /* once round the start, from the line on; ping-pong has no seam */
+        t = atan2(v, u) / 6.283185307179586;
+        t = t < 0 ? t + 1.0 : t;
+        return repeat == GR_PINGPONG ? 1.0 - fabs(2.0 * t - 1.0) : t;
+    case GR_DIAMOND: t = fabs(u) + fabs(v); break;
+    case GR_MIRRORED: t = fabs(u); break;
+    default: t = u; break;
+    }
+    if (repeat == GR_REPEAT)
+        return t - floor(t);
+    if (repeat == GR_PINGPONG) {
+        t = fabs(fmod(t, 2.0));
+        return t > 1.0 ? 2.0 - t : t;
+    }
+    return t < 0 ? 0 : t > 1 ? 1 : t;
+}
+
+/* The gradient (its colours already worked out) from (x0,y0) to (x1,y1) over `before`, inside the selection. It is dithered, so that a long soft
+ * gradient shows no bands; where the colour is a whole number it stays exactly that. `area` (NULL = everywhere) is a byte for every pixel: 0 leaves it,
+ * UNDER lays the gradient under it, else over it. */
+static void gradient_commit(struct pix *dst, const struct pix *before, struct irect r, double x0, double y0, double x1, double y1, const struct grad *g, bool reverse,
+                            int opacity, const struct sel *sel, const uint8_t *area)
+{
+    static const uint8_t BAYER[8][8] = { { 0, 32, 8, 40, 2, 34, 10, 42 },   { 48, 16, 56, 24, 50, 18, 58, 26 }, { 12, 44, 4, 36, 14, 46, 6, 38 }, { 60, 28, 52, 20, 62, 30, 54, 22 },
+                                         { 3, 35, 11, 43, 1, 33, 9, 41 },   { 51, 19, 59, 27, 49, 17, 57, 25 }, { 15, 47, 7, 39, 13, 45, 5, 37 }, { 63, 31, 55, 23, 61, 29, 53, 21 } };
+    enum { N = 2048 };
+    static uint16_t lut[N][4];                                          /* in 256ths */
+    for (int i = 0; i < N; i++) {
+        double v[4];
+        grad_at(g, i / (double)(N - 1), v);
+        for (int k = 0; k < 4; k++)
+            lut[i][k] = (uint16_t)(LM_CLAMP(v[k], 0.0, 255.0) * 256.0 + 0.5);
+    }
     irect_clip(&r, dst->w, dst->h);
-    double dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy, len = sqrt(len2);
+    double dx = x1 - x0, dy = y1 - y0;
     for (int y = r.y0; y < r.y1; y++)
         for (int x = r.x0; x < r.x1; x++) {
             size_t i = (size_t)y * (size_t)dst->w + (size_t)x;
-            int cv = sel_at(sel, x, y);
+            int cv = area && !area[i] ? 0 : sel_at(sel, x, y);
             if (!cv) {
                 dst->p[i] = before->p[i];
                 continue;
             }
-            double px = x + 0.5 - x0, py = y + 0.5 - y0, t;
-            if (radial)
-                t = len > 0 ? sqrt(px * px + py * py) / len : 1.0;
-            else
-                t = len2 > 0 ? (px * dx + py * dy) / len2 : 1.0;
-            t = t < 0 ? 0 : t > 1 ? 1 : t;
-            int a = (int)(ch_a(c0) + (ch_a(c1) - ch_a(c0)) * t + 0.5);
-            uint32_t col = argb(a, (int)(ch_r(c0) + (ch_r(c1) - ch_r(c0)) * t + 0.5), (int)(ch_g(c0) + (ch_g(c1) - ch_g(c0)) * t + 0.5), (int)(ch_b(c0) + (ch_b(c1) - ch_b(c0)) * t + 0.5));
-            int k = cv * opacity / 100;
-            dst->p[i] = a <= 0 || k <= 0 ? before->p[i] : blend(before->p[i], col, k);
+            double t = grad_param(g->shape, g->repeat, x + 0.5 - x0, y + 0.5 - y0, dx, dy);
+            if (reverse)
+                t = 1.0 - t;
+            const uint16_t *c = lut[(int)(t * (N - 1) + 0.5)];
+            int d = BAYER[y & 7][x & 7] * 4 + 2;
+            int a = (c[0] + d) >> 8, k = cv * opacity / 100;
+            if (a <= 0 || k <= 0) {
+                dst->p[i] = before->p[i];
+                continue;
+            }
+            uint32_t col = argb(a, (c[1] + d) >> 8, (c[2] + d) >> 8, (c[3] + d) >> 8);
+            dst->p[i] = area && area[i] == UNDER ? blend_under(before->p[i], col, k) : blend(before->p[i], col, k);
         }
 }
+
+/* The ready made colours. */
+static const char *const GR_PRESET_MENU = "Pen colour to second colour\nPen colour to clear\nBlack to white\nRainbow\nSunset\nSky\nFire\nOcean\nSteel\nGold";
+#define GR_PRESETS 10
+static void grad_preset(struct grad *g, int which)
+{
+    static const struct { int n; struct gstop s[7]; } P[GR_PRESETS] = {
+        { 2, { { 0, 0, GS_FG }, { GR_END, 0, GS_BG } } },
+        { 2, { { 0, 0, GS_FG }, { GR_END, 0, GS_FGCLEAR } } },
+        { 2, { { 0, 0xff000000u, GS_OWN }, { GR_END, 0xffffffffu, GS_OWN } } },
+        { 7, { { 0, 0xffe53935u, 0 }, { 1667, 0xfffb8c00u, 0 }, { 3333, 0xfffdd835u, 0 }, { 5000, 0xff43a047u, 0 }, { 6667, 0xff1e88e5u, 0 }, { 8333, 0xff3949abu, 0 }, { GR_END, 0xff8e24aau, 0 } } },
+        { 5, { { 0, 0xff1a1446u, 0 }, { 3000, 0xff6b2a7au, 0 }, { 5500, 0xffd9486eu, 0 }, { 7800, 0xfffb8c3cu, 0 }, { GR_END, 0xffffe08au, 0 } } },
+        { 3, { { 0, 0xff1565c0u, 0 }, { 5500, 0xff64b5f6u, 0 }, { GR_END, 0xffe3f2fdu, 0 } } },
+        { 5, { { 0, 0xff000000u, 0 }, { 2800, 0xffb71c1cu, 0 }, { 5500, 0xfff4511eu, 0 }, { 8000, 0xffffca28u, 0 }, { GR_END, 0xfffffde7u, 0 } } },
+        { 4, { { 0, 0xff04122bu, 0 }, { 4000, 0xff0d4f78u, 0 }, { 7500, 0xff1fa6a0u, 0 }, { GR_END, 0xffc8f2e4u, 0 } } },
+        { 6, { { 0, 0xff5f6a72u, 0 }, { 2500, 0xffe8eef2u, 0 }, { 4500, 0xff8b979fu, 0 }, { 5500, 0xff4a545bu, 0 }, { 7800, 0xffcfd8deu, 0 }, { GR_END, 0xff707b83u, 0 } } },
+        { 5, { { 0, 0xff6b4a0cu, 0 }, { 3000, 0xfff6d365u, 0 }, { 5000, 0xfffff6c8u, 0 }, { 7000, 0xffd4a017u, 0 }, { GR_END, 0xff7a540fu, 0 } } },
+    };
+    if (which < 0 || which >= GR_PRESETS)
+        return;
+    memset(g->s, 0, sizeof(g->s));
+    g->n = P[which].n;
+    memcpy(g->s, P[which].s, (size_t)g->n * sizeof(g->s[0]));
+}
+
+/* A new stop at `pos` with the colour the gradient `shown` has there (it changes nothing to look at). Returns its number, -1 when there is no room. */
+static int grad_add(struct grad *g, const struct grad *shown, int pos)
+{
+    if (g->n >= MAX_STOPS)
+        return -1;
+    pos = LM_CLAMP(pos, 0, GR_END);
+    int i = 1;
+    while (i < g->n - 1 && g->s[i].pos <= pos)
+        i++;
+    uint32_t c = grad_colour(shown, pos / (double)GR_END);
+    memmove(&g->s[i + 1], &g->s[i], (size_t)(g->n - i) * sizeof(g->s[0]));
+    g->s[i] = (struct gstop){ pos, c, GS_OWN };
+    g->n++;
+    return i;
+}
+
+static bool grad_remove(struct grad *g, int i)
+{
+    if (i <= 0 || i >= g->n - 1)
+        return false;                                                   /* (the two ends stay) */
+    memmove(&g->s[i], &g->s[i + 1], (size_t)(g->n - i - 1) * sizeof(g->s[0]));
+    g->n--;
+    memset(&g->s[g->n], 0, sizeof(g->s[0]));
+    return true;
+}
+
+/* "shape repeat place:colour:follows ..." of the settings file; anything odd leaves the gradient as it was. */
+static bool grad_parse(struct grad *g, const char *v)
+{
+    struct grad n;
+    memset(&n, 0, sizeof(n));
+    int used = 0;
+    if (sscanf(v, "%d %d%n", &n.shape, &n.repeat, &used) != 2 || n.shape < 0 || n.shape >= GR_SHAPES || n.repeat < 0 || n.repeat >= GR_REPEATS)
+        return false;
+    v += used;
+    int pos, src;
+    unsigned c;
+    while (sscanf(v, " %d:%x:%d%n", &pos, &c, &src, &used) == 3) {
+        if (n.n >= MAX_STOPS || pos < (n.n ? n.s[n.n - 1].pos : 0) || pos > GR_END || src < GS_OWN || src > GS_FGCLEAR)
+            return false;
+        n.s[n.n++] = (struct gstop){ pos, c, src };
+        v += used;
+    }
+    if (n.n < 2 || n.s[0].pos != 0 || n.s[n.n - 1].pos != GR_END)
+        return false;
+    *g = n;
+    return true;
+}
+
 /* ---- effects and changes of the whole picture ------------------------------------------------------------------------------------ */
 
 enum fx { FX_GRAY, FX_SEPIA, FX_INVERT, FX_BRIGHTER, FX_DARKER, FX_MORE_CONTRAST, FX_LESS_CONTRAST, FX_BLUR, FX_SHARPEN, FX_PIXELATE, FX_EMBOSS, FX_EDGES, FX_NOISE, FX_COUNT };
@@ -2627,8 +2834,8 @@ static const struct { const char *name; int mn, mx, def; const char *unit; } SLI
     { "Smooth", 0, 100, 0, "%" }, { "Symmetry", 1, 16, 1, "" }, { "Bend", -100, 100, 0, "%" },
 };
 
-enum toggle { TG_FILLED, TG_STAR, TG_ARROW, TG_RADIAL, TG_FADE, TG_BOLD, TG_GLOBAL, TG_IMAGE, TG_ITALIC, TG_UNDER, TG_STRIKE, TG_BOX, TG_MIRROR, TG_PIXEL, TG_ADD, TG_SUB, TG_RATIO, TG_TLAYER, TG_COUNT };
-static const char *const TG_NAMES[TG_COUNT] = { "Filled", "Star", "Arrow", "Radial", "To clear", "Bold", "All of it", "Image", "Italic", "Underline", "Strike", "Box", "Mirror", "Pixel", "Add", "Subtract", "Ratio", "Layer" };
+enum toggle { TG_FILLED, TG_STAR, TG_ARROW, TG_GCOL, TG_GSHAPE, TG_GREPEAT, TG_GREV, TG_GAREA, TG_BOLD, TG_GLOBAL, TG_IMAGE, TG_ITALIC, TG_UNDER, TG_STRIKE, TG_BOX, TG_MIRROR, TG_PIXEL, TG_ADD, TG_SUB, TG_RATIO, TG_TLAYER, TG_COUNT };
+static const char *const TG_NAMES[TG_COUNT] = { "Filled", "Star", "Arrow", "Colours", "Shape", "Repeat", "Reverse", "InLines", "Bold", "All of it", "Image", "Italic", "Underline", "Strike", "Box", "Mirror", "Pixel", "Add", "Subtract", "Ratio", "Layer" };
 
 /* What each tool shows in the strip: up to three sliders and two switches (-1 = none). */
 static const struct { int sl[3], tg[3]; } TOPT[T_COUNT] = {
@@ -2645,7 +2852,7 @@ static const struct { int sl[3], tg[3]; } TOPT[T_COUNT] = {
     [T_CIRCLE] = { { S_SIZE, S_OPACITY, -1 }, { TG_FILLED, -1, -1 } },
     [T_POLY] = { { S_SIZE, S_OPACITY, S_SIDES }, { TG_STAR, TG_FILLED, -1 } },
     [T_FILL] = { { S_OPACITY, S_TOL, -1 }, { TG_GLOBAL, TG_IMAGE, -1 } },
-    [T_GRADIENT] = { { S_OPACITY, -1, -1 }, { TG_RADIAL, TG_FADE, -1 } },
+    [T_GRADIENT] = { { S_OPACITY, S_TOL, -1 }, { TG_GCOL, TG_GSHAPE, TG_GREPEAT } },   /* (and Reverse and In lines: strip_layout) */
     [T_TEXT] = { { S_SIZE, S_OPACITY, -1 }, { -1, -1, -1 } },                    /* (the rest of the text's settings are in the bar above the strip) */
     [T_PICK] = { { -1, -1, -1 }, { TG_IMAGE, -1, -1 } },
     [T_FREEPOLY] = { { S_SIZE, S_OPACITY, -1 }, { TG_FILLED, -1, -1 } },
@@ -2690,6 +2897,8 @@ static const int GRP_N[G_COUNT] = { 4, 2, 3, 6, 2 };
 static const char *const GRP_MENU[G_COUNT] = { "Rectangle  S\nEllipse  O\nLasso  Q\nMagic wand  W", "Pen  P\nAirbrush  A", "Clone stamp  K\nSmudge  R\nBlur brush  H",
                                               "Line  L\nBox  B\nCircle  C\nPolygon / star  N\nFree polygon  J\nCurve  V", "Move the layer or the selection  M\nHand: move the picture in the window  Y" };
 #define MENU_GROUP0 10
+#define MENU_GRAD_COLOURS 30
+#define MENU_GRAD_SHAPE 31
 
 static int group_of_button(int id)
 {
@@ -2738,6 +2947,7 @@ struct cpick {
     double h, s, v;
     int alpha;
     bool bg;                                    /* the second colour is being chosen */
+    int stop, orig_src;                         /* ... or a gradient stop: its number + 1 (0 = none) and what it followed before */
     uint32_t orig;
     int drag;                                   /* 1 the square, 2 the hue bar, 3 the alpha bar */
 };
@@ -2836,6 +3046,17 @@ struct app {
     bool curve_on;                              /* a curve: the two ends and the two handles; phase 0 draws the ends, 1 and 2 pull the handles */
     int curve_phase;
     double cv_pt[4][2];
+    struct grad grad;                           /* the Gradient tool's colours, shape and repeating */
+    bool grad_on;                               /* a gradient lies on the picture and can still be changed: its line, which button drew it and the layer it is on */
+    double gr_p[2][2], gr_from[4], gr_press[2];
+    bool gr_flip;
+    int gr_layer, gr_mask;
+    int gr_drag, gr_sel;                        /* what of it is held (GRD_*) and the stop that was chosen (-1 = none) */
+    bool gr_drop;                               /* ... a stop pulled off the line: it goes when it is let go */
+    int gr_seed[2];                             /* where the drag began: the area it fills ("In lines") is the one round that pixel */
+    bool gr_bounded;                            /* ... a->cov holds that area, gr_box its box */
+    struct irect gr_box;
+    struct gr_sig { double p[4]; struct grad g; int opacity, reverse, area, tol; } gr_sig;     /* what is on the layer now */
     struct pix finger;                          /* the smudge: the colours the finger carries */
     int64_t last_click_ms;
     double last_click_x, last_click_y;
@@ -5190,6 +5411,12 @@ static void text_reedit(struct app *a, int li)
 
 /* Whatever is half done (a text being typed) is put down before something else happens. */
 static void shapes_finish(struct app *a);
+static void grad_shown(const struct app *a, struct grad *g);
+static bool grad_reversed(const struct app *a);
+static void grad_screen(const struct app *a, double u, double *sx, double *sy);
+static void grad_refresh(struct app *a);
+static void grad_put_down(struct app *a);
+static void cp_open_stop(struct app *a, int i);
 
 static void finish_pending(struct app *a)
 {
@@ -5402,6 +5629,18 @@ static bool cp_parse_hex(const char *s, uint32_t *out)
 }
 
 /* Sets the picker to a colour (and the field's text unless the text is what is being typed). */
+/* The chosen colour goes where it belongs. */
+static void cp_put(struct app *a, uint32_t c)
+{
+    if (a->cp.stop && a->cp.stop <= a->grad.n) {
+        a->grad.s[a->cp.stop - 1].c = c;
+        a->grad.s[a->cp.stop - 1].src = GS_OWN;
+    } else if (a->cp.bg)
+        a->bg = c;
+    else
+        a->fg = c;
+}
+
 static void cp_set(struct app *a, uint32_t c, bool rewrite)
 {
     if (ch_a(c) == 0)
@@ -5412,10 +5651,7 @@ static void cp_set(struct app *a, uint32_t c, bool rewrite)
         cp_hex_text(c, a->pbuf, sizeof(a->pbuf));
         wltext_end(a->pbuf);
     }
-    if (a->cp.bg)
-        a->bg = c;
-    else
-        a->fg = c;
+    cp_put(a, c);
     a->win.redraw = true;
 }
 
@@ -5423,10 +5659,7 @@ static void cp_set(struct app *a, uint32_t c, bool rewrite)
 static void cp_changed(struct app *a)
 {
     uint32_t c = cp_colour(&a->cp);
-    if (a->cp.bg)
-        a->bg = c;
-    else
-        a->fg = c;
+    cp_put(a, c);
     cp_hex_text(c, a->pbuf, sizeof(a->pbuf));
     wltext_end(a->pbuf);
     a->win.redraw = true;
@@ -5434,8 +5667,10 @@ static void cp_changed(struct app *a)
 
 static void cp_open(struct app *a, bool bg)
 {
-    finish_pending(a);
+    if (!a->grad_on)                                                    /* (a gradient that can still be changed follows the colour as it is chosen) */
+        finish_pending(a);
     a->cp.bg = bg;
+    a->cp.stop = 0;
     a->cp.orig = bg ? a->bg : a->fg;
     a->cp.drag = 0;
     uint32_t c = a->cp.orig;
@@ -5447,6 +5682,22 @@ static void cp_open(struct app *a, bool bg)
     cp_hex_text(c, a->pbuf, sizeof(a->pbuf));
     wltext_end(a->pbuf);
     a->win.redraw = true;
+}
+
+/* The colour card for one stop of the gradient. */
+static void cp_open_stop(struct app *a, int i)
+{
+    struct grad g;
+    grad_shown(a, &g);
+    cp_open(a, false);
+    a->cp.stop = i + 1;
+    a->cp.orig_src = a->grad.s[i].src;
+    a->cp.orig = a->grad.s[i].src == GS_OWN ? a->grad.s[i].c : g.s[i].c;
+    uint32_t c = g.s[i].c;
+    rgb_to_hsv(ch_r(c), ch_g(c), ch_b(c), &a->cp.h, &a->cp.s, &a->cp.v);
+    a->cp.alpha = ch_a(c);
+    cp_hex_text(c, a->pbuf, sizeof(a->pbuf));
+    wltext_end(a->pbuf);
 }
 
 /* A press or a drag at (x, y) on one of the picker's three gauges. */
@@ -6181,9 +6432,16 @@ static const char *const HP_DRAWING[] = {
     "|N|Polygon or star: drag it; Sides and Star are in the strip.",
     "|J|Free polygon: click the corners. Enter, a double click or a click on the first corner closes it, Esc gives it up.",
     "|V|Curve: drag a line, then drag its two handles to bend it. Enter puts it down.",
-    "|F|Fill: click to colour an area of a similar colour (Tolerance). All of it fills every similar pixel, not only the joined area; Image looks at what you see, not at the layer.",
-    "|G|Gradient: drag from where the colour starts to where it ends. Radial goes round the start, To clear fades to see-through instead of the second colour.",
+    "|F|Fill: click to colour an area of a similar colour (Tolerance). All of it fills every similar pixel, not only the joined area; Image looks at what you see, not at the layer. Tolerance starts at 10% every time: a high one goes over lines.",
+    "|G|Gradient: drag from where the colour starts to where it ends (a right drag runs it backwards; Shift keeps to 15 degree steps). It can still be changed, see below.",
     "|I|Picker: click a pixel to take its colour (a right click takes it as the second colour).",
+    "# The gradient",
+    "- With In lines (on) it fills the area where the drag began, as Fill does: inside a drawn ring it stays in the ring. Tolerance says what counts as the same colour. Switch it off to lay the gradient over everything.",
+    "- Drag a round handle to move an end; Ctrl+drag carries the whole line.",
+    "- Click the line for another colour and slide it. Pull it off the line, right click it or press Delete to take it away.",
+    "- Double click a colour to choose it. Colours that were not chosen follow the pen and the second colour.",
+    "- The bar in the strip has ready made colours; beside it are the shape (Linear, Radial, Angle, Diamond, Mirrored), Once / Repeat / Ping-pong, Reverse and Opacity.",
+    "- Enter, another tool or a drag elsewhere puts it on the layer; Esc gives it up.",
     "# The brush bar",
     "Pen, Airbrush, Eraser and Line have a bar above the strip:",
     "- Smooth steadies the hand: the line follows the pointer on a rubber band.",
@@ -7653,7 +7911,12 @@ static void place_picture(struct app *a, const char *path)
 static void prompt_close(struct app *a, bool apply)
 {
     if (a->prompt == P_COLOUR && !apply) {
-        if (a->cp.bg)
+        if (a->cp.stop) {
+            if (a->cp.stop <= a->grad.n) {
+                a->grad.s[a->cp.stop - 1].c = a->cp.orig;
+                a->grad.s[a->cp.stop - 1].src = a->cp.orig_src;
+            }
+        } else if (a->cp.bg)
             a->bg = a->cp.orig;
         else
             a->fg = a->cp.orig;
@@ -7828,7 +8091,7 @@ static void prompt_accept(struct app *a)
         a->prompt = P_NONE;
         break;
     case P_COLOUR:
-        push_recent(a, a->cp.bg ? a->bg : a->fg);
+        push_recent(a, a->cp.stop ? cp_colour(&a->cp) : a->cp.bg ? a->bg : a->fg);
         prompt_close(a, true);
         break;
     case P_ADJUST:
@@ -8407,7 +8670,7 @@ struct strip_g {
     int nsl;
     struct { int id, x, y, w, h; } sl[3];       /* a slider: its whole box (the track is near the bottom of it) */
     int ntg;
-    struct { int id, x, y, w, h; } tg[3];
+    struct { int id, x, y, w, h; } tg[5];
 };
 
 #define SL_TRACK_DY 29
@@ -8424,6 +8687,12 @@ static const char *tg_label(const struct app *a, int id)
         snprintf(buf, sizeof(buf), "Ratio: %s", RATIO_NAMES[a->ratio]);
         return buf;
     }
+    if (id == TG_GSHAPE)
+        return GR_SHAPE_NAMES[a->grad.shape];
+    if (id == TG_GREPEAT)
+        return GR_REPEAT_NAMES[a->grad.repeat];
+    if (id == TG_GAREA)
+        return "In lines";
     return TG_NAMES[id];
 }
 
@@ -8441,16 +8710,17 @@ static void strip_layout(const struct app *a, struct strip_g *s)
     s->swy = y + 8;
     s->sww = 26;
     s->swh = 18;
-    s->recent_on = a->win.bw >= 780;
+    s->recent_on = a->win.bw >= (a->tool == T_GRADIENT ? 900 : 780);
     s->rs = 14;
     s->rp = 16;
     s->rx = 90;
     s->ry = y + 7;
     int x0 = s->recent_on ? s->rx + 8 * s->rp + 14 : 90;
     int ntg = 0, nsl = 0, tgw = 0;
-    for (int i = 0; i < 3; i++)
-        if (TOPT[a->tool].tg[i] >= 0) {
-            int id = TOPT[a->tool].tg[i], w = LM_MAX(wlcard_text_w(tg_label(a, id)) + 24, 56);
+    for (int i = 0; i < 5; i++) {
+        int id = i < 3 ? TOPT[a->tool].tg[i] : a->tool != T_GRADIENT ? -1 : i == 3 ? TG_GREV : TG_GAREA;
+        if (id >= 0) {
+            int w = id == TG_GCOL ? 96 : LM_MAX(wlcard_text_w(tg_label(a, id)) + 24, 56);
             s->tg[ntg].id = id;
             s->tg[ntg].w = w;
             s->tg[ntg].h = 24;
@@ -8458,6 +8728,7 @@ static void strip_layout(const struct app *a, struct strip_g *s)
             tgw += w + 6;
             ntg++;
         }
+    }
     for (int i = 0; i < 3; i++)
         if (TOPT[a->tool].sl[i] >= 0)
             s->sl[nsl++].id = TOPT[a->tool].sl[i];
@@ -8561,6 +8832,23 @@ static void paint_swatch(struct app *a, int x, int y, int side, uint32_t c, int 
     wlwin_round_fill(w, x, y, side, side, r, c & 0xffffffu);
 }
 
+/* The gradient as a bar, see-through colours over a checkerboard. */
+static void paint_grad_bar(struct app *a, int x, int y, int bw, int bh)
+{
+    struct wlwin *w = &a->win;
+    struct grad g;
+    grad_shown(a, &g);
+    wlwin_fill(w, x - 2, y - 2, bw + 4, bh + 4, lm_theme.border);
+    for (int i = 0; i < bw; i++) {
+        double t = i / (double)(bw - 1);
+        uint32_t c = grad_colour(&g, a->tg[TG_GREV] ? 1.0 - t : t);
+        for (int j = 0; j < bh; j += 5) {
+            uint32_t under = ((i / 5) + (j / 5)) & 1 ? 0x999999 : 0xcccccc;
+            wlwin_fill(w, x + i, y + j, 1, LM_MIN(5, bh - j), mix_rgb24(under, c & 0xffffffu, ch_a(c)));
+        }
+    }
+}
+
 static void paint_strip(struct app *a)
 {
     struct wlwin *w = &a->win;
@@ -8591,7 +8879,12 @@ static void paint_strip(struct app *a)
     }
     for (int i = 0; i < s.ntg; i++) {
         bool on = a->tg[s.tg[i].id];
-        wlwin_drop(w, s.tg[i].x, s.tg[i].y, s.tg[i].w, s.tg[i].h, lm_button_radius(s.tg[i].h / 2), on ? lm_theme.btn_green : lm_theme.btn_grey);
+        if (s.tg[i].id == TG_GCOL) {                                    /* the gradient itself is the button of its colours */
+            paint_grad_bar(a, s.tg[i].x, s.tg[i].y + 2, s.tg[i].w, s.tg[i].h - 4);
+            continue;
+        }
+        bool menu = s.tg[i].id == TG_GSHAPE || s.tg[i].id == TG_GREPEAT;
+        wlwin_drop(w, s.tg[i].x, s.tg[i].y, s.tg[i].w, s.tg[i].h, lm_button_radius(s.tg[i].h / 2), menu ? lm_theme.btn_slate : on ? lm_theme.btn_green : lm_theme.btn_grey);
         const char *t = tg_label(a, s.tg[i].id);
         wlwin_text(w, s.tg[i].x + (s.tg[i].w - wlcard_text_w(t)) / 2, s.tg[i].y + (s.tg[i].h - 2 - LM_FONT_H) / 2, t, 1, lm_theme.on_colour, 0);
     }
@@ -10036,7 +10329,7 @@ static void paint_card(struct app *a)
         field = false;
         break;
     case P_COLOUR:
-        snprintf(title, sizeof(title), "%s", a->cp.bg ? "The second colour" : "The pen colour");
+        snprintf(title, sizeof(title), "%s", a->cp.stop ? "The gradient's colour" : a->cp.bg ? "The second colour" : "The pen colour");
         labels[1] = "OK";
         field = false;
         break;
@@ -10195,6 +10488,7 @@ static void paint(struct wlwin *w)
     wlwin_fill(w, 0, 0, w->bw, w->bh, COL_BG);
     if (a->gone)
         return;
+    grad_refresh(a);                                                    /* (a colour or a slider may have changed what lies on the layer) */
     if (a->fitted && CW(a) > 0 && fabs(fit_zoom(a) - a->zoom) > 1e-9) {
         a->zoom = fit_zoom(a);
         view_center(a);
@@ -10283,10 +10577,25 @@ static void paint(struct wlwin *w)
         ring(a, a->px, a->py, r + 1, 0x000000);
         ring(a, a->px, a->py, r, 0xffffff);
     }
-    if (a->drag && a->tool == T_GRADIENT) {                             /* the line the gradient runs along */
-        int x0 = cv_x(a) + (int)(a->vx + a->sx * a->zoom), y0 = (int)(a->vy + a->sy * a->zoom), x1 = cv_x(a) + (int)(a->vx + a->lx * a->zoom), y1 = (int)(a->vy + a->ly * a->zoom);
-        wlrail_line(w, x0, y0, x1, y1, 3, 0x000000);
-        wlrail_line(w, x0, y0, x1, y1, 1, 0xffffff);
+    if (a->grad_on) {                                                   /* the line the gradient runs along, with its ends and colours */
+        double x0, y0, x1, y1;
+        grad_screen(a, 0.0, &x0, &y0);
+        grad_screen(a, 1.0, &x1, &y1);
+        canvas_line(a, x0, y0, x1, y1, 3, 0x000000);
+        canvas_line(a, x0, y0, x1, y1, 1, 0xffffff);
+        struct grad g;
+        grad_shown(a, &g);
+        bool rev = grad_reversed(a);
+        for (int i = 0; i < g.n; i++) {
+            double u = g.s[i].pos / (double)GR_END, sx, sy;
+            grad_screen(a, rev ? 1.0 - u : u, &sx, &sy);
+            if (!in_canvas(a, sx, sy) || (a->gr_drop && i == a->gr_sel))
+                continue;
+            int side = i == 0 || i == g.n - 1 ? 14 : 12, x = (int)lround(sx), y = (int)lround(sy), o = side / 2 + 3;
+            wlwin_round_fill(w, x - o, y - o, 2 * o, 2 * o, o, i == a->gr_sel ? COL_ACCENT : 0x000000);
+            wlwin_round_fill(w, x - o + 1, y - o + 1, 2 * o - 2, 2 * o - 2, o - 1, 0xffffff);
+            paint_swatch(a, x - side / 2, y - side / 2, side, g.s[i].c, side / 2);
+        }
     }
     paint_guides_and_rulers(a);
     if (a->lp_float && layers_on(a)) {                                  /* in a window of its own, beside the picture's */
@@ -10436,8 +10745,19 @@ static void write_dump(struct app *a)
         fprintf(f, "slider %s x=%d y=%d w=%d h=%d min=%d max=%d value=%d tx=%d tw=%d ty=%d\n", SLIDERS[s.sl[i].id].name, s.sl[i].x, s.sl[i].y, s.sl[i].w, s.sl[i].h, mn, mx, *slider_ptr(a, s.sl[i].id),
                 s.sl[i].x + SL_KNOB / 2, s.sl[i].w - SL_KNOB, s.sl[i].y + SL_TRACK_DY);
     }
+    if (a->grad_on) {
+        bool rev = grad_reversed(a);
+        struct grad g;
+        grad_shown(a, &g);
+        fprintf(f, "grad shape=%d repeat=%d reverse=%d n=%d chosen=%d x0=%.2f y0=%.2f x1=%.2f y1=%.2f\n", g.shape, g.repeat, rev ? 1 : 0, g.n, a->gr_sel, a->gr_p[0][0], a->gr_p[0][1], a->gr_p[1][0], a->gr_p[1][1]);
+        for (int i = 0; i < g.n; i++) {
+            double u = g.s[i].pos / (double)GR_END, sx, sy;
+            grad_screen(a, rev ? 1.0 - u : u, &sx, &sy);
+            fprintf(f, "gstop%d pos=%d c=%08x src=%d x=%d y=%d\n", i, g.s[i].pos, g.s[i].c, g.s[i].src, (int)lround(sx), (int)lround(sy));
+        }
+    }
     for (int i = 0; i < s.ntg; i++)
-        fprintf(f, "toggle %s x=%d y=%d w=%d h=%d on=%d\n", TG_NAMES[s.tg[i].id], s.tg[i].x, s.tg[i].y, s.tg[i].w, s.tg[i].h, s.tg[i].id == TG_RATIO ? a->ratio : a->tg[s.tg[i].id] ? 1 : 0);
+        fprintf(f, "toggle %s x=%d y=%d w=%d h=%d on=%d\n", TG_NAMES[s.tg[i].id], s.tg[i].x, s.tg[i].y, s.tg[i].w, s.tg[i].h, s.tg[i].id == TG_RATIO ? a->ratio : s.tg[i].id == TG_GSHAPE ? a->grad.shape : s.tg[i].id == TG_GREPEAT ? a->grad.repeat : a->tg[s.tg[i].id] ? 1 : 0);
     if (layers_on(a)) {
         struct lp_g g;
         lp_geom(a, &g);
@@ -10476,7 +10796,7 @@ static void write_dump(struct app *a)
     if (a->prompt == P_COLOUR) {
         struct cp_geo g;
         cp_geom(a, &g);
-        fprintf(f, "colour h=%.1f s=%.3f v=%.3f a=%d hex=%s target=%s\n", a->cp.h, a->cp.s, a->cp.v, a->cp.alpha, a->pbuf, a->cp.bg ? "second" : "pen");
+        fprintf(f, "colour h=%.1f s=%.3f v=%.3f a=%d hex=%s target=%s\n", a->cp.h, a->cp.s, a->cp.v, a->cp.alpha, a->pbuf, a->cp.stop ? "stop" : a->cp.bg ? "second" : "pen");
         fprintf(f, "cpsq x=%d y=%d w=%d h=%d\ncphue x=%d y=%d w=%d h=%d\ncpalpha x=%d y=%d w=%d h=%d\ncphex x=%d y=%d w=%d h=%d\n", g.sqx, g.sqy, g.sq, g.sq, g.hx, g.hy, g.hw, g.hh, g.ax, g.ay, g.aw,
                 g.ah, g.fx, g.fy, g.fw, g.fh);
         fprintf(f, "cpquick x=%d y=%d side=%d pitch=%d\n", g.qx, g.qy, g.qside, g.qpitch);
@@ -10696,11 +11016,14 @@ static void shape_cancel(struct app *a)
         flat_mark_all(a);
     }
     stroke_end(a);
-    if (a->poly_on || a->curve_on) {
+    if (a->poly_on || a->curve_on || a->grad_on) {
         if (a->nundo > 0)
             snap_free(&a->undo[--a->nundo]);
     }
-    a->poly_on = a->curve_on = false;
+    a->poly_on = a->curve_on = a->grad_on = false;
+    a->gr_drag = 0;
+    a->gr_drop = false;
+    a->gr_sel = -1;
     a->poly_n = 0;
     a->curve_phase = 0;
     a->win.redraw = true;
@@ -10807,6 +11130,7 @@ static void shapes_finish(struct app *a)
         poly_commit(a);
     if (a->curve_on)
         curve_commit(a);
+    grad_put_down(a);
 }
 
 /* The clone stamp: what the source spot shows is laid on where the brush went. */
@@ -10992,17 +11316,273 @@ static void drag_shape(struct app *a, double ix, double iy, bool shift)
     stroke_commit(a, all, draw_color(a), false);
 }
 
-static void drag_gradient(struct app *a, double ix, double iy)
+/* ---- the gradient on the picture: it stays changeable (ends, colour stops) until something else is done --------------------------- */
+
+enum { GRD_NONE, GRD_NEW, GRD_P0, GRD_P1, GRD_STOP, GRD_MOVE };
+
+/* The gradient with the colours that follow the pen and the second colour worked out. */
+static void grad_shown(const struct app *a, struct grad *g)
 {
-    if (!a->have_before)
+    *g = a->grad;
+    for (int i = 0; i < g->n; i++) {
+        if (g->s[i].src == GS_FG)
+            g->s[i].c = a->fg;
+        else if (g->s[i].src == GS_BG)
+            g->s[i].c = a->bg;
+        else if (g->s[i].src == GS_FGCLEAR)
+            g->s[i].c = a->fg & 0xffffffu;
+    }
+}
+
+static bool grad_reversed(const struct app *a) { return a->tg[TG_GREV] != (a->grad_on && a->gr_flip); }
+
+/* The window point of the place `u` (0..1) of the gradient's line. */
+static void grad_screen(const struct app *a, double u, double *sx, double *sy)
+{
+    *sx = cv_x(a) + a->vx + (a->gr_p[0][0] + (a->gr_p[1][0] - a->gr_p[0][0]) * u) * a->zoom;
+    *sy = a->vy + (a->gr_p[0][1] + (a->gr_p[1][1] - a->gr_p[0][1]) * u) * a->zoom;
+}
+
+/* The area the gradient fills: like Fill, the pixels of nearly the colour where the drag began that hang together (with "In lines"), else everything. */
+static void grad_area(struct app *a)
+{
+    struct irect all = { 0, 0, CW(a), CH(a) }, d = { 0, 0, 0, 0 };
+    cov_clear(&a->cov, all);
+    int x = a->gr_seed[0], y = a->gr_seed[1];
+    a->gr_bounded = a->tg[TG_GAREA] && x >= 0 && y >= 0 && x < CW(a) && y < CH(a) && cov_flood(&a->before, x, y, a->val[S_TOL] * 255 / 100, false, &a->cov, &d);
+    if (a->gr_bounded && ch_a(a->before.p[(size_t)y * (size_t)CW(a) + (size_t)x]) < 128)
+        cov_under_edges(&a->before, &a->cov, &d);
+    a->gr_box = d;
+}
+
+/* Brings the layer up to date with the line, the colours and the settings. */
+static void grad_refresh(struct app *a)
+{
+    if (!a->grad_on)
         return;
-    uint32_t c0 = a->drag_button == 273 ? a->bg : a->fg, c1 = a->drag_button == 273 ? a->fg : a->bg;
-    if (a->tg[TG_FADE])
-        c1 = argb(0, ch_r(c0), ch_g(c0), ch_b(c0));
+    if (!a->have_before || a->doc.cur != a->gr_layer || a->mask_edit != a->gr_mask || a->before.w != IM(a).w || a->before.h != IM(a).h) {
+        a->grad_on = false;                                             /* (what it lay on is gone) */
+        stroke_end(a);
+        return;
+    }
+    struct gr_sig sig;
+    memset(&sig, 0, sizeof(sig));
+    memcpy(sig.p, a->gr_p, sizeof(sig.p));
+    grad_shown(a, &sig.g);
+    if (a->gr_drop)
+        grad_remove(&sig.g, a->gr_sel);
+    sig.opacity = a->val[S_OPACITY];
+    sig.reverse = grad_reversed(a);
+    sig.area = a->tg[TG_GAREA];
+    sig.tol = a->val[S_TOL];
+    if (!memcmp(&sig, &a->gr_sig, sizeof(sig)))
+        return;
+    bool newarea = !a->gr_sig.g.n || sig.area != a->gr_sig.area || (sig.area && sig.tol != a->gr_sig.tol);
+    a->gr_sig = sig;
+    if (newarea)
+        grad_area(a);
     struct irect r = a->sel.on ? a->sel.r : (struct irect){ 0, 0, CW(a), CH(a) };
     irect_clip(&r, CW(a), CH(a));
-    gradient_commit(&IM(a), &a->before, r, a->sx, a->sy, ix, iy, a->tg[TG_RADIAL], c0, c1, a->val[S_OPACITY], &a->sel);
+    if (a->gr_bounded && !newarea) {                                    /* only the area has to be painted (all of it again after it changed) */
+        r.x0 = LM_MAX(r.x0, a->gr_box.x0);
+        r.y0 = LM_MAX(r.y0, a->gr_box.y0);
+        r.x1 = LM_MIN(r.x1, a->gr_box.x1);
+        r.y1 = LM_MIN(r.y1, a->gr_box.y1);
+        if (irect_empty(&r))
+            return;
+    }
+    if (hypot(a->gr_p[1][0] - a->gr_p[0][0], a->gr_p[1][1] - a->gr_p[0][1]) < 0.5) {        /* no line yet: nothing is laid on */
+        for (int y = r.y0; y < r.y1; y++)
+            memcpy(&IM(a).p[(size_t)y * (size_t)CW(a) + (size_t)r.x0], &a->before.p[(size_t)y * (size_t)CW(a) + (size_t)r.x0], (size_t)(r.x1 - r.x0) * 4);
+    } else
+        gradient_commit(&IM(a), &a->before, r, a->gr_p[0][0], a->gr_p[0][1], a->gr_p[1][0], a->gr_p[1][1], &sig.g, sig.reverse, sig.opacity, &a->sel, a->gr_bounded ? a->cov.p : NULL);
     changed_r(a, r);
+}
+
+static void grad_put_down(struct app *a)
+{
+    if (!a->grad_on)
+        return;
+    a->gr_drop = false;
+    grad_refresh(a);
+    if (!a->grad_on)
+        return;
+    a->grad_on = false;
+    a->gr_drag = GRD_NONE;
+    a->gr_sel = -1;
+    push_recent(a, a->fg);
+    stroke_end(a);
+    a->win.redraw = true;
+}
+
+/* The stop under a window point: the nearest within reach, -1 = none. */
+static int grad_stop_at(const struct app *a, double x, double y)
+{
+    bool rev = grad_reversed(a);
+    int best = -1;
+    double bd = 10.0;
+    for (int i = 0; i < a->grad.n; i++) {
+        double u = a->grad.s[i].pos / (double)GR_END, sx, sy;
+        grad_screen(a, rev ? 1.0 - u : u, &sx, &sy);
+        double d = hypot(x - sx, y - sy);
+        bool inner = i > 0 && i < a->grad.n - 1, best_end = best == 0 || best == a->grad.n - 1;
+        if (d < bd || (best_end && inner && d <= bd + 0.5)) {            /* (a stop pushed right onto an end can still be taken off it) */
+            bd = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* The place of the line nearest to a window point (0..1 when it is beside the line) and how far from the line it is. */
+static double grad_near(const struct app *a, double x, double y, double *dist)
+{
+    double x0, y0, x1, y1;
+    grad_screen(a, 0.0, &x0, &y0);
+    grad_screen(a, 1.0, &x1, &y1);
+    double dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
+    double u = len2 > 0 ? ((x - x0) * dx + (y - y0) * dy) / len2 : 0.0, c = u < 0 ? 0 : u > 1 ? 1 : u;
+    *dist = hypot(x - (x0 + dx * c), y - (y0 + dy * c));
+    return u;
+}
+
+static void gradient_press(struct app *a, int button, double ix, double iy)
+{
+    grad_refresh(a);
+    if (a->grad_on) {
+        int64_t now = now_ms();
+        bool dbl = now - a->last_click_ms < lm_metrics.double_click_ms && hypot(a->px - a->last_click_x, a->py - a->last_click_y) < 6.0;
+        a->last_click_ms = now;
+        a->last_click_x = a->px;
+        a->last_click_y = a->py;
+        int stop = grad_stop_at(a, a->px, a->py);
+        double dist, u = grad_near(a, a->px, a->py, &dist);
+        if (button == 272 && (a->win.mods & LM_MOD_CTRL) && (stop >= 0 || dist < 8.0)) {         /* Ctrl: the whole line is carried */
+            a->gr_drag = GRD_MOVE;
+            memcpy(a->gr_from, a->gr_p, sizeof(a->gr_from));
+            a->gr_press[0] = a->px;
+            a->gr_press[1] = a->py;
+            return;
+        }
+        if (stop >= 0) {
+            bool inner = stop > 0 && stop < a->grad.n - 1;
+            if (button == 273) {
+                if (grad_remove(&a->grad, stop)) {
+                    a->gr_sel = -1;
+                    say(a, "The stop was taken away");
+                } else
+                    say(a, "The colours at the ends stay; double click one to change it");
+                a->drag = false;
+            } else if (dbl) {
+                a->drag = false;
+                a->last_click_ms = 0;
+                a->gr_sel = stop;
+                cp_open_stop(a, stop);
+            } else {
+                a->gr_sel = stop;
+                a->gr_drag = inner ? GRD_STOP : u < 0.5 ? GRD_P0 : GRD_P1;
+            }
+            return;
+        }
+        if (button == 272 && dist < 7.0 && u > 0.0 && u < 1.0) {         /* on the line: a new stop of the colour that is there */
+            struct grad g;
+            grad_shown(a, &g);
+            double t = grad_reversed(a) ? 1.0 - u : u;
+            int i = grad_add(&a->grad, &g, (int)(t * GR_END + 0.5));
+            if (i < 0) {
+                say(a, "A gradient holds %d colours at most", MAX_STOPS);
+                a->drag = false;
+            } else {
+                a->gr_sel = i;
+                a->gr_drag = GRD_STOP;
+                say(a, "A new colour: slide it, double click to choose it, pull it off the line to take it away");
+            }
+            return;
+        }
+        grad_put_down(a);                                               /* a drag somewhere else: that one is done, a new one begins */
+    }
+    if (!stroke_begin(a)) {
+        a->drag = false;
+        return;
+    }
+    a->grad_on = true;
+    double rawx, rawy;
+    to_pic(a, a->px, a->py, &rawx, &rawy);                              /* (not snapped: that could put it across a line) */
+    a->gr_seed[0] = (int)floor(rawx);
+    a->gr_seed[1] = (int)floor(rawy);
+    a->gr_p[0][0] = a->gr_p[1][0] = ix;
+    a->gr_p[0][1] = a->gr_p[1][1] = iy;
+    a->gr_flip = button == 273;
+    a->gr_layer = a->doc.cur;
+    a->gr_mask = a->mask_edit;
+    a->gr_sel = -1;
+    a->gr_drag = GRD_NEW;
+    a->gr_drop = false;
+    memset(&a->gr_sig, 0, sizeof(a->gr_sig));
+}
+
+static void gradient_motion(struct app *a, double ix, double iy, bool shift)
+{
+    if (!a->grad_on)
+        return;
+    switch (a->gr_drag) {
+    case GRD_NEW:
+    case GRD_P0:
+    case GRD_P1: {
+        int k = a->gr_drag == GRD_P0 ? 0 : 1;
+        double ox = a->gr_p[1 - k][0], oy = a->gr_p[1 - k][1];
+        if (shift) {                                                    /* in steps of 15 degrees */
+            double len = hypot(ix - ox, iy - oy), step = 3.14159265358979 / 12.0, ang = floor(atan2(iy - oy, ix - ox) / step + 0.5) * step;
+            ix = ox + cos(ang) * len;
+            iy = oy + sin(ang) * len;
+        }
+        a->gr_p[k][0] = ix;
+        a->gr_p[k][1] = iy;
+        break;
+    }
+    case GRD_MOVE: {
+        double mx = (a->px - a->gr_press[0]) / a->zoom, my = (a->py - a->gr_press[1]) / a->zoom;
+        for (int k = 0; k < 2; k++) {
+            a->gr_p[k][0] = a->gr_from[k * 2] + mx;
+            a->gr_p[k][1] = a->gr_from[k * 2 + 1] + my;
+        }
+        break;
+    }
+    case GRD_STOP: {
+        int i = a->gr_sel;
+        if (i <= 0 || i >= a->grad.n - 1)
+            break;
+        double dist, u = grad_near(a, a->px, a->py, &dist);
+        u = u < 0 ? 0 : u > 1 ? 1 : u;
+        a->gr_drop = dist > 32.0;
+        int pos = (int)((grad_reversed(a) ? 1.0 - u : u) * GR_END + 0.5);
+        a->grad.s[i].pos = LM_CLAMP(pos, a->grad.s[i - 1].pos, a->grad.s[i + 1].pos);
+        break;
+    }
+    default: break;
+    }
+    grad_refresh(a);
+    a->win.redraw = true;
+}
+
+static void gradient_release(struct app *a)
+{
+    if (!a->grad_on)
+        return;
+    if (a->gr_drag == GRD_STOP && a->gr_drop) {
+        grad_remove(&a->grad, a->gr_sel);
+        a->gr_sel = -1;
+    }
+    a->gr_drop = false;
+    if (a->gr_drag == GRD_NEW) {
+        if (hypot(a->gr_p[1][0] - a->gr_p[0][0], a->gr_p[1][1] - a->gr_p[0][1]) < 2.0) {
+            shape_cancel(a);                                            /* (only a click) */
+            return;
+        }
+        say(a, "Drag the ends, click the line for another colour, double click a colour to change it. Enter puts it down, Esc gives it up");
+    }
+    a->gr_drag = GRD_NONE;
+    grad_refresh(a);
 }
 
 /* The lasso's polygon and the selection it makes. */
@@ -11167,7 +11747,7 @@ static void begin_drag(struct app *a, int button)
     a->drag_button = button;
     a->sx = a->lx = ix;
     a->sy = a->ly = iy;
-    if (!a->poly_on && !a->curve_on) {                                  /* (a shape of several clicks keeps its picture between them) */
+    if (!a->poly_on && !a->curve_on && !a->grad_on) {                   /* (a shape of several clicks keeps its picture between them) */
         a->have_before = false;
         a->preview = (struct irect){ 0, 0, 0, 0 };
     }
@@ -11255,10 +11835,10 @@ static void begin_drag(struct app *a, int button)
     case T_BOX:
     case T_CIRCLE:
     case T_POLY:
-    case T_GRADIENT:
         if (!stroke_begin(a))
             a->drag = false;
         break;
+    case T_GRADIENT: gradient_press(a, button, ix, iy); break;
     case T_FILL: {
         a->drag = false;
         struct cov c;
@@ -11270,10 +11850,22 @@ static void begin_drag(struct app *a, int button)
             checkpoint(a);
             struct pix before;
             if (pix_copy(&IM(a), &before)) {
+                bool whole = !memchr(c.p, 0, (size_t)c.w * (size_t)c.h);
                 cov_commit(&IM(a), &before, &c, d, col, a->val[S_OPACITY], false, &a->sel);
+                if (src == &IM(a) && ch_a(before.p[(size_t)py * (size_t)before.w + (size_t)px]) < 128) {
+                    cov_under_edges(&before, &c, &d);
+                    for (int y = d.y0; y < d.y1; y++)
+                        for (int x = d.x0; x < d.x1; x++) {
+                            size_t i = (size_t)y * (size_t)before.w + (size_t)x;
+                            if (c.p[i] == UNDER)
+                                IM(a).p[i] = blend_under(before.p[i], col, sel_at(&a->sel, x, y) * a->val[S_OPACITY] / 100);
+                        }
+                }
                 pix_free(&before);
                 push_recent(a, col);
                 changed_r(a, d);
+                if (whole && a->val[S_TOL] >= 50)
+                    say(a, "Everything was filled: with Tolerance %d%% lines count as the same colour. Undo (Ctrl+Z) and lower it", a->val[S_TOL]);
             }
         } else
             say(a, "Nothing to fill there");
@@ -11482,11 +12074,7 @@ static void drag_motion(struct app *a, double ix, double iy, bool shift)
         break;
     }
     case T_LINE: case T_BOX: case T_CIRCLE: case T_POLY: drag_shape(a, ix, iy, shift); break;
-    case T_GRADIENT:
-        a->lx = ix;
-        a->ly = iy;
-        drag_gradient(a, ix, iy);
-        break;
+    case T_GRADIENT: gradient_motion(a, ix, iy, shift); break;
     case T_SELECT: {
         double ex = ix, ey = iy;
         if (a->ratio) {                                                 /* a fixed shape: the height follows the width */
@@ -11526,6 +12114,11 @@ static void end_drag(struct app *a)
     if (!a->drag)
         return;
     a->drag = false;
+    if (a->tool == T_GRADIENT) {
+        gradient_release(a);
+        a->win.redraw = true;
+        return;
+    }
     if (a->tool == T_CURVE) {                                           /* the ends, then the first handle, then the second one: each is let go */
         if (a->curve_phase == 0 && hypot(a->cv_pt[1][0] - a->cv_pt[0][0], a->cv_pt[1][1] - a->cv_pt[0][1]) < 2.0)
             shape_cancel(a);
@@ -11558,7 +12151,7 @@ static void end_drag(struct app *a)
         brush_seg(a, a->lx, a->ly, ix, iy, &d);
         stroke_commit(a, d, draw_color(a), a->tool == T_ERASER);
     }
-    if (a->tool == T_PEN || a->tool == T_ERASER || tool_in_shapes(a->tool) || a->tool == T_SPRAY || a->tool == T_GRADIENT) {
+    if (a->tool == T_PEN || a->tool == T_ERASER || tool_in_shapes(a->tool) || a->tool == T_SPRAY) {
         if (a->tool != T_ERASER)
             push_recent(a, draw_color(a));
         stroke_end(a);
@@ -12014,6 +12607,39 @@ static int selftest(void)
     drop_snaps(A.redo, &A.nredo);
     pix_free(&A.flat);
 
+    /* the gradient */
+    {
+        struct grad g;
+        memset(&g, 0, sizeof(g));
+        grad_preset(&g, 2);                                             /* black to white */
+        struct pix d, b;
+        CHECK(pix_alloc(&d, 101, 3, 0xffff0000u) && pix_copy(&d, &b), "alloc for the gradient");
+        struct irect all2 = { 0, 0, 101, 3 };
+        struct sel none = { 0 };
+        gradient_commit(&d, &b, all2, 0.5, 0.5, 100.5, 0.5, &g, false, 100, &none, NULL);
+        CHECK(d.p[0] == 0xff000000u && d.p[100] == 0xffffffffu && abs(ch_r(d.p[50]) - 128) <= 1, "linear: the ends are exact, the middle is grey (%08x %08x %08x)", d.p[0], d.p[50], d.p[100]);
+        gradient_commit(&d, &b, all2, 0.5, 0.5, 100.5, 0.5, &g, true, 100, &none, NULL);
+        CHECK(d.p[0] == 0xffffffffu && d.p[100] == 0xff000000u, "reversed");
+        g.shape = GR_MIRRORED;
+        gradient_commit(&d, &b, all2, 50.5, 0.5, 100.5, 0.5, &g, false, 100, &none, NULL);
+        CHECK(d.p[0] == 0xffffffffu && d.p[50] == 0xff000000u && d.p[100] == 0xffffffffu, "mirrored");
+        CHECK(fabs(grad_param(GR_LINEAR, GR_REPEAT, 25, 0, 10, 0) - 0.5) < 1e-9 && fabs(grad_param(GR_LINEAR, GR_PINGPONG, 14, 0, 10, 0) - 0.6) < 1e-9 && grad_param(GR_LINEAR, GR_ONCE, 25, 0, 10, 0) == 1.0, "once, repeat, ping-pong");
+        CHECK(fabs(grad_param(GR_DIAMOND, GR_ONCE, 3, 4, 10, 0) - 0.7) < 1e-9 && fabs(grad_param(GR_RADIAL, GR_ONCE, 3, 4, 10, 0) - 0.5) < 1e-9 && fabs(grad_param(GR_ANGLE, GR_ONCE, 0, 5, 10, 0) - 0.25) < 1e-9, "diamond, radial, angle");
+        int at = grad_add(&g, &g, 5000);
+        CHECK(at == 1 && g.n == 3 && abs(ch_r(g.s[1].c) - 128) <= 1 && grad_remove(&g, 1) && g.n == 2 && !grad_remove(&g, 0) && !grad_remove(&g, 1), "stops are added and taken away, the ends stay");
+        grad_preset(&g, 0);
+        g.s[0].c = 0xffff0000u;
+        g.s[0].src = GS_OWN;
+        g.s[1].c = 0x000000ffu;                                         /* to a see-through blue: the red does not turn blue on the way */
+        g.s[1].src = GS_OWN;
+        CHECK(grad_colour(&g, 0.5) == 0x80ff0000u, "a see-through stop does not tint (%08x)", grad_colour(&g, 0.5));
+        struct grad p = g;
+        CHECK(grad_parse(&p, "1 2 0:ff102030:0 4000:80ffffff:0 10000:00000000:2") && p.shape == 1 && p.repeat == 2 && p.n == 3 && p.s[1].pos == 4000, "the settings line");
+        CHECK(!grad_parse(&p, "1 2 0:ff102030:0") && !grad_parse(&p, "9 0 0:0:0 10000:0:0") && !grad_parse(&p, "0 0 0:0:0 9000:0:0") && p.n == 3, "a bad settings line is not believed");
+        pix_free(&d);
+        pix_free(&b);
+    }
+
     /* text */
     static struct app T;
     memset(&T, 0, sizeof(T));
@@ -12327,6 +12953,11 @@ static void menu_event(struct wlwin *w, int index)
         checkpoint_props(a);
         a->doc.L[a->doc.cur].blend = index;
         changed(a);
+    } else if (kind == MENU_GRAD_COLOURS && index >= 0 && index < GR_PRESETS) {
+        grad_preset(&a->grad, index);
+        a->gr_sel = -1;
+    } else if (kind == MENU_GRAD_SHAPE && index >= 0 && index < GR_SHAPES) {
+        a->grad.shape = index;
     } else if (kind == 9 && index >= 0 && index < RU_COUNT + 4) {                       /* the rulers' unit or resolution */
         if (index < RU_COUNT)
             a->ruler_unit = index;
@@ -12980,6 +13611,14 @@ static void strip_press(struct app *a, uint32_t button)
         if (button == 272) {
             if (s.tg[idx].id == TG_RATIO)
                 a->ratio = (a->ratio + 1) % 6;
+            else if (s.tg[idx].id == TG_GCOL || s.tg[idx].id == TG_GSHAPE) {
+                bool col = s.tg[idx].id == TG_GCOL;
+                if (!wlwin_menu(&a->win, col ? GR_PRESET_MENU : "Linear\nRadial\nAngle\nDiamond\nMirrored"))
+                    say(a, "The compositor has no menu service");
+                else
+                    a->menu_kind = col ? MENU_GRAD_COLOURS : MENU_GRAD_SHAPE;
+            } else if (s.tg[idx].id == TG_GREPEAT)
+                a->grad.repeat = (a->grad.repeat + 1) % GR_REPEATS;
             else
                 a->tg[s.tg[idx].id] = !a->tg[s.tg[idx].id];
         }
@@ -13507,13 +14146,18 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         }
         return;
     }
-    if ((a->poly_on || a->curve_on) && (ks == LM_KS_Escape || ks == LM_KS_Return || ks == LM_KS_KP_Enter)) {
+    if ((a->poly_on || a->curve_on || a->grad_on) && (ks == LM_KS_Escape || ks == LM_KS_Return || ks == LM_KS_KP_Enter)) {
         if (ks == LM_KS_Escape)
             shape_cancel(a);
-        else {
-            poly_commit(a);
-            curve_commit(a);
-        }
+        else
+            shapes_finish(a);
+        return;
+    }
+    if (a->grad_on && ks == LM_KS_Delete && grad_remove(&a->grad, a->gr_sel)) {      /* the chosen colour of the gradient */
+        a->gr_sel = -1;
+        a->drag = false;
+        a->gr_drag = 0;
+        a->win.redraw = true;
         return;
     }
     switch (ks) {
@@ -13641,8 +14285,6 @@ static void conf_load(struct app *a)
             a->val[S_OPACITY] = LM_CLAMP(atoi(v), SLIDERS[S_OPACITY].mn, SLIDERS[S_OPACITY].mx);
         else if (!strcmp(k, "hardness"))
             a->val[S_HARD] = LM_CLAMP(atoi(v), SLIDERS[S_HARD].mn, SLIDERS[S_HARD].mx);
-        else if (!strcmp(k, "tolerance"))
-            a->val[S_TOL] = LM_CLAMP(atoi(v), SLIDERS[S_TOL].mn, SLIDERS[S_TOL].mx);
         else if (!strcmp(k, "corner"))
             a->val[S_CORNER] = LM_CLAMP(atoi(v), SLIDERS[S_CORNER].mn, SLIDERS[S_CORNER].mx);
         else if (!strcmp(k, "sides"))
@@ -13696,6 +14338,12 @@ static void conf_load(struct app *a)
         }
         else if (!strcmp(k, "grid"))
             a->grid = atoi(v) != 0;
+        else if (!strcmp(k, "gradient-area"))
+            a->tg[TG_GAREA] = atoi(v) != 0;
+        else if (!strcmp(k, "gradient-reverse"))
+            a->tg[TG_GREV] = atoi(v) != 0;
+        else if (!strcmp(k, "gradient"))
+            grad_parse(&a->grad, v);
     }
     fclose(f);
 }
@@ -13718,14 +14366,18 @@ static void conf_save(const struct app *a)
     fprintf(f, "fg = %08x\nbg = %08x\nrecent =", a->fg, a->bg);
     for (int i = 0; i < a->nrecent; i++)
         fprintf(f, " %08x", a->recent[i]);
-    fprintf(f, "\nsize = %d\nopacity = %d\nhardness = %d\ntolerance = %d\ncorner = %d\nsides = %d\ndensity = %d\ntext-size = %d\nlayers = %d\ngrid = %d\n", a->val[S_SIZE], a->val[S_OPACITY], a->val[S_HARD],
-            a->val[S_TOL], a->val[S_CORNER], a->val[S_SIDES], a->val[S_DENSITY], a->tsize, a->show_layers ? 1 : 0, a->grid ? 1 : 0);
+    fprintf(f, "\nsize = %d\nopacity = %d\nhardness = %d\ncorner = %d\nsides = %d\ndensity = %d\ntext-size = %d\nlayers = %d\ngrid = %d\n", a->val[S_SIZE], a->val[S_OPACITY], a->val[S_HARD],
+            a->val[S_CORNER], a->val[S_SIDES], a->val[S_DENSITY], a->tsize, a->show_layers ? 1 : 0, a->grid ? 1 : 0);
     fprintf(f, "layers-float = %d\n", a->lp_float ? 1 : 0);
     fprintf(f, "rulers = %d\nsnap = %d\nruler-unit = %s\nruler-dpi = %d\n", a->rulers ? 1 : 0, a->snap ? 1 : 0, RU_ABBR[a->ruler_unit], a->ruler_dpi);
     fprintf(f, "smooth = %d\nbrush-style = %s%s\n", a->val[S_SMOOTH], a->tg[TG_PIXEL] ? "p" : "", a->tg[TG_MIRROR] ? "m" : "");
     fprintf(f, "text-font = %s\ntext-align = %d\ntext-line = %d\ntext-letters = %d\ntext-outline = %d\ntext-shadow = %d\ntext-layer = %d\ntext-bend = %d\ntext-style = %s%s%s%s%s\n", a->tfont_name, a->talign, a->val[S_LINE],
             a->val[S_LETTER], a->val[S_OUTLINE], a->val[S_SHADOW], a->tg[TG_TLAYER] ? 1 : 0, a->val[S_BEND], a->tg[TG_BOLD] ? "b" : "", a->tg[TG_ITALIC] ? "i" : "", a->tg[TG_UNDER] ? "u" : "", a->tg[TG_STRIKE] ? "s" : "",
             a->tg[TG_BOX] ? "x" : "");
+    fprintf(f, "gradient-area = %d\ngradient-reverse = %d\ngradient = %d %d", a->tg[TG_GAREA] ? 1 : 0, a->tg[TG_GREV] ? 1 : 0, a->grad.shape, a->grad.repeat);
+    for (int i = 0; i < a->grad.n; i++)
+        fprintf(f, " %d:%08x:%d", a->grad.s[i].pos, a->grad.s[i].c, a->grad.s[i].src);
+    fputc('\n', f);
     fclose(f);
 }
 
@@ -13739,6 +14391,7 @@ struct toolset {
     int nrecent, val[S_COUNT], tsize, talign, ratio, ruler_unit, ruler_dpi;
     char tfont_name[64];
     bool tg[TG_COUNT], rulers, snap, grid;
+    struct grad grad;
 };
 static struct toolset g_tools;
 
@@ -13762,6 +14415,7 @@ static void tools_get(const struct app *a, struct toolset *t)
     t->rulers = a->rulers;
     t->snap = a->snap;
     t->grid = a->grid;
+    t->grad = a->grad;
 }
 
 static void tools_put(struct app *a, const struct toolset *t)
@@ -13785,6 +14439,7 @@ static void tools_put(struct app *a, const struct toolset *t)
     a->rulers = t->rulers;
     a->snap = t->snap;
     a->grid = t->grid;
+    a->grad = t->grad;
     a->vdirty = true;
     a->win.redraw = true;
 }
@@ -13824,6 +14479,9 @@ static struct app *win_create(int win_w, int win_h, const struct app *like)
     a->hover = -1;
     a->fg = 0xff000000u;
     a->bg = 0xffffffffu;
+    grad_preset(&a->grad, 0);
+    a->gr_sel = -1;
+    a->tg[TG_GAREA] = true;
     for (int i = 0; i < S_COUNT; i++)
         a->val[i] = SLIDERS[i].def;
     a->tsize = 28;

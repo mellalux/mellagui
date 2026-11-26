@@ -16434,6 +16434,117 @@ class TestPaint(Base):
             self.chord(self.KEY_Z, KEY_LEFTCTRL)
             st = self.wait(lambda s, b=before: s['image']['hash'] == b)
 
+    def test_a_gradient_can_be_changed_on_the_picture_before_it_is_put_down(self):
+        out = os.path.join(tmp, 'paint-grad.png')
+        self.start('--new', '101x60', out)
+        st = self.wait(lambda s: s['image']['w'] == '101')
+        blank = st['image']['hash']
+        ctl.tap(KEYCODES['g'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Gradient')
+        self.drag(st, (0.5, 30), (100.5, 30))
+        st = self.wait(lambda s: s['grad']['n'] == '2' and s['image']['hash'] != blank)
+        plain = st['image']['hash']
+        win = [x for x in ctl.windows()['windows'] if x['app_id'] == 'mellagui.paint'][0]
+        def at(x, y):
+            return win['x'] + x, win['y'] + self.TOP + y
+        def stop(st, i):
+            return at(int(st['gstop%d' % i]['x']), int(st['gstop%d' % i]['y']))
+        (x0, y0), (x1, y1) = stop(st, 0), stop(st, 1)
+        ctl.abs((x0 + x1) // 2, y0)                                                           # a click on the line: a third colour, the picture the same
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['grad']['n'] == '3' and s['grad']['chosen'] == '1')
+        pos = int(st['gstop1']['pos'])
+        self.assertTrue(4500 <= pos <= 5500, pos)
+        time.sleep(0.6)                                                                       # (not a double click)
+        sx, sy = stop(st, 1)
+        ctl.abs(sx, sy)
+        ctl.button(272, True)
+        ctl.abs(x0 + (x1 - x0) // 5, sy)                                                      # slid towards the start: the grey sits there now
+        ctl.button(272, False)
+        st = self.wait(lambda s: int(s['gstop1']['pos']) < 2800 and s['image']['hash'] != plain)
+        time.sleep(0.6)
+        sx, sy = stop(st, 1)
+        ctl.abs(sx, sy)
+        ctl.button(272, True)
+        ctl.abs(sx, sy + 60)                                                                  # pulled off the line: gone
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['grad']['n'] == '2' and s['image']['hash'] == plain)
+        sx, sy = stop(st, 1)
+        ctl.abs(sx, sy)                                                                       # an end is dragged: the line gets shorter
+        ctl.button(272, True)
+        ctl.abs(x0 + (x1 - x0) // 2, sy)
+        ctl.button(272, False)
+        st = self.wait(lambda s: 45 < float(s['grad']['x1']) < 56 and s['image']['hash'] != plain)
+        short = st['image']['hash']
+        self.assertEqual(st['state']['undo'], '1')                                            # all of it is one step
+        self.chord(KEYCODES['x'])                                                             # X swaps the colours: the gradient follows
+        st = self.wait(lambda s: s['image']['hash'] != short)
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: 'grad' not in s)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        self.assertEqual(self.flat_pixel(out, 0, 30), (255, 255, 255, 255))                   # white to black over the first half, black after it
+        self.assertEqual(self.flat_pixel(out, 80, 30), (0, 0, 0, 255))
+        self.assertTrue(100 < self.flat_pixel(out, 25, 30)[0] < 155)
+        self.chord(self.KEY_Z, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['hash'] == blank)
+        self.drag(st, (10, 10), (60, 40))                                                     # Esc gives a new one up
+        self.wait(lambda s: 'grad' in s and s['image']['hash'] != blank)
+        ctl.tap(1)
+        st = self.wait(lambda s: 'grad' not in s and s['image']['hash'] == blank)
+        self.assertEqual(st['state']['undo'], '0')
+
+    def test_fill_stays_inside_a_ring_and_leaves_no_light_seam(self):
+        out = os.path.join(tmp, 'paint-ring.png')
+        self.start('--new', '80x60', out)
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        self.assertEqual(st['state']['tolerance'], '10')
+        blank = st['image']['hash']
+        ctl.tap(KEYCODES['c'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Circle')
+        self.drag(st, (15.5, 5.5), (65.5, 55.5))
+        st = self.wait(lambda s: s['image']['hash'] != blank)
+        ring = st['image']['hash']
+        ctl.tap(KEYCODES['f'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Fill')
+        x, y = self.screen(st, 40.5, 30.5)
+        ctl.abs(int(x), int(y))
+        ctl.button(272, True)
+        ctl.button(272, False)
+        st = self.wait(lambda s: s['image']['hash'] != ring)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        row = [self.flat_pixel(out, i, 30)[0] for i in range(80)]
+        self.assertEqual(row[18:63], [0] * 45, row)                       # black all the way into the ring: no seam
+        self.assertEqual((row[5], row[75]), (255, 255), row)              # and nothing outside it
+        self.assertEqual(self.flat_pixel(out, 17, 7), (255, 255, 255, 255))
+
+    def test_a_gradient_stays_in_the_ring_it_was_started_in(self):
+        out = os.path.join(tmp, 'paint-gring.png')
+        self.start('--new', '80x60', out)
+        st = self.wait(lambda s: s['image']['w'] == '80')
+        blank = st['image']['hash']
+        ctl.tap(KEYCODES['c'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Circle')
+        self.drag(st, (15.5, 5.5), (65.5, 55.5))
+        st = self.wait(lambda s: s['image']['hash'] != blank)
+        ring = st['image']['hash']
+        self.chord(KEYCODES['x'])                                                             # X: from white to black
+        ctl.tap(KEYCODES['g'])
+        st = self.wait(lambda s: s['state']['tool'] == 'Gradient')
+        self.drag(st, (30.5, 30.5), (50.5, 30.5))
+        st = self.wait(lambda s: s['image']['hash'] != ring and 'grad' in s)
+        ctl.tap(KEY_ENTER)
+        st = self.wait(lambda s: 'grad' not in s)
+        self.chord(self.KEY_S, KEY_LEFTCTRL)
+        self.wait(lambda s: s['image']['modified'] == '0')
+        row = [self.flat_pixel(out, i, 30)[0] for i in range(80)]
+        self.assertEqual(row[22:30], [255] * 8, row)                      # white before the start, inside the ring
+        self.assertEqual(row[51:59], [0] * 8, row)                        # black after the end, up to the line without a seam
+        self.assertEqual((row[5], row[75]), (255, 255), row)              # the right side outside the ring is not touched (it would be black)
+        self.assertEqual(self.flat_pixel(out, 75, 5), (255, 255, 255, 255))
+
     def test_the_pointer_has_a_shape_for_every_tool(self):
         self.start('--new', '60x40')
         st = self.wait(lambda s: s['image']['w'] == '60')

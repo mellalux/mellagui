@@ -9288,16 +9288,16 @@ static void paint(struct wlwin *w)
         wlrail_line(w, x0, y0, x1, y1, 3, 0x000000);
         wlrail_line(w, x0, y0, x1, y1, 1, 0xffffff);
     }
-    struct wlrail L, R;
-    rails(a, &L, &R);
-    int64_t now = now_ms();
-    wlrail_paint(w, &L, &a->ran[0], rail_hover_of(a, false), now, COL_BAR, COL_BAR, COL_ACCENT, lm_theme.text);
-    wlrail_paint(w, &R, &a->ran[1], rail_hover_of(a, true), now, COL_BAR, COL_BAR, COL_ACCENT, lm_theme.text);
     paint_guides_and_rulers(a);
     paint_layers(a);
     paint_tbar(a);
     paint_bbar(a);
     paint_strip(a);
+    struct wlrail L, R;                                                 /* the rails after the rulers and the panels: a button's name lies beside it, over them */
+    rails(a, &L, &R);
+    int64_t now = now_ms();
+    wlrail_paint(w, &L, &a->ran[0], rail_hover_of(a, false), now, COL_BAR, COL_BAR, COL_ACCENT, lm_theme.text);
+    wlrail_paint(w, &R, &a->ran[1], rail_hover_of(a, true), now, COL_BAR, COL_BAR, COL_ACCENT, lm_theme.text);
     paint_status(a);
     if (a->prompt != P_NONE)
         paint_card(a);

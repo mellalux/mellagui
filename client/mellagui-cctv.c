@@ -15,12 +15,15 @@
  * S saves a picture and V starts / stops a recording (of the camera shown alone, else of every camera that is live): full size, into ~/CCTV
  * ($MELLAGUI_CCTV_DIR), cctvrec.c. M plays the sound of the camera shown alone ($MELLAGUI_CCTV_PLAYER = a program that takes 16 bit 8000 Hz mono
  * samples, or "none"). O opens the folder.
+ * A camera shown alone can be steered: the arrow keys or the pad on its picture move it while they are held (cctvctl.c), P remembers up to four views
+ * and goes back to them, N chooses the night picture and the lamp.
  *
  * Every camera has a thread of its own: it keeps the connection, feeds ffmpeg and takes its pictures; the window only shows the newest one.
  */
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -34,6 +37,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "cctvctl.h"
 #include "cctvrec.h"
 #include "dvrip.h"
 #include "ffpipe.h"
@@ -113,6 +117,9 @@ struct cam {
     char why[200];
     /* the window's own */
     struct cctv_job *rec, *snap;
+    struct cctv_ctl *ctl;                   /* steering, once the camera has been shown alone */
+    struct cctv_view view;                  /* what it last told */
+    bool asked;                             /* its settings, since it was last shown alone */
     unsigned seen, rec_seen;
     int rec_secs;
     struct lm_rect tile, pic;
@@ -128,6 +135,10 @@ struct app {
     struct wlrail_anim ran;
     const char *conf;
     bool sound;                             /* M */
+    int moving, move_dir;                   /* the camera that is being moved (-1 = none) and which way */
+    uint32_t move_key;                      /* the key held for it, 0 = the pad is */
+    int menu, menu_cam;                     /* the menu that is open: MENU_* */
+    int menu_do[16];                        /* what its entries do */
     char note[600];                         /* a word for the status line */
     int64_t note_until;
     char dir[400];                          /* where pictures and recordings go */
@@ -868,6 +879,227 @@ static void toggle_sound(struct app *a)
     note(a, a->sound ? "Sound on" : "Sound off");
 }
 
+/* ---- steering ---- */
+
+static const char *const DIRECTION[4] = { "DirectionUp", "DirectionDown", "DirectionLeft", "DirectionRight" };
+enum { MENU_NONE, MENU_NIGHT, MENU_POSITIONS };
+#define DO_LAMP 100                         /* menu_do: a night value, DO_LAMP + a lamp mode, DO_GO / DO_SAVE + a position */
+#define DO_GO 200
+#define DO_SAVE 300
+#define POSITIONS 4
+static const struct { const char *mode, *text; } LAMP[] = { { "Close", "Off" }, { "KeepOpen", "Always on" }, { "Auto", "Automatic" } };
+
+/* The steering of a camera, made when it is first wanted. Only for one that shows a picture: its login is known to be good. */
+static struct cctv_ctl *steer(struct app *a, int i)
+{
+    struct cam *c = &a->cam[i];
+    if (!c->ctl && is_live(c)) {
+        struct cctv_target t = { .name = c->name, .host = c->host, .port = c->port, .user = c->user, .password = c->pass };
+        c->ctl = cctv_ctl_start(&t);
+    }
+    return c->ctl;
+}
+
+static void move_stop(struct app *a)
+{
+    if (a->moving < 0)
+        return;
+    cctv_ctl_move(a->cam[a->moving].ctl, NULL);
+    a->moving = -1;
+    a->move_key = 0;
+    a->win.redraw = true;
+}
+
+static void move_start(struct app *a, int dir, uint32_t key)
+{
+    if (a->single < 0 || (a->moving == a->single && a->move_dir == dir))
+        return;
+    struct cctv_ctl *ctl = steer(a, a->single);
+    if (!ctl)
+        return;
+    cctv_ctl_move(ctl, DIRECTION[dir]);     /* (the one before is stopped by it) */
+    a->moving = a->single;
+    a->move_dir = dir;
+    a->move_key = key;
+    a->win.redraw = true;
+}
+
+static void night_menu(struct app *a)
+{
+    if (a->single < 0) {
+        note(a, "Show one camera alone to set it up");
+        return;
+    }
+    struct cctv_ctl *ctl = steer(a, a->single);
+    if (!ctl)
+        return;
+    move_stop(a);
+    struct cctv_view v;
+    cctv_ctl_view(ctl, &v);
+    if (!v.known) {
+        cctv_ctl_query(ctl);
+        note(a, "Asking the camera, press N again in a moment");
+        return;
+    }
+    static const struct { int value; bool lamp; const char *text; } NIGHT[] = {
+        { CCTV_NIGHT_AUTO, false, "Automatic" }, { CCTV_NIGHT_INFRARED, true, "Infrared" }, { CCTV_NIGHT_LAMP, true, "Colour, with the lamp" },
+        { CCTV_NIGHT_SMART, true, "Smart: lamp on movement" }, { CCTV_NIGHT_COLOUR, false, "Always colour" }, { CCTV_NIGHT_GREY, false, "Always black and white" } };
+    char menu[600] = "";
+    size_t o = 0;
+    int n = 0;
+    if (v.night >= 0) {
+        o += (size_t)snprintf(menu + o, sizeof(menu) - o, "~Night picture\n");
+        a->menu_do[n++] = -1;
+        for (size_t k = 0; k < LM_ARRAY_LEN(NIGHT); k++) {
+            if (NIGHT[k].lamp && !v.lamp[0])
+                continue;
+            o += (size_t)snprintf(menu + o, sizeof(menu) - o, "%s%s\n", v.night == NIGHT[k].value ? "* " : "   ", NIGHT[k].text);
+            a->menu_do[n++] = NIGHT[k].value;
+        }
+    }
+    if (v.lamp[0]) {
+        o += (size_t)snprintf(menu + o, sizeof(menu) - o, "~Lamp\n");
+        a->menu_do[n++] = -1;
+        for (size_t k = 0; k < LM_ARRAY_LEN(LAMP); k++) {
+            o += (size_t)snprintf(menu + o, sizeof(menu) - o, "%s%s\n", !strcmp(v.lamp, LAMP[k].mode) ? "* " : "   ", LAMP[k].text);
+            a->menu_do[n++] = DO_LAMP + (int)k;
+        }
+    }
+    if (!n) {
+        note(a, "This camera has no night settings");
+        return;
+    }
+    menu[o - 1] = 0;
+    a->menu = wlwin_menu(&a->win, menu) ? MENU_NIGHT : MENU_NONE;
+    a->menu_cam = a->single;
+}
+
+static void position_menu(struct app *a)
+{
+    if (a->single < 0) {
+        note(a, "Show one camera alone to move it");
+        return;
+    }
+    if (!steer(a, a->single))
+        return;
+    move_stop(a);
+    char menu[600] = "";
+    size_t o = 0;
+    int n = 0;
+    for (int k = 1; k <= POSITIONS; k++) {
+        o += (size_t)snprintf(menu + o, sizeof(menu) - o, "Go to position %d\n", k);
+        a->menu_do[n++] = DO_GO + k;
+    }
+    o += (size_t)snprintf(menu + o, sizeof(menu) - o, "~Remember this view as");
+    a->menu_do[n++] = -1;
+    for (int k = 1; k <= POSITIONS; k++) {
+        o += (size_t)snprintf(menu + o, sizeof(menu) - o, "\nPosition %d", k);
+        a->menu_do[n++] = DO_SAVE + k;
+    }
+    a->menu = wlwin_menu(&a->win, menu) ? MENU_POSITIONS : MENU_NONE;
+    a->menu_cam = a->single;
+}
+
+static void menu_event(struct wlwin *w, int index)
+{
+    struct app *a = w->data;
+    int menu = a->menu;
+    a->menu = MENU_NONE;
+    w->redraw = true;
+    if (menu == MENU_NONE || index < 0 || index >= (int)LM_ARRAY_LEN(a->menu_do) || a->menu_cam != a->single || !a->cam[a->menu_cam].ctl)
+        return;
+    struct cctv_ctl *ctl = a->cam[a->menu_cam].ctl;
+    int d = a->menu_do[index];
+    if (d >= DO_SAVE)
+        cctv_ctl_position(ctl, d - DO_SAVE, true);
+    else if (d >= DO_GO)
+        cctv_ctl_position(ctl, d - DO_GO, false);
+    else if (d >= DO_LAMP)
+        cctv_ctl_night(ctl, -1, LAMP[d - DO_LAMP].mode);
+    else if (d >= 0)
+        cctv_ctl_night(ctl, d, NULL);
+}
+
+/* The camera shown alone is asked for its settings once it shows a picture; what the steering has to say goes to the status line. */
+static void watch_steering(struct app *a)
+{
+    if (a->single >= 0 && !a->cam[a->single].asked && steer(a, a->single)) {
+        cctv_ctl_query(a->cam[a->single].ctl);
+        a->cam[a->single].asked = true;
+    }
+    for (int i = 0; i < a->n; i++) {
+        struct cam *c = &a->cam[i];
+        if (!c->ctl)
+            continue;
+        struct cctv_view v;
+        cctv_ctl_view(c->ctl, &v);
+        if (v.serial == c->view.serial)
+            continue;
+        bool new_word = v.said != c->view.said && v.msg[0];
+        c->view = v;
+        a->win.redraw = true;
+        if (new_word) {
+            char text[600];
+            snprintf(text, sizeof(text), "%s: %s", c->name, v.msg);
+            note(a, text);
+        }
+    }
+}
+
+/* The pad in the corner of the picture of a camera shown alone: its middle, false when there is none. */
+#define PAD_R 54
+
+static bool pad_centre(struct app *a, int *cx, int *cy)
+{
+    if (a->single < 0)
+        return false;
+    struct cam *c = &a->cam[a->single];
+    if (c->pic.w < 200 || c->pic.h < 150 || !is_live(c))
+        return false;
+    *cx = c->pic.x + c->pic.w - PAD_R - 10;
+    *cy = c->pic.y + c->pic.h - PAD_R - 10;
+    return true;
+}
+
+/* 0..3 = an arrow of the pad, -2 = elsewhere on the pad, -1 = not on it. */
+static int pad_at(struct app *a, double x, double y)
+{
+    int cx, cy;
+    if (!pad_centre(a, &cx, &cy) || (x - cx) * (x - cx) + (y - cy) * (y - cy) > PAD_R * PAD_R)
+        return -1;
+    double dx = x - cx, dy = y - cy;
+    if (dx * dx + dy * dy < 12 * 12)
+        return -2;
+    return fabs(dx) > fabs(dy) ? (dx < 0 ? 2 : 3) : (dy < 0 ? 0 : 1);
+}
+
+static void paint_pad(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int cx, cy;
+    if (!pad_centre(a, &cx, &cy))
+        return;
+    wlwin_round_fill(w, cx - PAD_R, cy - PAD_R, 2 * PAD_R, 2 * PAD_R, PAD_R, 0x101418);
+    static const int at[4][2] = { { 0, -33 }, { 0, 33 }, { -33, 0 }, { 33, 0 } };
+    for (int d = 0; d < 4; d++) {
+        int x = cx + at[d][0], y = cy + at[d][1];
+        bool on = a->moving == a->single && a->move_dir == d;
+        wlwin_drop(w, x - 17, y - 17, 34, 34, lm_button_radius(17), on ? lm_theme.btn_blue_lit : lm_theme.btn_slate);
+        for (int i = 0; i < 7; i++) {       /* an arrow head, a line at a time */
+            if (d < 2)
+                wlwin_fill(w, x - i - 1, y + (d == 0 ? i - 4 : 3 - i), 2 * i + 2, 1, 0xffffff);
+            else
+                wlwin_fill(w, x + (d == 2 ? i - 4 : 3 - i), y - i - 1, 1, 2 * i + 2, 0xffffff);
+        }
+    }
+}
+
+static void night_icon(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    wlwin_round_fill(w, cx - 8, cy - 8, 16, 16, 8, c);
+    wlwin_round_fill(w, cx - 3, cy - 10, 14, 14, 7, bg);
+}
+
 static void speaker_icon(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 {
     (void)bg;
@@ -880,7 +1112,8 @@ static void speaker_icon(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t b
 
 /* ---- the window ---- */
 
-enum { B_ALL, B_CAM0, B_SHOT = B_CAM0 + MAX_CAMS, B_REC, B_SOUND, B_FOLDER, B_AGAIN, B_COUNT };
+enum { B_ALL, B_CAM0, B_SHOT = B_CAM0 + MAX_CAMS, B_REC, B_SOUND, B_FOLDER, B_NIGHT, B_POS, B_AGAIN, B_COUNT };
+_Static_assert(B_COUNT <= WLRAIL_MAX, "the rail holds the buttons");
 
 static void rail(struct app *a, struct wlrail *L)
 {
@@ -905,6 +1138,11 @@ static void rail(struct app *a, struct wlrail *L)
     L->it[B_SOUND] = (struct wlrail_item){ .tip = a->single < 0 ? "Sound (M): one camera alone" : a->sound ? "Sound off (M)" : "Sound on (M)", .icon = speaker_icon,
                                            .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .show = true, .lit = a->sound && a->single >= 0, .idle = a->single < 0 };
     L->it[B_FOLDER] = (struct wlrail_item){ .tip = "Open the folder (O)", .icon = wlrail_ic_open, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit, .show = true };
+    bool one = a->single >= 0;
+    L->it[B_NIGHT] = (struct wlrail_item){ .tip = one ? "Night picture and lamp (N)" : "Night (N): one camera alone", .icon = night_icon, .base = lm_theme.btn_blue,
+                                           .lite = lm_theme.btn_blue_lit, .show = true, .gap = true, .idle = !one };
+    L->it[B_POS] = (struct wlrail_item){ .tip = one ? "Positions (P)" : "Positions (P): one camera alone", .icon = wlrail_ic_home, .base = lm_theme.btn_teal,
+                                         .lite = lm_theme.btn_teal_lit, .show = true, .idle = !one };
     L->it[B_AGAIN] = (struct wlrail_item){ .tip = "Connect again (R)", .icon = wlrail_ic_swap, .base = lm_theme.btn_amber, .lite = lm_theme.btn_amber_lit,
                                            .show = true, .bottom = true, .idle = !a->n };
 }
@@ -1005,6 +1243,14 @@ static void write_dump(struct app *a)
         fprintf(f, "rec %d on=%d state=%d snap=%d\n", i, c->rec != NULL, st.state, c->snap != NULL);
     }
     fprintf(f, "sound on=%d\n", a->sound);
+    fprintf(f, "ptz cam=%d dir=%s\n", a->moving, a->moving >= 0 ? DIRECTION[a->move_dir] : "-");
+    for (int i = 0; i < a->n; i++)
+        if (a->cam[i].view.known)
+            fprintf(f, "ctl %d night=%d lamp=%s\n", i, a->cam[i].view.night, a->cam[i].view.lamp);
+    int px, py;
+    if (pad_centre(a, &px, &py))
+        fprintf(f, "pad %d %d %d\n", a->single, px, py);
+    fprintf(f, "menu %d\n", a->menu);
     fprintf(f, "note %s\n", a->note);
     fclose(f);
     if (rename(tmp, g_dump) < 0) {}
@@ -1051,9 +1297,10 @@ static void paint(struct wlwin *w)
             char info[96];
             snprintf(info, sizeof(info), "%d x %d  %d.%d fps  %d kbit/s", sw, sh, fps10 / 10, fps10 % 10, kbps);
             int tw = LM_MIN(wlcard_text_w(info) + 20, c->tile.w - 16);
-            chip(w, c->tile.x + c->tile.w - tw - 8, c->tile.y + c->tile.h - 32, info, c->tile.w - 16, 0);
+            chip(w, c->tile.x + c->tile.w - tw - 8, a->single == i ? c->tile.y + 8 : c->tile.y + c->tile.h - 32, info, c->tile.w - 16, 0);
         }
     }
+    paint_pad(a);
     int sy = w->bh - STAT_H;
     wlwin_fill(w, 0, sy, w->bw, STAT_H, lm_theme.bar);
     char status[300];
@@ -1073,7 +1320,7 @@ static void paint(struct wlwin *w)
     else if (recording && a->single >= 0 && !a->cam[a->single].rec)
         snprintf(status, sizeof(status), "Recording %d other camera%s  -  Esc: all cameras", recording, recording > 1 ? "s" : "");
     else if (a->single >= 0)
-        snprintf(status, sizeof(status), "%s (%s)  -  Esc: all cameras", a->cam[a->single].name, a->cam[a->single].host);
+        snprintf(status, sizeof(status), "%s (%s)  -  arrows: move  -  Esc: all cameras", a->cam[a->single].name, a->cam[a->single].host);
     else
         snprintf(status, sizeof(status), "%d of %d cameras live%s", live, a->n, a->n ? "  -  click a picture to see it alone" : "");
     wlwin_text(w, 8, sy + (STAT_H - LM_FONT_H) / 2, status, 1, lm_theme.text, w->bw - 16);
@@ -1086,6 +1333,9 @@ static void paint(struct wlwin *w)
 
 static void show(struct app *a, int i)
 {
+    move_stop(a);
+    for (int k = 0; k < a->n; k++)
+        a->cam[k].asked = false;
     a->single = i >= 0 && i < a->n ? i : -1;
     a->hover = -1;
     layout(a);                              /* (the new room is known before the connections are made) */
@@ -1107,6 +1357,10 @@ static void press_button(struct app *a, int b)
         toggle_sound(a);
     else if (b == B_FOLDER)
         open_folder(a);
+    else if (b == B_NIGHT)
+        night_menu(a);
+    else if (b == B_POS)
+        position_menu(a);
     else if (b == B_AGAIN)
         for (int i = 0; i < a->n; i++)
             if (a->single < 0 || a->single == i)
@@ -1133,6 +1387,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     } else if (op == LM_WL_POINTER_EVT_LEAVE) {
         a->hover = a->rhover = -1;
         wlrail_release(&a->ran);
+        if (!a->move_key)
+            move_stop(a);
         w->redraw = true;
         return;
     } else if (op != LM_WL_POINTER_EVT_BUTTON) {
@@ -1150,6 +1406,8 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
     if (args[3].u != 1) {
         wlrail_release(&a->ran);
+        if (args[2].u == 272 && !a->move_key)
+            move_stop(a);
         w->redraw = true;
         return;
     }
@@ -1163,6 +1421,12 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         return;
     }
+    int pd = pad_at(a, a->px, a->py);
+    if (pd != -1) {
+        if (pd >= 0)
+            move_start(a, pd, 0);
+        return;
+    }
     int t = tile_at(a, a->px, a->py);
     if (t >= 0)
         show(a, a->single == t ? -1 : t);
@@ -1171,15 +1435,33 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
 static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
-    if (op != LM_WL_KEYBOARD_EVT_KEY || args[3].u == 0)
+    if (op == LM_WL_KEYBOARD_EVT_LEAVE) {       /* the release of the key may never come */
+        move_stop(a);
         return;
+    }
+    if (op != LM_WL_KEYBOARD_EVT_KEY)
+        return;
+    if (args[3].u == 0) {
+        if (a->move_key && args[2].u == a->move_key)
+            move_stop(a);
+        return;
+    }
     uint32_t ks = lm_keymap_keysym(args[2].u, w->mods);
     if (w->mods & LM_MOD_CTRL) {
         if (ks == 'q' || ks == 'Q' || ks == 'w' || ks == 'W')
             w->running = false;
         return;
     }
-    if (ks == LM_KS_Escape || ks == '0' || ks == 'g')
+    if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Left || ks == LM_KS_Right) {
+        if (a->single < 0)
+            note(a, "Show one camera alone to move it");
+        else
+            move_start(a, ks == LM_KS_Up ? 0 : ks == LM_KS_Down ? 1 : ks == LM_KS_Left ? 2 : 3, args[2].u);
+    } else if (ks == 'n' || ks == 'N') {
+        press_button(a, B_NIGHT);
+    } else if (ks == 'p' || ks == 'P') {
+        press_button(a, B_POS);
+    } else if (ks == LM_KS_Escape || ks == '0' || ks == 'g')
         show(a, -1);
     else if (ks >= '1' && ks <= '0' + (uint32_t)a->n)
         show(a, (int)(ks - '1'));
@@ -1251,6 +1533,13 @@ static int selftest(void)
     CHECK(ow == 1334 && oh == 1000);
     output_size(4.0 / 3, 704, 576, 4000, 4000, &ow, &oh);
     CHECK(ow == 768 && oh == 576);                           /* never bigger than the source */
+    const char *reply = "{ \"Name\" : \"Camera.Param\", \"Camera.Param\" : [ { \"X\" : { \"Mode\" : [\"}\"] }, \"DayNightColor\" : \"0x00000003\", \"Z\" : 5 } ], \"Ret\" : 100 }";
+    char *v = dv_config_change(reply, "Camera.Param", "DayNightColor", "0x00000001");
+    CHECK(v && !strcmp(v, "[ { \"X\" : { \"Mode\" : [\"}\"] }, \"DayNightColor\" : \"0x00000001\", \"Z\" : 5 } ]"));
+    free(v);
+    CHECK(!dv_config_change(reply, "Camera.Param", "NoSuch", "1") && !dv_config_change(reply, "Camera.Other", "DayNightColor", "1"));
+    CHECK(!dv_config_change(reply, "Camera.Param", "Ret", "1"));                 /* outside the setting */
+    CHECK(!dv_config_change("{\"A\":[{\"k\":\"v\"", "A", "k", "w"));             /* cut off */
     printf("%s\n", g_fail ? "selftest FAILED" : "selftest ok");
     return g_fail != 0;
 }
@@ -1263,7 +1552,7 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     signal(SIGPIPE, SIG_IGN);
     const char *cli_conf = NULL;
-    int win_w = 960, win_h = 440;
+    int win_w = 960, win_h = 500;
     bool list = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest"))
@@ -1274,7 +1563,7 @@ int main(int argc, char **argv)
             cli_conf = argv[++i];
         } else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
             char junk;
-            if (sscanf(argv[++i], "%dx%d%c", &win_w, &win_h, &junk) != 2 || win_w < 420 || win_h < 400) {
+            if (sscanf(argv[++i], "%dx%d%c", &win_w, &win_h, &junk) != 2 || win_w < 420 || win_h < 460) {
                 fprintf(stderr, "mellagui-cctv: --size wants a size like 960x440\n");
                 return 2;
             }
@@ -1287,7 +1576,7 @@ int main(int argc, char **argv)
     static char path[PATH_MAX];
     conf_path(path, sizeof(path), cli_conf);
     a.conf = path;
-    a.single = a.hover = a.rhover = -1;
+    a.single = a.hover = a.rhover = a.moving = -1;
     load_conf(&a);
     const char *dir = getenv("MELLAGUI_CCTV_DIR"), *home = getenv("HOME");
     if (dir && *dir)
@@ -1304,11 +1593,11 @@ int main(int argc, char **argv)
     g_ffmpeg = ffpipe_ffmpeg_path();
     g_dump = getenv("MELLAGUI_CCTV_DUMP");
     wlrail_init(&a.ran);
-    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     if (wlwin_connect(&a.win, "mellagui-cctv", &ops, &a) < 0)
         return 1;
     wlwin_set_inset(&a.win, WLRAIL_W);
-    if (wlwin_open(&a.win, "Cameras", "mellagui.cctv", win_w, win_h, 420, 400) < 0)
+    if (wlwin_open(&a.win, "Cameras", "mellagui.cctv", win_w, win_h, 420, 460) < 0)
         return 1;
     for (int i = 0; i < a.n; i++) {
         struct cam *c = &a.cam[i];
@@ -1335,6 +1624,7 @@ int main(int argc, char **argv)
         if (!wlwin_step(&a.win, timeout))
             break;
         collect_jobs(&a);
+        watch_steering(&a);
         if (a.note[0] && now_ms() >= a.note_until) {
             a.note[0] = 0;
             a.win.redraw = true;
@@ -1356,6 +1646,8 @@ int main(int argc, char **argv)
         pthread_mutex_unlock(&c->lock);
         poke(c);
     }
+    for (int i = 0; i < a.n; i++)           /* a camera that moves is stopped before anything else */
+        cctv_ctl_free(a.cam[i].ctl);
     for (int i = 0; i < a.n; i++)           /* all are told first, so that they finish side by side */
         if (a.cam[i].rec)
             cctv_job_stop(a.cam[i].rec);

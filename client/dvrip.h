@@ -83,4 +83,20 @@ int dv_start(struct dv_session *s, bool sub, int wake_fd, char *err, size_t errs
 int dv_keepalive(struct dv_session *s);
 void dv_close(struct dv_session *s);
 
+/* ---- commands (on a session that watches nothing: they read the camera's answer) -------------------------------------------- */
+
+/* These return 0, the camera's code when it says no, or -1 when the connection is of no use any more. */
+
+/* Move the camera: `command` is "DirectionLeft", "DirectionRightUp" ... with preset 65535 it STARTS and goes on until the same call with preset -1
+ * stops it; "SetPreset" / "GotoPreset" with a position's number remember and go back to a view. step = the speed, 1..8. */
+int dv_ptz(struct dv_session *s, const char *command, int preset, int step, int wake_fd);
+/* A setting as the camera writes it ("Camera.Param"): the whole answer's text, to be freed by the caller. */
+int dv_config_get(struct dv_session *s, const char *name, char **reply, int wake_fd);
+/* Writes a setting back: `value` is its JSON. */
+int dv_config_set(struct dv_session *s, const char *name, const char *value, int wake_fd);
+
+/* In the text of an answer of dv_config_get: a new copy of the member `name`'s JSON with the string member `key` inside it changed to `to` (everything
+ * else as the camera wrote it). NULL when there is no such member or key. */
+char *dv_config_change(const char *reply, const char *name, const char *key, const char *to);
+
 #endif

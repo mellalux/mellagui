@@ -17,7 +17,7 @@
 #define HDR 20
 #define WAIT_MS 6000
 
-enum { MSG_LOGIN = 1000, MSG_KEEPALIVE = 1006, MSG_MONITOR = 1410, MSG_CLAIM = 1413 };
+enum { MSG_LOGIN = 1000, MSG_KEEPALIVE = 1006, MSG_SET = 1040, MSG_GET = 1042, MSG_PTZ = 1400, MSG_MONITOR = 1410, MSG_CLAIM = 1413 };
 
 void dv_hash(const char *password, char out[9])
 {
@@ -261,8 +261,8 @@ static bool read_all(int fd, uint8_t *buf, size_t n, int64_t deadline, int wake_
     return true;
 }
 
-/* One answer's JSON (exactly one message is read, so a stream behind it stays in the socket). NULL when there is none. */
-static struct json *read_reply(int fd, int wake_fd)
+/* The next message: its id and its text (zeros and the line end taken off), to be freed. NULL when there is none. */
+static char *read_text(int fd, int *msg, int wake_fd)
 {
     int64_t deadline = now_ms() + WAIT_MS;
     uint8_t h[HDR];
@@ -272,17 +272,25 @@ static struct json *read_reply(int fd, int wake_fd)
     if (h[0] != 0xff || n > 1u << 20)
         return NULL;
     uint8_t *body = malloc((size_t)n + 1);
-    if (!body)
+    if (!body || !read_all(fd, body, n, deadline, wake_fd)) {
+        free(body);
         return NULL;
-    struct json *j = NULL;
-    if (read_all(fd, body, n, deadline, wake_fd)) {
-        size_t len = n;
-        while (len && (body[len - 1] == 0 || body[len - 1] == '\n'))
-            len--;
-        body[len] = 0;
-        j = json_parse((const char *)body);
     }
-    free(body);
+    size_t len = n;
+    while (len && (body[len - 1] == 0 || body[len - 1] == '\n'))
+        len--;
+    body[len] = 0;
+    if (msg)
+        *msg = h[14] | h[15] << 8;
+    return (char *)body;
+}
+
+/* One answer's JSON (exactly one message is read, so a stream behind it stays in the socket). NULL when there is none. */
+static struct json *read_reply(int fd, int wake_fd)
+{
+    char *t = read_text(fd, NULL, wake_fd);
+    struct json *j = t ? json_parse(t) : NULL;
+    free(t);
     return j;
 }
 
@@ -388,4 +396,121 @@ void dv_close(struct dv_session *s)
         close(s->ctl);                      /* (the camera ends the session with the connection) */
     s->ctl = s->data = -1;
     s->seq = 0;
+}
+
+/* Sends a command on the first connection and waits for its answer (the id after the command's; other messages are passed over). */
+static int ask(struct dv_session *s, int msg, const char *body, char **reply, int wake_fd)
+{
+    if (reply)
+        *reply = NULL;
+    if (s->ctl < 0 || !send_msg(s->ctl, s->id, s->seq++, msg, body, wake_fd))
+        return -1;
+    for (int i = 0; i < 8; i++) {
+        int got = 0;
+        char *t = read_text(s->ctl, &got, wake_fd);
+        if (!t)
+            return -1;
+        if (got != msg + 1) {
+            free(t);
+            continue;
+        }
+        struct json *j = json_parse(t);
+        long long ret = j ? (long long)json_num(j, "Ret", -1) : -1;
+        json_free(j);
+        if (ret == 100 && reply)
+            *reply = t;
+        else
+            free(t);
+        return ret == 100 ? 0 : ret > 0 && ret < 100000 ? (int)ret : -1;
+    }
+    return -1;
+}
+
+int dv_ptz(struct dv_session *s, const char *command, int preset, int step, int wake_fd)
+{
+    char body[640];
+    snprintf(body, sizeof(body), "{\"Name\":\"OPPTZControl\",\"SessionID\":\"%s\",\"OPPTZControl\":{\"Command\":\"%s\",\"Parameter\":{\"AUX\":{\"Number\":0,\"Status\":\"On\"},"
+             "\"Channel\":0,\"MenuOpts\":\"Enter\",\"POINT\":{\"bottom\":0,\"left\":0,\"right\":0,\"top\":0},\"Pattern\":\"SetBegin\",\"Preset\":%d,\"Step\":%d,\"Tour\":0}}}",
+             s->idtext, command, preset, step);
+    return ask(s, MSG_PTZ, body, NULL, wake_fd);
+}
+
+int dv_config_get(struct dv_session *s, const char *name, char **reply, int wake_fd)
+{
+    char body[200];
+    snprintf(body, sizeof(body), "{\"Name\":\"%s\",\"SessionID\":\"%s\"}", name, s->idtext);
+    return ask(s, MSG_GET, body, reply, wake_fd);
+}
+
+int dv_config_set(struct dv_session *s, const char *name, const char *value, int wake_fd)
+{
+    size_t cap = strlen(value) + 2 * strlen(name) + 80;
+    char *body = malloc(cap);
+    if (!body)
+        return -1;
+    snprintf(body, cap, "{\"Name\":\"%s\",\"SessionID\":\"%s\",\"%s\":%s}", name, s->idtext, name, value);
+    int r = ask(s, MSG_SET, body, NULL, wake_fd);
+    free(body);
+    return r;
+}
+
+/* The end of the JSON value that begins at p (behind it); NULL when it does not end. */
+static const char *value_end(const char *p)
+{
+    int depth = 0;
+    bool text = false;
+    for (; *p; p++) {
+        if (text) {
+            if (*p == '\\' && p[1])
+                p++;
+            else if (*p == '"') {
+                text = false;
+                if (!depth)
+                    return p + 1;
+            }
+        } else if (*p == '"') {
+            text = true;
+        } else if (*p == '{' || *p == '[') {
+            depth++;
+        } else if (*p == '}' || *p == ']') {
+            if (--depth <= 0)
+                return depth ? NULL : p + 1;
+        } else if (!depth && (*p == ',')) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Where the value of the member `key` begins, looking from p up to `end` (a text that only looks like the key, as a value, has no colon behind it). */
+static const char *member(const char *p, const char *end, const char *key)
+{
+    size_t n = strlen(key);
+    for (; (p = strchr(p, '"')) && p < end; p++) {
+        if (strncmp(p + 1, key, n) || p[n + 1] != '"')
+            continue;
+        const char *q = p + n + 2;
+        q += strspn(q, " \t\r\n");
+        if (*q != ':')
+            continue;
+        q++;
+        return q + strspn(q, " \t\r\n");
+    }
+    return NULL;
+}
+
+char *dv_config_change(const char *reply, const char *name, const char *key, const char *to)
+{
+    const char *v = member(reply, reply + strlen(reply), name), *end = v ? value_end(v) : NULL;
+    const char *old = end ? member(v, end, key) : NULL;
+    if (!old || old >= end || *old != '"')
+        return NULL;
+    const char *old_end = value_end(old);
+    if (!old_end || old_end > end)
+        return NULL;
+    size_t cap = (size_t)(end - v) + strlen(to) + 3;
+    char *out = malloc(cap);
+    if (out)
+        snprintf(out, cap, "%.*s\"%s\"%.*s", (int)(old - v), v, to, (int)(end - old_end), old_end);
+    return out;
 }

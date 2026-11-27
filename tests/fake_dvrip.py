@@ -17,6 +17,9 @@ import sys
 import threading
 import time
 
+PARAM = [{"AeSensitivity": 5, "DayNightColor": "0x00000003", "PictureFlip": "0x1", "Odd": {"DayNightColors": ["}", "]"]}}]
+LAMP = {"Brightness": 50, "WorkMode": "Close", "WorkPeriod": {"EHour": 6}}
+
 HASHSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
@@ -72,6 +75,7 @@ class Camera:
         self.folder, self.password = folder, password
         self.claimed = {}               # (session, stream type) -> the data connection
         self.sessions = 41
+        self.config = {"Camera.Param": PARAM, "Camera.WhiteLight": LAMP}
 
     def stream(self, kind, sock):
         name = "main" if kind == "Main" else "sub"
@@ -131,6 +135,19 @@ class Camera:
                     who = body["SessionID"], kind
                     if who in self.claimed:
                         threading.Thread(target=self.stream, args=(kind, self.claimed.pop(who)), daemon=True).start()
+                elif msg == 1400:
+                    p = body["OPPTZControl"]
+                    say("ptz", p["Command"], p["Parameter"]["Preset"], p["Parameter"]["Step"])
+                    send_msg(s, 1401, b'{"Ret":100}\n\x00')
+                elif msg == 1042:
+                    name = body["Name"]
+                    answer = {"Name": name, "Ret": 100, name: self.config[name]} if name in self.config else {"Name": name, "Ret": 607}
+                    send_msg(s, 1043, json.dumps(answer).encode() + b"\n\x00")
+                elif msg == 1040:
+                    name = body["Name"]
+                    self.config[name] = body[name]
+                    say("set", name, json.dumps(body[name], sort_keys=True))
+                    send_msg(s, 1041, b'{"Ret":100}\n\x00')
                 elif msg == 1006:
                     say("keepalive")
                     send_msg(s, 1007, b'{"Ret":100}\n\x00')

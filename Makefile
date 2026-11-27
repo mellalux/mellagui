@@ -165,7 +165,7 @@ $(BUILD)/mellagui-bluetooth: $(BUILD)/client/mellagui-bluetooth.o $(BUILD)/clien
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/mellagui-cctv: $(BUILD)/client/mellagui-cctv.o $(BUILD)/client/cctvrec.o $(BUILD)/client/dvrip.o $(BUILD)/client/json.o $(BUILD)/client/ffpipe.o $(BUILD)/src/md5.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+$(BUILD)/mellagui-cctv: $(BUILD)/client/mellagui-cctv.o $(BUILD)/client/cctvrec.o $(BUILD)/client/cctvctl.o $(BUILD)/client/dvrip.o $(BUILD)/client/json.o $(BUILD)/client/ffpipe.o $(BUILD)/src/md5.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 

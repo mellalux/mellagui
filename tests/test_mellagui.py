@@ -33400,7 +33400,7 @@ class TestCctv(Base):
         with open(player, 'w') as f:
             f.write('#!/bin/sh\nexec cat >> %s\n' % self.heard)
         os.chmod(player, 0o700)
-        p = subprocess.Popen([self.EXE, '--size', '700x420'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        p = subprocess.Popen([self.EXE, '--size', '700x470'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_CCTV_CONF=path, MELLAGUI_CCTV_DUMP=self.dump, MELLAGUI_CCTV_DIR=self.saved,
                                       MELLAGUI_CCTV_PLAYER=player, MELLAGUI_CCTV_FILES='none'))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
@@ -33409,7 +33409,7 @@ class TestCctv(Base):
         return p
 
     def state(self):
-        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}, 'rec': {}}
+        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}, 'rec': {}, 'ctl': {}, 'pad': {}}
         try:
             with open(self.dump) as f:
                 lines = f.read().splitlines()
@@ -33419,12 +33419,16 @@ class TestCctv(Base):
             f = l.split()
             if f[0] == 'state':
                 st.update(x.split('=') for x in f[1:])
-            elif f[0] in ('cam', 'rec'):
+            elif f[0] in ('cam', 'rec', 'ctl'):
                 st[f[0]][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'sound':
                 st['sound'] = f[1]
             elif f[0] == 'note':
                 st['note'] = ' '.join(f[1:])
+            elif f[0] == 'ptz':
+                st['ptz'] = ' '.join(f[1:])
+            elif f[0] == 'menu':
+                st['menu'] = f[1]
             elif f[0] == 'msg':
                 st['msg'][int(f[1])] = ' '.join(f[2:])
             else:
@@ -33601,6 +33605,105 @@ class TestCctv(Base):
         n = os.path.getsize(self.heard)
         time.sleep(0.6)
         self.assertEqual(os.path.getsize(self.heard), n)
+
+    def alone(self):
+        """One camera, shown alone and asked for its settings."""
+        port, log = self.camera('')
+        p = self.start('Yard 127.0.0.1:%d admin -\n' % port)
+        self.live(1)
+        self.assertNotIn('pad', open(self.dump).read().split())            # not in the grid
+        ctl.tap(2)
+        st = self.wait(lambda s: s['view'] == '0' and s['cam'][0]['state'] == 'live' and s['cam'][0]['stream'] == '2' and s['ctl'][0]['night'] == '3' and 0 in s['pad'], 'alone')
+        self.assertEqual(st['ctl'][0]['lamp'], 'Close')
+        return p, log, st
+
+    def moved(self, log, n):
+        end = time.time() + 5
+        while time.time() < end and len(self.lines(log, 'ptz')) < n:
+            time.sleep(0.05)
+        return self.lines(log, 'ptz')
+
+    def test_the_camera_moves_while_a_key_or_the_pad_is_held(self):
+        p, log, st = self.alone()
+        ctl.key(105, True)                                                  # Left
+        self.assertEqual(self.moved(log, 1), ['ptz DirectionLeft 65535 5'])
+        time.sleep(0.4)
+        self.assertEqual(len(self.lines(log, 'ptz')), 1)
+        ctl.key(105, False)
+        self.assertEqual(self.moved(log, 2)[1:], ['ptz DirectionLeft -1 5'])
+        ctl.key(103, True)                                                  # Up, then Right with Up still down
+        ctl.key(106, True)
+        ctl.key(103, False)                                                 # (the older key does not stop the newer movement)
+        time.sleep(0.3)
+        self.assertEqual(self.moved(log, 5)[2:], ['ptz DirectionUp 65535 5', 'ptz DirectionUp -1 5', 'ptz DirectionRight 65535 5'])
+        ctl.key(106, False)
+        self.assertEqual(self.moved(log, 6)[5:], ['ptz DirectionRight -1 5'])
+        st = self.state()
+        w = next(w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cctv')
+        cx, cy = w['x'] + self.RAIL + st['pad'][0][0], w['y'] + st['pad'][0][1]
+        ctl.abs(cx, cy + 33)
+        ctl.button(272, True)
+        self.assertEqual(self.moved(log, 7)[6:], ['ptz DirectionDown 65535 5'])
+        self.assertEqual(self.state()['view'], '0')                         # the pad is not the picture: no way back to the grid
+        ctl.button(272, False)
+        self.assertEqual(self.moved(log, 8)[7:], ['ptz DirectionDown -1 5'])
+        ctl.key(105, True)
+        self.moved(log, 9)
+        ctl.tap(1)                                                          # Esc while it moves: stopped
+        self.assertEqual(self.moved(log, 10)[9:], ['ptz DirectionLeft -1 5'])
+        ctl.key(105, False)
+        self.wait(lambda s: s['view'] == '-1' and s['cam'][0]['state'] == 'live', 'grid')
+        ctl.tap(105)                                                        # in the grid the arrows move nothing
+        time.sleep(0.4)
+        self.assertEqual(len(self.lines(log, 'ptz')), 10)
+        ctl.tap(2)
+        self.wait(lambda s: 0 in s['pad'] and s['cam'][0]['stream'] == '2', 'alone again')
+        ctl.key(108, True)
+        self.moved(log, 11)
+        p.terminate()                                                       # the program ends while the camera moves: it is told to stop
+        self.assertEqual(p.wait(timeout=15), 0)
+        ctl.key(108, False)
+        self.assertEqual(self.moved(log, 12)[10:], ['ptz DirectionDown 65535 5', 'ptz DirectionDown -1 5'])
+
+    def choose(self, key, label):
+        ctl.tap(key)
+        end = time.time() + 5
+        while time.time() < end and 'open=1' not in ctl.cmd('dockmenu')[0]:
+            time.sleep(0.05)
+        entries = [l for l in ctl.cmd('dockmenu') if l.startswith('entry ')]
+        hit = [l for l in entries if l.split('"')[1].strip() == label]
+        self.assertTrue(hit, entries)
+        kv = dict(x.split('=') for x in hit[0].split('"')[2].split())
+        ctl.click(int(kv['x']) + 5, int(kv['y']) + 5)
+        return [l.split('"')[1] for l in entries]
+
+    def test_night_picture_lamp_and_positions(self):
+        p, log, st = self.alone()
+        labels = self.choose(49, 'Always black and white')                  # N
+        self.assertIn('* Smart: lamp on movement', labels)
+        self.assertIn('* Off', labels)
+        self.wait(lambda s: s['ctl'][0]['night'] == '2', 'changed')
+        sets = self.lines(log, 'set')
+        self.assertEqual(len(sets), 1)
+        value = json.loads(sets[0].split(' ', 2)[2])
+        self.assertEqual(value[0]['DayNightColor'], '0x00000002')           # that one value, the rest as it was
+        self.assertEqual((value[0]['AeSensitivity'], value[0]['PictureFlip'], value[0]['Odd']), (5, '0x1', {'DayNightColors': ['}', ']']}))
+        self.choose(49, 'Always on')
+        self.wait(lambda s: s['ctl'][0]['lamp'] == 'KeepOpen', 'lamp')
+        sets = self.lines(log, 'set')
+        self.assertEqual(sets[1].split()[1], 'Camera.WhiteLight')
+        self.assertEqual(json.loads(sets[1].split(' ', 2)[2]), {'Brightness': 50, 'WorkMode': 'KeepOpen', 'WorkPeriod': {'EHour': 6}})
+        self.assertEqual(self.lines(log, 'ptz'), [])
+        self.choose(25, 'Position 3')                                       # P
+        self.assertEqual(self.moved(log, 1), ['ptz SetPreset 3 5'])
+        self.wait(lambda s: s['note'] == 'Yard: This view is now position 3', 'told')
+        self.choose(25, 'Go to position 2')
+        self.assertEqual(self.moved(log, 2)[1:], ['ptz GotoPreset 2 5'])
+        ctl.tap(1)
+        self.wait(lambda s: s['view'] == '-1', 'grid')
+        ctl.tap(49)
+        self.wait(lambda s: s['note'] == 'Show one camera alone to set it up', 'told')
+        self.assertEqual(len(self.lines(log, 'set')), 2)
 
     def test_selftest_and_list_do_not_show_passwords(self):
         self.assertEqual(subprocess.run([self.EXE, '--selftest'], capture_output=True, timeout=20).returncode, 0)

@@ -93,8 +93,11 @@ int panel_arrange(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_i
             int bw = 12 + iw + (iw && tw ? 4 : 0) + tw;
             if (bw < h)
                 bw = h;
-            if (bw > room)
-                break;
+            if (bw > room) {                                    /* narrow screen: cut the label short, never lose the button (a ringing alarm) */
+                if (room < h)
+                    break;
+                bw = room;
+            }
             room -= bw + 4;
             int k = p->ntray++;
             p->tray[k].rect = lm_rect_make(0, y, bw, h);

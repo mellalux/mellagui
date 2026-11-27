@@ -1102,7 +1102,9 @@ static void write_dump(struct app *a)
 {
     if (!g_dump)
         return;
-    FILE *f = fopen(g_dump, "w");
+    char tmp[PATH_MAX];                                         /* written beside and renamed: a test never reads half a file */
+    snprintf(tmp, sizeof(tmp), "%.*s.new", PATH_MAX - 8, g_dump);
+    FILE *f = fopen(tmp, "w");
     if (!f)
         return;
     const struct game *g = &a->g;
@@ -1171,7 +1173,8 @@ static void write_dump(struct app *a)
     for (int i = 0; i < R.n; i++)
         if (ys[i] >= 0)
             fprintf(f, "btn %s x=%d y=%d w=%d h=%d\n", names[i], R.x + (WLRAIL_W - WLRAIL_D) / 2, ys[i], WLRAIL_D, WLRAIL_D);
-    fclose(f);
+    if (fclose(f) == 0)
+        rename(tmp, g_dump);
 }
 
 static void paint(struct wlwin *w)

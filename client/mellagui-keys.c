@@ -4,7 +4,7 @@
  *   mellagui-keys            list every shortcut ([keys] of mellagui.conf and the built-in ones): the keys on the left, what they do on the right
  *   mellagui-keys --selftest
  *
- * The table comes from the compositor's private mellagui_settings_v1 (the read-only values keys-help-0 .. 4). Up / Down / PgUp / PgDn / the wheel
+ * The table comes from the compositor's private mellagui_settings_v1 (the read-only values keys-help-0 .. 10). Up / Down / PgUp / PgDn / the wheel
  * scroll, Esc or Q closes.
  */
 #include <stdio.h>
@@ -20,6 +20,7 @@
 #include "wlwin.h"
 
 #define MAX_ROWS 128
+#define CHUNKS 11                     /* the compositor's keys-help-0 .. keys-help-10 */
 #define PAD 14
 #define ROW 22
 #define HEAD 44
@@ -36,7 +37,7 @@ struct app {
     struct row rows[MAX_ROWS];
     int n;
     int top;                            /* first row shown */
-    char chunk[5][1900];                /* the values as they came */
+    char chunk[CHUNKS][1900];           /* the values as they came */
 };
 
 static int rows_visible(const struct app *a)
@@ -103,8 +104,12 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
     if (op != LM_MELLAGUI_SETTINGS_V1_EVT_VALUE)
         return;
     const char *k = args[0].s;
-    if (!strncmp(k, "keys-help-", 10) && k[10] >= '0' && k[10] <= '4' && !k[11])
-        snprintf(a->chunk[k[10] - '0'], sizeof(a->chunk[0]), "%s", args[1].s);
+    if (!strncmp(k, "keys-help-", 10) && k[10] >= '0' && k[10] <= '9') {
+        char *end;
+        long i = strtol(k + 10, &end, 10);
+        if (!*end && i < CHUNKS)
+            snprintf(a->chunk[i], sizeof(a->chunk[0]), "%s", args[1].s);
+    }
 }
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
@@ -207,7 +212,7 @@ int main(int argc, char **argv)
         wlwin_destroy(&a.win);
         return 1;
     }
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < CHUNKS; i++)
         add_rows(&a, a.chunk[i]);
     if (wlwin_open(&a.win, "Keyboard shortcuts", "mellagui.keys", 560, 480, 360, 200) < 0)
         return 1;

@@ -12644,7 +12644,10 @@ class TestCamera(Base):
             time.sleep(0.1)
         self.assertEqual(len(files), 1, files)
         path = os.path.join(vd, files[0])
-        time.sleep(0.5)
+        for _ in range(150):                                                # the file is there from the start: wait for ffmpeg to finish it
+            if subprocess.run(['pgrep', '-x', 'ffmpeg', '-P', str(p.pid)], capture_output=True).returncode == 1:
+                break
+            time.sleep(0.1)
         t = audio_tones(path, (700,))
         self.assertIsNotNone(t, 'the microphone is on by default: a sound track')
         self.assertGreater(t[700], 200)
@@ -17269,10 +17272,13 @@ class TestDu(Base):
         self.assertIn('in 5 things', lines[0])                                   # blob, mid, small, mid.dat and the link (the alias is mid.bin again)
         names = [l.split()[-1] for l in lines[1:]]
         self.assertEqual(names[0], 'big/')                                       # the biggest first
-        self.assertEqual(names[1], 'mid.dat')
         sizes = {l.split()[-1]: int(l.split()[0]) for l in lines[1:]}
-        self.assertGreaterEqual(sizes['big/'], (3 << 20) + (1 << 20))
-        self.assertTrue(sizes['mid-alias.bin'] in (0, 1 << 20) if 'mid-alias.bin' in sizes else True)
+        alias = sizes.get('mid-alias.bin', 0)                                    # the name the disk lists first holds the file ...
+        self.assertIn(alias, (0, 1 << 20))
+        self.assertEqual(names[1], 'mid-alias.bin' if alias else 'mid.dat')
+        self.assertGreaterEqual(sizes['big/'], 3 << 20)
+        self.assertGreaterEqual(sizes['big/'] + alias, 4 << 20)
+        self.assertLess(sizes['big/'] + alias, 5 << 20)                          # ... and it is counted once
 
     def start(self, d):
         for w in ctl.windows()['windows']:
@@ -22132,7 +22138,7 @@ class TestBlocks(Base):
         i = chosen[0]
         before = (float(st['workers'][i]['x']), float(st['workers'][i]['z']))
         # a click on the ground, a good way off: the right button sends it there
-        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 80)
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + st['bar'][0]['y'] - 30)     # (the ground just over the building cards)
         time.sleep(0.1)
         ctl.button(273, True)
         ctl.button(273, False)
@@ -22393,7 +22399,7 @@ class TestBlocks(Base):
         ctl.button(272, False)
         st = self.wait(lambda s: s['cmd']['sel'] == '1')
         post0 = st['soldiers'][i]['post']
-        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + self.win['h'] - 80)
+        ctl.abs(self.win['x'] + self.win['w'] // 2 + 150, self.win['y'] + st['bar'][0]['y'] - 30)     # (the ground just over the building cards)
         time.sleep(0.1)
         ctl.button(273, True)
         ctl.button(273, False)
@@ -24153,7 +24159,13 @@ class TestKeys(Base):
             self.assertIn(want, t)
         self.assertIn('Super+Shift+R = reload-config', t)
         self.assertIn('Super+Slash = exec mellagui-keys', t)
-        self.assertEqual(len(t), 55)
+        self.assertEqual(len(t), 64)
+        listed = []                                             # the shortcut list's values hold every binding
+        for i in range(11):
+            c.cmd('setting keys-help-%d' % i)                   # (a value of several lines: the first one comes as "ok ...")
+            lines = [c.last[3:]] + [c.f.readline().rstrip('\n') for _ in range(min(12, len(t) - 12 * i) - 1)]
+            listed += [l.replace('\x1f', ' = ') for l in lines if '\x1f' in l]
+        self.assertEqual(sorted(listed), t)
 
     def test_exec_binding_runs_a_command(self):
         mark = os.path.join(tmp, 'key-exec-mark')
@@ -24198,7 +24210,7 @@ class TestKeys(Base):
         t = self.table(c)
         self.assertIn('Super+Q = close', t)                     # the default survives every rejected line
         self.assertIn('Ctrl+Alt+T = terminal', t)
-        self.assertEqual(len(t), 56)
+        self.assertEqual(len(t), 65)
         self.assertTrue(alive_p(p))
 
 
@@ -27228,15 +27240,16 @@ class TestKeysEdit(Base):
 
     def test_pages_list_the_table_in_order(self):
         c = self.start('mellagui-ke1')
-        self.assertEqual(self.get(c, 'keys-count'), '55')
+        self.assertEqual(self.get(c, 'keys-count'), '64')
         first = self.rows(c, 0)
         self.assertEqual(len(first), 10)
         self.assertEqual(first[0], ('Super+Enter', 'terminal'))
         self.assertEqual(len(self.rows(c, 2)), 10)
         self.assertEqual(len(self.rows(c, 3)), 10)
         self.assertEqual(len(self.rows(c, 4)), 10)
-        self.assertEqual(len(self.rows(c, 5)), 5)
-        self.assertEqual(self.rows(c, 99), self.rows(c, 5))                   # a page past the end is the last one
+        self.assertEqual(len(self.rows(c, 5)), 10)
+        self.assertEqual(len(self.rows(c, 6)), 4)
+        self.assertEqual(self.rows(c, 99), self.rows(c, 6))                   # a page past the end is the last one
         self.assertIn('close', self.get(c, 'keys-actions').split())
         self.assertNotIn('none', self.get(c, 'keys-actions').split())
 
@@ -27259,13 +27272,13 @@ class TestKeysEdit(Base):
         self.assertNotIn('Alt+F4', open(self.path).read())
         c.cmd('setraw keys-reset 1')
         self.assertEqual(open(self.path).read(), '# top\n[menu]\nA = echo a\n\n[theme]\naccent = #ff0000\n')
-        self.assertEqual(self.get(c, 'keys-count'), '55')
+        self.assertEqual(self.get(c, 'keys-count'), '64')
 
     def test_the_file_and_section_are_created(self):
         c = self.start('mellagui-ke3')
         c.cmd('setraw keys-set Super+X%sexec true' % self.US)
         self.assertEqual(open(self.path).read(), '[keys]\nSuper+X = exec true\n')
-        self.assertEqual(self.get(c, 'keys-count'), '56')
+        self.assertEqual(self.get(c, 'keys-count'), '65')
 
     def test_refused(self):
         c = self.start('mellagui-ke4', '[keys]\nSuper+T = run\n')
@@ -28401,7 +28414,8 @@ class TestStickyNotes(Base):
     def test_ctrl_n_opens_another_note_and_ctrl_d_twice_deletes_this_one(self):
         c = self.start('mellagui-sn5', {'n.txt': 'keep me\n'})
         self.open_notes()
-        self.wait(lambda: len(self.notes(c)) == 1, 'a note')
+        self.wait(lambda: [w for w in self.notes(c) if w['w'] > 0 and 'focused' in w['flags']], 'a note that has the keyboard')
+        time.sleep(0.3)                                                      # (listed before the program has heard that it has it)
         c.key(KEY_LEFTCTRL, True)
         c.tap(self.KEY_N)
         c.key(KEY_LEFTCTRL, False)

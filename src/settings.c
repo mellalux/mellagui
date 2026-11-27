@@ -44,7 +44,7 @@
 
 /* Keys before K_FILE are saved to the settings file, the ones after it are read-only or live state only. */
 #define KEYS_PAGE_ROWS 10
-#define KEYS_HELP_CHUNKS 5            /* the whole shortcut table for mellagui-keys, 12 bindings in each value */
+#define KEYS_HELP_CHUNKS 11           /* the whole shortcut table for mellagui-keys, 12 bindings in each value */
 #define KEYS_HELP_PER 12
 
 enum key_id {
@@ -77,7 +77,9 @@ static const char *const key_names[K_COUNT] = {
     [K_LOCK_KIND] = "lock-kind", [K_LOCK_TIMEOUT] = "lock-timeout", [K_LOCK_START] = "lock-start", [K_LOCK_BLANK] = "lock-blank", [K_LOCK_VT] = "lock-vt", [K_LOCK_STATUS] = "lock-status",
     [K_LOCK_SET] = "lock-set", [K_LOCK_NOW] = "lock-now", [K_LOCKED] = "locked", [K_NOTIFY] = "notify",
     [K_CONFIG_FILE] = "config-file", [K_CONFIG_STATUS] = "config-status", [K_CONFIG_RELOAD] = "config-reload", [K_CONFIG_CREATE] = "config-create", [K_SAVER_NOW] = "saver-now", [K_NIGHT_SUN_INFO] = "night-sun-info",
-    [K_KEYS_HELP_0] = "keys-help-0", [K_KEYS_HELP_0 + 1] = "keys-help-1", [K_KEYS_HELP_0 + 2] = "keys-help-2", [K_KEYS_HELP_0 + 3] = "keys-help-3", [K_KEYS_HELP_0 + 4] = "keys-help-4",
+#define KH(i) [K_KEYS_HELP_0 + (i)] = "keys-help-" #i
+    KH(0), KH(1), KH(2), KH(3), KH(4), KH(5), KH(6), KH(7), KH(8), KH(9), KH(10),
+#undef KH
     [K_KEYS_COUNT] = "keys-count", [K_KEYS_PAGE] = "keys-page", [K_KEYS_ACTIONS] = "keys-actions", [K_KEYS_CAPTURE] = "keys-capture",
     [K_KEYS_CAPTURED] = "keys-captured", [K_KEYS_SET] = "keys-set", [K_KEYS_DEL] = "keys-del", [K_KEYS_RESET] = "keys-reset",
     [K_THEME_COLORS] = "theme-colors", [K_THEME_SET] = "theme-set", [K_THEME_DEL] = "theme-del", [K_THEME_RESET] = "theme-reset",
@@ -100,6 +102,8 @@ static const char *const key_names[K_COUNT] = {
 };
 _Static_assert(LM_NOTELOG_MAX == 5 * LM_NOTELOG_CHUNK, "notes-0 .. notes-4 hold the whole history");
 _Static_assert(KEYS_PAGE_ROWS == 10, "key_names lists keys-row-0 .. keys-row-9");
+_Static_assert(KEYS_HELP_CHUNKS == 11, "key_names lists keys-help-0 .. keys-help-10");
+_Static_assert(KEYS_HELP_CHUNKS * KEYS_HELP_PER >= LM_MAX_KEYBINDS, "mellagui-keys must get every binding");
 _Static_assert(LM_DOCK_MAX == 16, "key_names lists dock-0 .. dock-15");
 
 static int key_find(const char *key)

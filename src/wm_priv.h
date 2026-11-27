@@ -482,6 +482,7 @@ void desktop_lower(struct lm_wm *wm);
 void desktop_map(struct lm_wm *wm, struct lm_window *w);
 void gadget_map(struct lm_wm *wm, struct lm_window *w);
 void gadgets_redock(struct lm_wm *wm);
+void gadget_raise(struct lm_wm *wm, struct lm_window *w);           /* a click: the card (and what is glued to it) above the other cards */
 void gadget_grab_motion(struct lm_wm *wm, struct lm_window *win, double dx, double dy);
 void gadget_glue_begin(struct lm_wm *wm, struct lm_window *win);     /* a move of a card begins: finds what is glued to it */
 void gadget_zoomglue_fit(struct lm_wm *wm, struct lm_window *w);     /* a card of a zoomed stack got its new size: the stack is put together again */

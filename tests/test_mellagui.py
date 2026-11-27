@@ -2024,6 +2024,38 @@ class TestGadget(Base):
         c2.cmd('clip clear')
         self.assertEqual(os.path.getsize(path), 0)                                 # clearing is saved, too
 
+    def test_a_click_brings_a_covered_card_to_the_top_of_the_cards(self):
+        ctl.cmd('mixer 1')
+        self.addCleanup(lambda: ctl.cmd('mixer 0'))
+        deadline = time.time() + 5
+        while ctl.gadget_rect('mixer') is None and time.time() < deadline:
+            time.sleep(0.05)
+        ctl.gadget_settle('mixer')
+        x, y, w, h = self.rect()
+        mx, my, mw, mh = ctl.gadget_rect('mixer')
+        # the mixer is carried over the lower left part of the clipboard card
+        self.drag(mx + mw // 2, my + 10, (x - 100) - mx, (y + 60) - my)
+        ctl.gadget_settle('mixer')
+        mx, my, mw, mh = ctl.gadget_rect('mixer')
+        x0, y0, x1, y1 = max(x, mx), max(y, my), min(x + w, mx + mw), min(y + h, my + mh)
+        self.assertTrue(x1 - x0 > 40 and y1 - y0 > 40, 'the cards do not overlap: %r %r' % ((x, y, w, h), (mx, my, mw, mh)))
+
+        def overlap():
+            ctl.abs(5, 300)
+            ctl.gadget_settle()
+            ctl.gadget_settle('mixer')
+            ppm = ctl.dump(os.path.join(tmp, 'gadraise.ppm'))
+            return [ppm.px(px, py) for py in range(y0 + 2, y1 - 2) for px in range(x0 + 2, x1 - 2)]
+
+        ctl.click(x + w - 60, y + 10)                             # the clipboard card's exposed title bar
+        clip_top = overlap()
+        ctl.click(mx + 20, my + 10)                               # the mixer's exposed title bar
+        mixer_top = overlap()
+        self.assertNotEqual(clip_top, mixer_top)
+        time.sleep(0.6)                                           # (not a double click on the title bar)
+        ctl.click(x + w - 60, y + 10)
+        self.assertEqual(overlap(), clip_top)
+
     def test_history_is_limited_and_multiline_text_is_kept(self):
         for i in range(55):
             ctl.cmd('clip add item %d' % i)

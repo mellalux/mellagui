@@ -2,9 +2,10 @@
  *
  * A gadget (the clipboard history, the volume mixer, the system monitor, the smart home card) is a program of its own: `mellagui-gadget NAME`,
  * one process each, started when the gadget is switched on (setting `gadget` / `mixer` / `sysinfo` / `smart`, Super+G / V / S / H) and ended when it is
- * switched off. Its window (app id "mellagui.gadget.NAME") has a role in the wm: no frame, always at the bottom of the stack, on every workspace, not
- * focused by a click, listed nowhere (win_is_gadget). The card is docked at the top right under the panel, one below the other in the order of the
- * ids, until the user moves it (the program asks for a move with xdg_toplevel.move; the place is remembered by wm_places.c like every program's).
+ * switched off. Its window (app id "mellagui.gadget.NAME") has a role in the wm: no frame, always under every ordinary window, on every workspace, not
+ * focused by a click (a click only raises it above the other cards: gadget_raise), listed nowhere (win_is_gadget). The card is docked at the top
+ * right under the panel, one below the other in the order of the ids, until the user moves it (the program asks for a move with xdg_toplevel.move;
+ * the place is remembered by wm_places.c like every program's).
  *
  * The file the places are kept in (gadgets.conf) only has the on-screen keyboard's place now.
  */
@@ -610,19 +611,12 @@ static bool hangs_on(const struct lm_window *top, const struct lm_window *bot)
     return abs(bot->y - (top->y + top->height)) <= 2 && bot->x < top->x + top->width && bot->x + bot->width > top->x;
 }
 
-/* A card was zoomed to `pct` per cent: all the cards glued to it - above and below, and what is glued to those - get the same zoom (the cards are
- * separate programs, they hear it through the setting `gadget-zoom`), and the stack is remembered as it was so that it can be put together again
- * while the cards take their new sizes (gadget_zoomglue_fit): the top of a stack stays where it is, every card below it follows the bottom edge of the
- * one it hangs on. */
-void lm_wm_gadget_zoom(struct lm_wm *wm, int id, int pct)
+/* `origin` and all the cards glued to it - above and below, and what is glued to those - breadth first. Returns their number. */
+static int gadget_stack(struct lm_wm *wm, struct lm_window *origin, struct lm_window *list[LM_GADGET_TOTAL])
 {
-    struct lm_window *origin = gadget_window(wm, id);
-    if (!origin)
-        return;
-    struct lm_window *list[LM_GADGET_TOTAL];
     int n = 0;
     list[n++] = origin;
-    for (int head = 0; head < n; head++) {                      /* the connected cards, breadth first */
+    for (int head = 0; head < n; head++) {
         struct lm_window *other;
         lm_list_for_each(other, &wm->windows, link) {
             if (!win_is_gadget(other) || !other->mapped || n >= LM_GADGET_TOTAL)
@@ -634,6 +628,51 @@ void lm_wm_gadget_zoom(struct lm_wm *wm, int id, int pct)
                 list[n++] = other;
         }
     }
+    return n;
+}
+
+/* A click on a card that lies partly under another one: the card, with the cards glued to it (in the order they have among themselves), comes to
+ * the top of the cards. The cards as a whole stay under every ordinary window. */
+void gadget_raise(struct lm_wm *wm, struct lm_window *w)
+{
+    struct lm_window *stack[LM_GADGET_TOTAL], *order[LM_GADGET_TOTAL], *c;
+    int n = gadget_stack(wm, w, stack), k = 0;
+    lm_list_for_each(c, &wm->windows, link)                     /* as they lie now, from the bottom */
+        for (int i = 0; i < n; i++)
+            if (stack[i] == c)
+                order[k++] = c;
+    struct lm_list *above = &wm->windows;                       /* the first window that is no card; the head = there is none */
+    lm_list_for_each(c, &wm->windows, link)
+        if (!win_is_gadget(c) && !win_is_desktop(c)) {
+            above = &c->link;
+            break;
+        }
+    struct lm_list *at = above->prev;                           /* already the topmost cards, in this order? */
+    int i = k - 1;
+    while (i >= 0 && at == &order[i]->link) {
+        at = at->prev;
+        i--;
+    }
+    if (i < 0)
+        return;
+    for (i = 0; i < k; i++) {
+        lm_list_remove(&order[i]->link);
+        lm_list_append(above, &order[i]->link);                 /* just below `above` */
+        damage_frame(wm, order[i]);
+    }
+}
+
+/* A card was zoomed to `pct` per cent: all the cards glued to it - above and below, and what is glued to those - get the same zoom (the cards are
+ * separate programs, they hear it through the setting `gadget-zoom`), and the stack is remembered as it was so that it can be put together again
+ * while the cards take their new sizes (gadget_zoomglue_fit): the top of a stack stays where it is, every card below it follows the bottom edge of the
+ * one it hangs on. */
+void lm_wm_gadget_zoom(struct lm_wm *wm, int id, int pct)
+{
+    struct lm_window *origin = gadget_window(wm, id);
+    if (!origin)
+        return;
+    struct lm_window *list[LM_GADGET_TOTAL];
+    int n = gadget_stack(wm, origin, list);
     for (int i = 1; i < n; i++)                                 /* by the top edge: a card comes after the one it hangs on */
         for (int j = i; j > 0 && (list[j]->y < list[j - 1]->y || (list[j]->y == list[j - 1]->y && list[j]->x < list[j - 1]->x)); j--) {
             struct lm_window *t = list[j];

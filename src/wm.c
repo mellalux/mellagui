@@ -2222,8 +2222,11 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
         if (!wm->gad[LM_GADGET_CLIPBOARD].visible)
             lm_wm_set_gadget(wm, true);
         struct lm_window *cw = gadget_window(wm, LM_GADGET_CLIPBOARD);
-        if (cw)
+        if (cw) {
+            gadget_raise(wm, cw);                           /* (another card may lie partly over it) */
             set_focus(wm, cw);
+            refresh_pointer(wm);
+        }
         break;
     }
     case LM_ACT_GADGET_MIXER: lm_wm_set_gadget_id(wm, LM_GADGET_MIXER, !wm->gad[LM_GADGET_MIXER].visible); break;

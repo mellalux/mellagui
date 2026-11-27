@@ -88,15 +88,6 @@ void tuya_local_question(const struct tuya_dev *d, char *out, size_t n);
 /* Tells a device a value: `value_json` is JSON (true, 50, "open"). */
 bool tuya_command(struct tuya_session *s, const char *dev_id, const char *code, const char *value_json, char *err, size_t errsz);
 
-/* A scene of the app ("Tap-to-Run"): made there, started from here. */
-#define TUYA_MAX_SCENE 24
-struct tuya_scene {
-    char id[48], home[40], name[80];
-    bool enabled;
-};
-bool tuya_load_scenes(struct tuya_session *s, struct tuya_scene *scene, int *n, char *err, size_t errsz);
-bool tuya_trigger_scene(struct tuya_session *s, const char *home, const char *id, char *err, size_t errsz);
-
 struct tuya_dp *tuya_find_dp(struct tuya_dev *d, const char *code);
 /* The value as text for people: "on" / "off", the number with its scale and unit, the text. */
 void tuya_dp_text(const struct tuya_dp *dp, char *out, size_t n);

@@ -6,6 +6,8 @@
  * commands the card sends. The compositor does not talk to the cloud: it asks the program. Every LM_SMART_POLL_MS while the gadget is shown
  * it runs `mellagui-smart --favourites` (asynchronously, lm_proc_run; $MELLAGUI_SMART_BIN replaces the program) and reads its lines
  *     favs <TAB> count                       (a program that does not print this line did not answer)
+ *     scene <TAB> id <TAB> name              (the scenes that have a button on the card: they stand above the devices; a click runs
+ *                                             `mellagui-smart --scene ID --notify`)
  *     fav <TAB> id <TAB> name <TAB> online <TAB> switch|blind|vacuum|none <TAB> code <TAB> value [<TAB> battery,dockcode,dockvalue]
  * (a blind's value is its position in per cent, a vacuum's 1 = cleaning; a device with several switches - a power strip - has one `fav` line for each:
  * the same id and name, that switch's code and, as the field after the value, its label "Switch 2" / "USB 1". The card shows such a device as ONE
@@ -22,6 +24,13 @@ struct lm_smart;
 
 #define LM_SMART_MAX 24                 /* rows of the card: a device with several switches (a power strip) is one row for each */
 #define LM_SMART_POLL_MS 15000
+#define LM_SMART_SCENES 8               /* scene buttons on the card */
+#define LM_SMART_SCENE_H 30             /* a row of them */
+#define LM_SMART_SCENE_MS 1500          /* a pressed one stays lit */
+
+struct lm_smart_scene {
+    char id[12], name[48];
+};
 
 enum lm_smart_kind { LM_SMART_NONE, LM_SMART_SWITCH, LM_SMART_BLIND, LM_SMART_VACUUM };
 
@@ -41,6 +50,9 @@ struct lm_smart_item {
 };
 
 struct lm_smart_state {
+    int nscene;
+    struct lm_smart_scene scene[LM_SMART_SCENES];
+    int ran;                            /* the scene button pressed a moment ago, -1 = none */
     int n;
     struct lm_smart_item item[LM_SMART_MAX];
     bool ready;                         /* a poll has been answered */
@@ -63,6 +75,8 @@ void lm_smart_blind_position(struct lm_smart *s, int index, int percent, bool se
 void lm_smart_vacuum(struct lm_smart *s, int index, int what);
 /* Opens the device's own view (its whole card: every control, its timetable) in mellagui-smart: a new window, or the running one switches to it. */
 void lm_smart_open_card(struct lm_smart *s, int index);
+/* Runs scene button `index`. */
+void lm_smart_scene_run(struct lm_smart *s, int index);
 
 /* ---- the card's layout (shared by the painter and the pointer) ----------------------------------------------------------------- */
 
@@ -73,12 +87,14 @@ void lm_smart_open_card(struct lm_smart *s, int index);
 #define LM_SMART_CELL_MIN_W 62
 
 enum lm_smart_part { LM_SMART_NOTHING, LM_SMART_SWITCH_PART, LM_SMART_OPEN, LM_SMART_STOP, LM_SMART_CLOSE, LM_SMART_CLEAN, LM_SMART_DOCK, LM_SMART_SLIDER,
-                     LM_SMART_CARD /* the rest of a device's row / card: a click there opens the device's own view */ };
+                     LM_SMART_CARD /* the rest of a device's row / card: a click there opens the device's own view */,
+                     LM_SMART_SCENE_PART /* a scene's button: the index is the scene's */ };
 
 struct lm_smart_rect { int x, y, w, h; };
 
 struct lm_smart_layout {
     int rows;                           /* rows that fit */
+    struct lm_smart_rect scene[LM_SMART_SCENES];    /* the scene buttons (w = 0: does not fit) */
     struct lm_smart_rect row[LM_SMART_MAX];         /* the whole row (its height depends on the kind) */
     struct lm_smart_rect head[LM_SMART_MAX];        /* the name row above a group of switches (only on its first item; w = 0 elsewhere) */
     struct lm_smart_rect group[LM_SMART_MAX];       /* the card of that group: its name row and all its switches (only on its first item) */

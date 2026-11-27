@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "json.h"
+#include "smartscene.h"
 #include "smartsun.h"
 #include "tuya.h"
 
@@ -208,7 +209,7 @@ void sched_spawn_background(void)
     run_detached(exe, "--background", NULL);
 }
 
-static void notify(const char *body)
+void sched_notify(const char *body)
 {
     char prog[1100];
     exe_sibling("mellagui-notify", prog, sizeof(prog));
@@ -285,6 +286,25 @@ int sched_background(void)
                 f->tries = 0;
                 f->done = false;
             }
+            if (!strcmp(r->dev, SCHED_SCENE)) {                 /* a scene: tried again only while nothing at all went out (a feeder must not feed twice) */
+                static struct scene scene[SCENE_MAX];
+                int ns = scene_load(scene, SCENE_MAX), at = scene_find(scene, ns, r->code);
+                if (at < 0) {
+                    printf("%02d:%02d the scene %s is gone\n", h, m, r->code);
+                    fflush(stdout);
+                    f->done = true;
+                    continue;
+                }
+                char summary[300];
+                int res = scene_run_cloud(&scene[at], summary, sizeof(summary));
+                f->tries++;
+                f->done = res >= 0 || f->tries >= 3;
+                printf("%02d:%02d scene %s\n", h, m, summary);
+                fflush(stdout);
+                if (f->done && res)
+                    sched_notify(summary);
+                continue;
+            }
             static struct tuya_session s;
             strtod(r->value, &end);
             if (!strcmp(r->value, "true") || !strcmp(r->value, "false") || (r->value[0] && !*end))
@@ -304,7 +324,7 @@ int sched_background(void)
                 char at[40];
                 sched_time_text(r, at, sizeof(at));
                 snprintf(body, sizeof(body), "The %s command (%s) did not go out (%02d:%02d): %s", at, r->code, h, m, err);
-                notify(body);
+                sched_notify(body);
                 f->done = true;
             }
         }

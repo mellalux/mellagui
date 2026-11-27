@@ -153,6 +153,8 @@ static void dump_state(struct app *a)
     } else {
         const struct lm_smart_state *ms = lm_smart_state(a->smart);
         fprintf(f, "smart visible=1 ready=%d n=%d note=%s\n", ms->ready ? 1 : 0, ms->n, ms->note[0] ? ms->note : "-");
+        for (int i = 0; i < ms->nscene; i++)
+            fprintf(f, "scene %d %s name=%s ran=%d\n", i, ms->scene[i].id, ms->scene[i].name, ms->ran == i);
         for (int i = 0; i < ms->n; i++)
             fprintf(f, "item %d %s kind=%s online=%d on=%d percent=%d battery=%d dock=%s group=%d label=%s\n", i, ms->item[i].name,
                     ms->item[i].kind == LM_SMART_SWITCH ? "switch" : ms->item[i].kind == LM_SMART_BLIND ? "blind" : ms->item[i].kind == LM_SMART_VACUUM ? "vacuum" : "none",
@@ -912,7 +914,9 @@ static bool smart_press(struct app *a)
     smart_layout(a, &l);
     int idx = 0;
     enum lm_smart_part part = lm_smart_hit(&l, st, (int)a->px, (int)a->py, &idx);
-    if (part == LM_SMART_SLIDER) {                                  /* a blind's position: follows the pointer, sent when the button is let go */
+    if (part == LM_SMART_SCENE_PART) {
+        lm_smart_scene_run(a->smart, idx);
+    } else if (part == LM_SMART_SLIDER) {                                  /* a blind's position: follows the pointer, sent when the button is let go */
         a->smart_drag = idx;
         lm_smart_blind_position(a->smart, idx, lm_smart_slider_value(&l, idx, (int)a->px), false);
     } else if (part == LM_SMART_SWITCH_PART)
@@ -950,13 +954,21 @@ static void paint_smart(struct app *a)
     for (int i = 0; i < 4; i++)
         wlwin_fill(w, 20 - (i + 1) * 2 + 1, iy + 3 + i, (i + 1) * 4 - 2, 1, lm_theme.accent);
     header(w, "Smart home", 36);
-    if (!st->n) {
+    if (!st->n && !st->nscene) {
         const char *note = st->note[0] ? st->note : st->ready ? "Nothing is pinned yet." : "Asking the smart home ...";
         text_wrap(w, 14, TITLE_H + 8, note, w->bw - 28, 4, lm_theme.text_dim);
         return;
     }
     struct lm_smart_layout l;
     smart_layout(a, &l);
+    for (int i = 0; i < st->nscene; i++) {                          /* the scenes: a button each */
+        struct lm_rect r = lm_rect_make(l.scene[i].x, l.scene[i].y, l.scene[i].w, l.scene[i].h);
+        if (r.w <= 0)
+            continue;
+        rr(w, r, 12, st->ran == i ? lm_theme.btn_green : lm_theme.btn_teal);
+        int tw = lm_font_text_width(st->scene[i].name), room = r.w - 12;
+        text_fit(w, r.x + (tw < room ? (r.w - tw) / 2 : 6), r.y + (r.h - LM_FONT_H) / 2, st->scene[i].name, room, lm_theme.on_colour);
+    }
     for (int i = 0; i < l.rows; i++) {
         const struct lm_smart_item *it = &st->item[i];
         struct lm_rect row = lm_rect_make(l.row[i].x, l.row[i].y, l.row[i].w, l.row[i].h);

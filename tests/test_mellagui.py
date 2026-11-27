@@ -30403,26 +30403,111 @@ class TestSmart(Base):
         self.assertFalse(self.view()['msg'])
 
 
-    SCENES = [{'scene_id': 'sc1', 'name': 'Movie night', 'home': 7}, {'scene_id': 'sc2', 'name': 'Leaving', 'home': 7}]
+    def pick(self, dev, code, word):
+        """A button of the scene editor: the device's thing `code`, the button that says `word`."""
+        for b in self.view()['mctl'].get((dev, code, 'edit'), []):
+            if b[4].partition(' ')[2].lstrip('*') == word:
+                self.c.click(self.x0 + b[0] + 8, self.y0 + b[1] + 8)
+                return b[4].partition(' ')[2].startswith('*')
+        self.fail('no button %s %s %s' % (dev, code, word))
 
-    def test_the_apps_scenes_start_from_the_command_line_and_the_window_has_no_scene_row(self):
-        self.cloud('scn', scenes=self.SCENES)
-        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+    def lit(self, dev, code, word):
+        return any(b[4].partition(' ')[2] == '*' + word for b in self.view()['mctl'].get((dev, code, 'edit'), []))
+
+    def scene_buttons(self):
+        return {b[4].partition(' ')[2]: b for b in self.view().get('ctl', {}).get(('@scene', '-', 'scene'), [])}
+
+    def type_keys(self, codes):
+        for k in codes:
+            self.c.tap(k)
+
+    def test_a_scene_is_made_run_given_a_time_and_deleted(self):
+        c = self.logged_in_window('scn1')
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-scenes.conf')
+        sched = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-schedule.conf')
+        self.assertEqual(self.scene_buttons(), {})
+        c.tap(49)                                                               # N: a new scene
+        self.wait(lambda: self.view().get('modal') == 'edit' and 'x:save' in self.edits(), 'the editor')
+        self.type_keys(self.CODE_KEYS[:3])                                      # its name: abc
+        self.wait(lambda: self.view()['mctl'][('@scene', '-', 'name')][0][4] == 'abc', 'the name')
+        self.pick('plug1', 'switch_1', 'On')
+        self.wait(lambda: self.lit('plug1', 'switch_1', 'On'), 'the plug goes on')
+        self.pick('blind1', 'percent_control', 'Set')
+        self.wait(lambda: ('blind1', 'percent_control', 'scslider') in self.view()['mctl'], 'a slider for the position')
+        self.pick('blind1', 'control', 'Close')                                 # one of the two: the position goes
+        self.wait(lambda: self.lit('blind1', 'control', 'Close') and not self.lit('blind1', 'percent_control', 'Set'), 'close instead of a position')
+        self.assertNotIn('/commands', self.log())                               # the editor tells the devices nothing
+        self.edit('x:save')
+        self.wait(lambda: os.path.exists(conf), 'the scene is saved')
+        self.assertIn('scene s1 desk abc\ndo plug1 switch_1 true\ndo blind1 control close\n', open(conf).read())
+        self.wait(lambda: self.view().get('modal') == 's1' and 's:run' in self.edits(), 'its view')
+        code, out = self.cli('--favourites')
+        self.assertIn('scene\ts1\tabc\n', out)                                  # the desktop card gets a button
+        self.edit('add')                                                        # a time for it
+        self.wait(lambda: 'save' in self.edits(), 'the form')
+        self.assertNotIn('a0', self.edits())                                    # a scene's rule has nothing else to choose
+        self.edit('save')
+        self.wait(lambda: os.path.exists(sched) and 'on 07:30 MTWTFSS @scene s1 run\n' in open(sched).read(), 'the rule')
+        self.wait(lambda: 'tog:0' in self.edits(), 'the rule is listed')
+        c.tap(1)
+        self.wait(lambda: self.view().get('modal') == '-' and 'abc' in self.scene_buttons(), 'the scene has a button above the cards')
+        b = self.scene_buttons()['abc']
+        c.click(self.x0 + b[0] + 10, self.y0 + b[1] + 10)
+        self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True and self.state()['blind1']['status']['control'] == 'close', 'it runs')
+        self.wait(lambda: self.view()['msg'] == 'abc: 2 done', 'and says how it went')
+        c.abs(self.x0 + b[0] + 10, self.y0 + b[1] + 10)                         # the right button: a menu, its second entry opens the view
+        c.button(273, True)
+        c.button(273, False)
+        time.sleep(0.4)
+        c.tap(108)
+        c.tap(108)
+        c.tap(28)
+        self.wait(lambda: self.view().get('modal') == 's1', 'the view from the menu')
+        self.wait(lambda: 's:del' in self.edits(), 'delete is there')
+        self.edit('s:del')
+        self.wait(lambda: self.edits().get('s:del', (0, 0, False, ''))[3] == 'Really delete it?', 'it asks first')
+        self.edit('s:del')
+        self.wait(lambda: 'abc' not in open(conf).read() and '@scene' not in open(sched).read(), 'the scene and its times are gone')
+        self.wait(lambda: self.view().get('modal') == '-' and not self.scene_buttons(), 'and its button')
+
+    def test_take_the_current_state_and_run_a_scene_without_the_window(self):
+        c = self.logged_in_window('scn2')
+        conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart-scenes.conf')
+        c.tap(49)
+        self.wait(lambda: 'x:current' in self.edits(), 'the editor')
+        self.type_keys(self.CODE_KEYS[:3])
+        self.edit('x:current')
+        self.wait(lambda: self.lit('plug1', 'switch_1', 'Off') and self.lit('blind1', 'percent_control', 'Set'), 'the state as it is')
+        self.edit('x:save')
+        self.wait(lambda: os.path.exists(conf), 'saved')
+        text = open(conf).read()
+        self.assertIn('do plug1 switch_1 false\n', text)
+        self.assertIn('do blind1 percent_control 40\n', text)
+        self.assertNotIn('robot1', text)                                        # nothing starts the robot
+        self.assertNotIn('plug2', text)                                         # an offline device is left out
+        with open(conf, 'a') as f:
+            f.write('scene s2 - Far away\ndo plug2 switch_1 false\ndo plug1 switch_1 true\n')
         code, out = self.cli('--scenes')
         self.assertEqual(code, 0, out)
-        self.assertIn('sc1  Movie night', out)
-        self.assertIn('2 scenes', out)
-        code, out = self.cli('--scene', 'leaving')                              # by name, whatever the case
-        self.assertEqual((code, out.strip()), (0, 'started Leaving'))
-        self.assertIn('POST /v1.0/m/scene/ha/trigger {"homeId": "7", "sceneId": "sc2"}', self.log())
+        self.assertIn('s2  Far away  (2 things to do)', out)
+        code, out = self.cli('--scene', 'far AWAY')
+        self.assertEqual((code, out.strip()), (1, 'Far away: 1 done, Far plug is offline'))
+        self.assertTrue(self.state()['plug1']['status']['switch_1'])
         code, out = self.cli('--scene', 'Nothing')
         self.assertEqual(code, 1)
         self.assertIn('no scene', out)
-        self.window('scn')                                                      # the window has no row of scene buttons (only the command line does)
-        self.wait(self.devices_shown, 'the devices')
-        self.assertNotIn('scenes', self.view())
-        self.assertEqual(self.view()['ctl'][('plug1', '-', 'details')][0][1], 70)       # the first card is where it always was
-
+        rt = os.path.join(self.dir, 'rt')                                       # the timetable's process runs a scene too
+        os.makedirs(rt)
+        with open(os.path.join(self.dir, 'cfg', 'mellagui', 'smart-schedule.conf'), 'w') as f:
+            f.write('on 07:30 MTWTFSS @scene s1 run\n')
+        env = dict(os.environ, XDG_RUNTIME_DIR=rt, MELLAGUI_SMART_NOW='07:30', MELLAGUI_SMART_TICK_MS='100', **self.env)
+        env.pop('WAYLAND_DISPLAY', None)
+        pr = subprocess.Popen([self.exe, '--background'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: self.state()['plug1']['status']['switch_1'] is False, 'the scene of 07:30')
+        time.sleep(0.6)
+        self.assertEqual(self.log().count('/commands'), 3)                      # one from --scene, two of the rule, once
+        pr.kill()
 
     def edits(self):
         """The buttons of the timetable in the open device view: {value: (x, y, lit, label)}."""
@@ -31497,6 +31582,27 @@ class TestSmartGadget(Base):
         while time.time() < end and not any(l.startswith('plug1 switch_1 ') for l in self.logged()):
             time.sleep(0.1)
         self.assertTrue(any(l.startswith('plug1 switch_1 ') for l in self.logged()))
+
+    def test_scenes_have_buttons_above_the_devices(self):
+        os.environ['FAKE_SMART_SCENES'] = 's1=Good night;s3=Away'
+        self.addCleanup(os.environ.pop, 'FAKE_SMART_SCENES', None)
+        c = self.start('mellagui-sg-scene', devices=[self.DEVICES[0]])
+        c.cmd('settings smart 1')
+        head, lines, items = self.items(c)
+        self.assertEqual([l.split(' name=')[1] for l in lines if l.startswith('scene ')], ['Good night ran=0', 'Away ran=0'])
+        time.sleep(0.5)
+        x, y, w, h = self.card(c)
+        cw = (w - 16) // 2
+        c.click(x + 8 + cw + cw // 2, y + 26 + 4 + 15)                    # the second button
+        end = time.time() + 3
+        while time.time() < end and not any(l.startswith('--scene') for l in self.logged()):
+            time.sleep(0.1)
+        self.assertIn('--scene s3 --notify', self.logged())
+        c.click(x + w - 34, y + 26 + 4 + 34 + 17)                         # the lamp stands under the row of buttons
+        end = time.time() + 3
+        while time.time() < end and not any(l.startswith('plug1 ') for l in self.logged()):
+            time.sleep(0.1)
+        self.assertIn('plug1 switch_1 false', self.logged())
 
     def test_a_blind_that_can_be_positioned_has_a_slider_on_a_second_line(self):
         devs = [{'id': 'blind1', 'name': 'Blind', 'online': True, 'kind': 'blind', 'code': 'control', 'value': 60, 'extra': '1'},

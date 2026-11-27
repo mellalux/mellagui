@@ -7,6 +7,7 @@
  *
  *     on 07:30 MTWTF-- DEVICE_ID percent_control 30        (on | off, the time, the seven days from Monday with '-' for "not", device, code, value)
  *     on sunrise+15 MTWTFSS DEVICE_ID control open         (the time can be `sunrise` or `sunset`, with minutes before (-) or after (+): smartsun.h)
+ *     on sunset MTWTFSS @scene s1 run                      (a rule can run one of the program's scenes: SCHED_SCENE, the scene's id: smartscene.h)
  *
  * One window-less process carries them out (`mellagui-smart --background`, started with the compositor and by the window when a rule is saved; it
  * holds a lock in $XDG_RUNTIME_DIR, so there is only one, and ends when no rule is on or the Wayland session is gone). It looks at the clock every
@@ -20,6 +21,7 @@
 #include <time.h>
 
 #define SCHED_MAX 64
+#define SCHED_SCENE "@scene"            /* the "device" of a rule that runs a scene; its code is the scene's id */
 
 struct sched_rule {
     bool on;
@@ -45,6 +47,8 @@ bool sched_parse(const char *line, struct sched_rule *r);
 int sched_background(void);
 /* Starts that process (it ends at once when another one runs). Not when $MELLAGUI_SMART_NO_BACKGROUND is set (tests). */
 void sched_spawn_background(void);
+/* A notification card (mellagui-notify), when there is a Wayland session to show it. */
+void sched_notify(const char *body);
 int sched_selftest(void);
 
 #endif

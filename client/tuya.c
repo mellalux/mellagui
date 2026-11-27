@@ -987,51 +987,6 @@ bool tuya_command(struct tuya_session *s, const char *dev_id, const char *code, 
     return true;
 }
 
-bool tuya_load_scenes(struct tuya_session *s, struct tuya_scene *scene, int *n, char *err, size_t errsz)
-{
-    *n = 0;
-    struct json *homes = api_call(s, "GET", "/v1.0/m/life/users/homes", NULL, NULL, NULL, true, err, errsz);
-    if (!homes)
-        return false;
-    bool ok = true;
-    for (const struct json *h = homes->type == JSON_ARR ? homes->child : NULL; h; h = h->next) {
-        char params[120], quoted[80];
-        const char *home = json_str(h, "ownerId", "");
-        if (!*home || strlen(home) >= sizeof(scene[0].home))
-            continue;
-        snprintf(params, sizeof(params), "{\"homeId\":%s}", json_quote(home, quoted, sizeof(quoted)));
-        struct json *list = api_call(s, "GET", "/v1.0/m/scene/ha/home/scenes", params, NULL, NULL, true, err, errsz);
-        if (!list) {
-            ok = false;
-            break;
-        }
-        for (const struct json *j = list->type == JSON_ARR ? list->child : NULL; j && *n < TUYA_MAX_SCENE; j = j->next) {
-            const char *id = json_str(j, "scene_id", json_str(j, "sceneId", json_str(j, "id", "")));
-            if (!*id || strlen(id) >= sizeof(scene[0].id))
-                continue;
-            struct tuya_scene *sc = &scene[(*n)++];
-            copy(sc->id, sizeof(sc->id), id);
-            copy(sc->home, sizeof(sc->home), home);
-            copy(sc->name, sizeof(sc->name), json_str(j, "name", id));
-            sc->enabled = json_bool(j, "enabled", true);
-        }
-        json_free(list);
-    }
-    json_free(homes);
-    return ok;
-}
-
-bool tuya_trigger_scene(struct tuya_session *s, const char *home, const char *id, char *err, size_t errsz)
-{
-    char body[300], q1[80], q2[100];
-    snprintf(body, sizeof(body), "{\"homeId\":%s,\"sceneId\":%s}", json_quote(home, q1, sizeof(q1)), json_quote(id, q2, sizeof(q2)));
-    struct json *r = api_call(s, "POST", "/v1.0/m/scene/ha/trigger", NULL, body, NULL, true, err, errsz);
-    if (!r)
-        return false;
-    json_free(r);
-    return true;
-}
-
 void tuya_dp_text(const struct tuya_dp *dp, char *out, size_t n)
 {
     if (!dp->has) {

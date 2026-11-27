@@ -11,8 +11,9 @@
  *   mellagui-smart --background        carry out the timetable (smartsched.h; no window, started with the compositor)
  *   mellagui-smart --sun               today's sunrise and sunset at the place the timetable uses (smartsun.h)
  *   mellagui-smart --place LAT LON     the place for them (degrees, east positive); `--place auto` goes back to the one of the time zone
- *   mellagui-smart --scenes            the scenes ("Tap-to-Run") made in the app
- *   mellagui-smart --scene NAME        start one of them (for a key binding: Super+F1 = exec mellagui-smart --scene "Movie night")
+ *   mellagui-smart --scenes            the program's scenes (smartscene.h)
+ *   mellagui-smart --scene NAME [--notify]   run one, by name or id (a key binding: Super+F1 = exec mellagui-smart --scene "Good night");
+ *                                      --notify says what did not go out in a notification
  *   mellagui-smart --scan [SECONDS]    listen for the devices in this network (default 20 s): their local addresses and protocol versions
  *   mellagui-smart --qr TEXT           print a QR code of TEXT (to try the encoder with a phone)
  *   mellagui-smart --selftest
@@ -26,7 +27,11 @@
  * row of buttons - and everything the device reports. A robot vacuum gets a remote control there: start / stop, return to the dock, the modes,
  * the suction, and a cross of arrows to drive it by hand (hold a button or an arrow key; it stops when that is let go). The values are asked again every 10 s ($MELLAGUI_SMART_POLL_MS) and shortly after a command.
  *
- *   wheel, Up / Down, PgUp / PgDn   scroll        F5 or R   ask again        Esc   close (in the QR view: back)
+ * Scenes are made here: "New scene" in the rail (N) opens the editor - a name and, for every device, what the scene tells it (nothing lit = left
+ * alone; "Take the current state" fills it from how things are now). Their buttons stand above the cards: a click runs one, a right click opens its
+ * view (what it does, its timetable, change, delete).
+ *
+ *   wheel, Up / Down, PgUp / PgDn   scroll        F5 or R   ask again        N   new scene        Esc   close (in the QR view: back)
  *
  * A second copy does not start (a lock file per Wayland display). MELLAGUI_SMART_DUMP=FILE writes the window's state there after every paint (tests).
  */
@@ -49,6 +54,7 @@
 #include "protocol.h"
 #include "qr.h"
 #include "smartfav.h"
+#include "smartscene.h"
 #include <math.h>
 #include "smartsched.h"
 #include "smartsun.h"
@@ -59,7 +65,9 @@
 #include "util.h"
 #include "wlc.h"
 #include "wlcard.h"
+#include "wlclip.h"
 #include "wlrail.h"
+#include "wltext.h"
 #include "wlwin.h"
 
 #define HEAD_H 50
@@ -77,10 +85,12 @@ enum view { V_LOGIN, V_QR, V_DEVICES };
 /* C_TOGGLE a switch; C_BUTTON sets its value; C_SLIDER a number, sent when let go; C_PUSH a truth value as a big button (label = what a press does while
  * it is off, value = while it is on); C_HOLD sends its value when pressed and "stop" when let go (driving the robot); C_DETAILS opens the device's own
  * view, C_CLOSE closes it; C_LABEL / C_TEXT are a heading and a line of text in that view. */
-enum ctl_kind { C_TOGGLE, C_BUTTON, C_SLIDER, C_PUSH, C_HOLD, C_DETAILS, C_CLOSE, C_LABEL, C_TEXT, C_EDIT, C_EDSLIDER };
-static const char *const KIND_NAME[] = { "toggle", "button", "slider", "push", "hold", "details", "close", "label", "text", "edit", "edslider" };
+enum ctl_kind { C_TOGGLE, C_BUTTON, C_SLIDER, C_PUSH, C_HOLD, C_DETAILS, C_CLOSE, C_LABEL, C_TEXT, C_EDIT, C_EDSLIDER, C_SCENE, C_NAME, C_SCSLIDER };
+static const char *const KIND_NAME[] = { "toggle", "button", "slider", "push", "hold", "details", "close", "label", "text", "edit", "edslider", "scene",
+                                         "name", "scslider" };
 /* C_EDIT is a button of the timetable (its `value` says what it does: "add", "tog:N", "del:N", "h+", "m-", "d3", "a2", "save", "cancel"), C_EDSLIDER the
- * number of the action being made (the blind's position). They tell the device nothing. */
+ * number of the action being made (the blind's position). They tell the device nothing. C_SCENE runs a scene (value = its id); C_NAME is the
+ * scene editor's name field and C_SCSLIDER the number a scene tells a device. Controls that belong to no device have dev -1. */
 
 struct box { int x, y, w, h; };
 
@@ -104,7 +114,7 @@ struct hold {
     uint64_t until;
 };
 
-enum job_type { J_QR_START, J_QR_POLL, J_LOAD, J_POLL, J_CMD, J_LOGOUT, J_QUIT };
+enum job_type { J_QR_START, J_QR_POLL, J_LOAD, J_POLL, J_CMD, J_SCENE, J_LOGOUT, J_QUIT };
 
 struct job {
     enum job_type type;
@@ -120,6 +130,8 @@ struct results {
     char qr[200], username[80];
     bool have_msg, msg_err;
     char msg[200];
+    bool have_scene, scene_err;         /* how a scene went */
+    char scene_msg[300];
 };
 
 /* A device heard in this network (tuyalan). */
@@ -210,8 +222,25 @@ struct app {
     uint64_t poll_at;
     bool poll_busy;
     int poll_ms;
-    char msg[200];
+    char msg[300];
     bool msg_err;
+    uint64_t msg_until;                 /* a message that an answer without one does not wipe before then */
+    /* the scenes (smartscene.h): the list, the one whose view is open, and the editor */
+    struct scene scene[SCENE_MAX];
+    int nscene;
+    char view_scene[12];
+    bool del_sure;                      /* "Delete" was pressed once */
+    struct {
+        bool open, is_new;
+        struct scene s;
+        bool drag;                      /* a number's slider is in the hand ... */
+        char drag_dev[40], drag_code[40];   /* ... this one */
+    } sed;
+    int menu_kind;                      /* what the open menu is about: 1 a scene's button (menu_scene), 2 the name field */
+    char menu_scene[12];
+    char ran_id[12];                    /* the scene just run: its button stays lit until ran_until */
+    uint64_t ran_until;
+    struct wlclip clip;
     char username[80];
     const char *dump;
     /* the worker */
@@ -260,6 +289,12 @@ static bool now_stale(uint64_t at)
 static bool in(double px, double py, struct box b)
 {
     return px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h;
+}
+
+/* A view lies over the list: a device's, a scene's or the scene editor. */
+static bool modal_open(const struct app *a)
+{
+    return a->modal_dev[0] || a->view_scene[0] || a->sed.open;
 }
 
 static void set_msg(struct app *a, bool err, const char *fmt, ...)
@@ -515,6 +550,31 @@ static void load_all(struct app *a)
     pthread_mutex_unlock(&a->lock);
 }
 
+/* One command, from the worker: the local network when the device is heard there, else the cloud. */
+static bool worker_send(void *ud, const char *id, const char *code, const char *json, char *err, size_t errsz)
+{
+    struct app *a = ud;
+    struct tuya_dev *d = NULL;
+    struct lanent e;
+    int r = 0;
+    for (int i = 0; i < a->nmaster; i++)
+        if (!strcmp(a->master[i].id, id))
+            d = &a->master[i];
+    if (d && lan_lookup(a, d->id, &e)) {
+        pthread_mutex_lock(&a->lan_io);
+        r = lan_send(&e, d, code, json, err, errsz);
+        pthread_mutex_unlock(&a->lan_io);
+    }
+    pthread_mutex_lock(&a->lan_lock);
+    if (r == 1)
+        a->lan_cmds++;
+    a->read_kick = true;                                        /* what the device says now is asked for right away */
+    pthread_mutex_unlock(&a->lan_lock);
+    if (r == 1)
+        return true;
+    return r >= 0 && tuya_command(&a->sess, id, code, json, err, errsz);     /* (sent but not confirmed: not sent a second time through the cloud) */
+}
+
 static void *worker(void *arg)
 {
     struct app *a = arg;
@@ -565,26 +625,22 @@ static void *worker(void *arg)
         case J_POLL:
             load_all(a);
             break;
-        case J_CMD: {                                           /* the local network when the device is heard there, else the cloud */
-            struct tuya_dev *d = NULL;
-            struct lanent e;
-            int r = 0;
-            for (int i = 0; i < a->nmaster; i++)
-                if (!strcmp(a->master[i].id, j.a))
-                    d = &a->master[i];
-            if (d && lan_lookup(a, d->id, &e)) {
-                pthread_mutex_lock(&a->lan_io);
-                r = lan_send(&e, d, j.b, j.c, err, sizeof(err));
-                pthread_mutex_unlock(&a->lan_io);
-            }
-            pthread_mutex_lock(&a->lan_lock);
-            if (r == 1)
-                a->lan_cmds++;
-            a->read_kick = true;                                /* what the device says now is asked for right away */
-            pthread_mutex_unlock(&a->lan_lock);
-            if (r != 1 && (r < 0 || !tuya_command(&a->sess, j.a, j.b, j.c, err, sizeof(err)))) {
-                result_msg(a, true, err);                       /* (sent but not confirmed: not sent a second time through the cloud) */
-            }
+        case J_CMD:
+            if (!worker_send(a, j.a, j.b, j.c, err, sizeof(err)))
+                result_msg(a, true, err);
+            break;
+        case J_SCENE: {
+            static struct scene scene[SCENE_MAX];
+            int n = scene_load(scene, SCENE_MAX), at = scene_find(scene, n, j.a);
+            if (at < 0)
+                break;
+            char summary[300];
+            int failed = scene_run(&scene[at], a->master, a->nmaster, worker_send, a, summary, sizeof(summary));
+            pthread_mutex_lock(&a->lock);
+            a->res.have_scene = true;
+            a->res.scene_err = failed > 0;
+            copy(a->res.scene_msg, sizeof(a->res.scene_msg), summary);
+            pthread_mutex_unlock(&a->lock);
             break;
         }
         case J_LOGOUT:
@@ -666,6 +722,9 @@ static void lan_values_apply(struct app *a)
     pthread_mutex_unlock(&a->lan_lock);
 }
 
+static void hold_value(struct app *a, struct tuya_dev *d, const struct tuya_dp *dp);
+static struct tuya_dev *find_dev(struct app *a, const char *id);
+
 /* Tells the device the data point's value as it is now in the window's list. */
 static void send_value(struct app *a, struct tuya_dev *d, struct tuya_dp *dp)
 {
@@ -681,6 +740,12 @@ static void send_value(struct app *a, struct tuya_dev *d, struct tuya_dp *dp)
         set_msg(a, true, "Too many commands are waiting");
         return;
     }
+    hold_value(a, d, dp);
+}
+
+/* The value the window's list has now is believed for a few seconds. */
+static void hold_value(struct app *a, struct tuya_dev *d, const struct tuya_dp *dp)
+{
     struct hold *h = &a->hold[0];
     for (int i = 0; i < MAX_HOLD; i++) {
         if (!strcmp(a->hold[i].dev, d->id) && !strcmp(a->hold[i].code, dp->code)) {
@@ -698,6 +763,38 @@ static void send_value(struct app *a, struct tuya_dev *d, struct tuya_dp *dp)
     h->until = mono_ms() + HOLD_MS;
     a->poll_at = mono_ms() + 1500;
     a->win.redraw = true;
+}
+
+/* Runs a scene: the window shows at once what it asks for, the worker sends it and says how it went. */
+static void run_scene(struct app *a, const char *id)
+{
+    int at = scene_find(a->scene, a->nscene, id);
+    if (at < 0)
+        return;
+    const struct scene *s = &a->scene[at];
+    if (!push_job(a, J_SCENE, s->id, NULL, NULL)) {
+        set_msg(a, true, "Too many commands are waiting");
+        return;
+    }
+    for (int i = 0; i < s->n; i++) {
+        struct tuya_dev *d = find_dev(a, s->act[i].dev);
+        struct tuya_dp *dp = d && d->online ? tuya_find_dp(d, s->act[i].code) : NULL;
+        if (!dp || !dp->func)
+            continue;
+        if (dp->type == TUYA_BOOL)
+            dp->b = !strcmp(s->act[i].value, "true");
+        else if (dp->type == TUYA_INT)
+            dp->num = atof(s->act[i].value);
+        else
+            copy(dp->str, sizeof(dp->str), s->act[i].value);
+        dp->has = true;
+        hold_value(a, d, dp);
+    }
+    copy(a->ran_id, sizeof(a->ran_id), s->id);
+    a->ran_until = mono_ms() + 1500;
+    set_msg(a, false, "Running %s...", s->name);
+    a->msg_until = mono_ms() + 20000;
+    a->poll_at = mono_ms() + 2500;
 }
 
 /* ---- what a device shows ------------------------------------------------------------------------------------------------------------------ */
@@ -1133,9 +1230,11 @@ static void build_actions(struct app *a, struct tuya_dev *d)
 #undef ACT
 }
 
-/* The action that does what the rule does, -1 when the list has none like it (a line written by hand). */
+/* The action that does what the rule does, -1 when the list has none like it (a line written by hand). A scene (d = NULL) does one thing: run. */
 static int rule_action(const struct app *a, const struct tuya_dev *d, const struct sched_rule *r)
 {
+    if (!d)
+        return 0;
     for (int i = 0; i < a->nacts; i++) {
         const struct sact *s = &a->acts[i];
         if (s->dp >= 0 && !strcmp(d->dp[s->dp].code, r->code) && (s->is_int || !strcmp(s->value, r->value)))
@@ -1144,29 +1243,37 @@ static int rule_action(const struct app *a, const struct tuya_dev *d, const stru
     return -1;
 }
 
-/* "07:30  weekdays  Position 30%" */
-static void rule_text(struct tuya_dev *d, const struct sched_rule *r, char *out, size_t n)
+/* What telling a device `value` for `code` does: "Position 30%", "Switch 1 off", "Open". */
+static void what_text(struct tuya_dev *d, const char *code, const char *value, char *what, size_t n)
 {
-    char days[40], what[80], name[48];
-    struct tuya_dp *dp = tuya_find_dp(d, r->code);
-    sched_days_text(r->days, days, sizeof(days));
-    pretty(r->code, name, sizeof(name));
-    if (dp && dp->type == TUYA_BOOL && (!strcmp(r->code, "power_go") || !strcmp(r->code, "switch_go")))
-        snprintf(what, sizeof(what), "%s", !strcmp(r->value, "true") ? "Start cleaning" : "Stop cleaning");
+    char name[48];
+    struct tuya_dp *dp = d ? tuya_find_dp(d, code) : NULL;
+    pretty(code, name, sizeof(name));
+    if (dp && dp->type == TUYA_BOOL && (!strcmp(code, "power_go") || !strcmp(code, "switch_go")))
+        snprintf(what, n, "%s", !strcmp(value, "true") ? "Start cleaning" : "Stop cleaning");
     else if (dp && dp->type == TUYA_BOOL)
-        snprintf(what, sizeof(what), "%.40s %s", name, !strcmp(r->value, "true") ? "on" : "off");
-    else if (dp && dp->type == TUYA_INT && !strcmp(r->code, "manual_feed"))
-        snprintf(what, sizeof(what), "Feed %.10s", r->value);
+        snprintf(what, n, "%.40s %s", name, !strcmp(value, "true") ? "on" : "off");
+    else if (dp && dp->type == TUYA_INT && !strcmp(code, "manual_feed"))
+        snprintf(what, n, "Feed %.10s", value);
     else if (dp && dp->type == TUYA_INT) {
         struct tuya_dp v = *dp;
         char num[40];
         v.has = true;
-        v.num = atof(r->value);
+        v.num = atof(value);
         tuya_dp_text(&v, num, sizeof(num));
-        snprintf(what, sizeof(what), "%.30s %s", name, num);
+        snprintf(what, n, "%.30s %s", name, num);
     } else {
-        pretty(r->value, what, sizeof(what));
+        pretty(value, what, n);
     }
+}
+
+/* "07:30  weekdays  Position 30%" (a scene's rule: "07:30  weekdays") */
+static void rule_text(struct tuya_dev *d, const struct sched_rule *r, char *out, size_t n)
+{
+    char days[40], what[80] = "";
+    sched_days_text(r->days, days, sizeof(days));
+    if (d)
+        what_text(d, r->code, r->value, what, sizeof(what));
     char at[48];
     sched_time_text(r, at, sizeof(at));
     int due;
@@ -1176,7 +1283,7 @@ static void rule_text(struct tuya_dev *d, const struct sched_rule *r, char *out,
         if (strlen(at) + strlen(tail) < sizeof(at))
             strcat(at, tail);
     }
-    snprintf(out, n, "%s  %s  %s", at, days, what);
+    snprintf(out, n, "%s  %s%s%s", at, days, what[0] ? "  " : "", what);
 }
 
 static struct ctl *modal_ctl(struct flow *f, enum ctl_kind kind, int dp, struct box b, const char *label, const char *value, bool lit)
@@ -1191,16 +1298,27 @@ static struct ctl *modal_ctl(struct flow *f, enum ctl_kind kind, int dp, struct 
 
 static void schedule_form(struct flow *f);
 
-/* The timetable of the open device: its rules (each can be switched off, changed or deleted) and the form that changes one (under its line) or adds
- * one (under the list). */
+/* Is the rule one of the open device's (d), or of the open scene's (d = NULL)? */
+static bool rule_for(const struct app *a, const struct tuya_dev *d, const struct sched_rule *r)
+{
+    return d ? !strcmp(r->dev, d->id) : !strcmp(r->dev, SCHED_SCENE) && !strcmp(r->code, a->view_scene);
+}
+
+/* The timetable of the open device or scene: its rules (each can be switched off, changed or deleted) and the form that changes one (under its line)
+ * or adds one (under the list). */
 static void schedule_controls(struct flow *f)
 {
     struct app *a = f->a;
-    struct tuya_dev *d = &a->dev[f->dev];
-    build_actions(a, d);
+    struct tuya_dev *d = f->dev >= 0 ? &a->dev[f->dev] : NULL;
+    if (d) {
+        build_actions(a, d);
+    } else {
+        a->nacts = 1;
+        a->acts[0] = (struct sact){ .dp = -1, .value = "run", .label = "Run the scene" };
+    }
     if (!a->nacts)
         return;                                                 /* nothing a rule could tell it */
-    if (a->ed.open && a->ed.rule >= 0 && a->ed.rule < a->nrules && rule_action(a, d, &a->rules[a->ed.rule]) < 0) {
+    if (d && a->ed.open && a->ed.rule >= 0 && a->ed.rule < a->nrules && rule_action(a, d, &a->rules[a->ed.rule]) < 0) {
         struct sact *s = &a->acts[a->nacts < 24 ? a->nacts++ : 23];             /* what it does is not in the list: it can stay as it is */
         s->dp = -1;
         s->is_int = false;
@@ -1210,7 +1328,7 @@ static void schedule_controls(struct flow *f)
     flow_line(f, C_LABEL, "Timetable (while this computer is on)");
     for (int i = 0; i < a->nrules; i++) {
         char text[160], v[16];
-        if (strcmp(a->rules[i].dev, d->id))
+        if (!rule_for(a, d, &a->rules[i]))
             continue;
         rule_text(d, &a->rules[i], text, sizeof(text));
         bool editing = a->ed.open && a->ed.rule == i;
@@ -1252,6 +1370,7 @@ static void schedule_controls(struct flow *f)
 static void schedule_form(struct flow *f)
 {
     struct app *a = f->a;
+    bool d = f->dev >= 0;                                       /* a device's rule says what to tell it, a scene's does not */
     char text[120];
     static const char *const day[7] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     static const char *const step[4][2] = { { "h-", "- 1 h" }, { "h+", "+ 1 h" }, { "m-", "- 5 min" }, { "m+", "+ 5 min" } };
@@ -1305,7 +1424,7 @@ static void schedule_form(struct flow *f)
     flow_add(f, C_EDIT, -1, lm_font_text_width("Every day") + 24, "Every day", "da");
     flow_break(f);
     a->ed.action = LM_CLAMP(a->ed.action, 0, a->nacts - 1);
-    for (int i = 0; i < a->nacts; i++) {
+    for (int i = 0; d && i < a->nacts; i++) {
         char v[16];
         snprintf(v, sizeof(v), "a%d", i);
         struct ctl *c = flow_add(f, C_EDIT, -1, lm_font_text_width(a->acts[i].label) + 28, a->acts[i].label, v);
@@ -1321,6 +1440,117 @@ static void schedule_form(struct flow *f)
     flow_add(f, C_EDIT, -1, 80, "Save", "save");
     flow_add(f, C_EDIT, -1, 80, "Cancel", "cancel");
     flow_break(f);
+}
+
+/* A button in a scene's view or in the editor. */
+static void scene_button(struct flow *f, const char *label, const char *value, bool lit)
+{
+    struct ctl *c = flow_add(f, C_EDIT, -1, lm_font_text_width(label) + 28, label, value);
+    if (c)
+        c->lit = lit;
+}
+
+/* A scene's own view: run it, what it does, the desktop card, its timetable, delete it. */
+static void scene_view_controls(struct flow *f)
+{
+    struct app *a = f->a;
+    const struct scene *s = &a->scene[scene_find(a->scene, a->nscene, a->view_scene)];
+    scene_button(f, "Run now", "s:run", false);
+    scene_button(f, "Change...", "s:change", false);
+    flow_line(f, C_LABEL, "What it does");
+    for (int i = 0; i < s->n; i++) {
+        struct tuya_dev *d = find_dev(a, s->act[i].dev);
+        char what[80], line[200];
+        what_text(d, s->act[i].code, s->act[i].value, what, sizeof(what));
+        snprintf(line, sizeof(line), "%s: %s%s", d ? d->name : "A device that is gone", what, d && !d->online ? " (offline now)" : "");
+        flow_line(f, C_TEXT, line);
+    }
+    flow_line(f, C_LABEL, "On the desktop");
+    scene_button(f, s->desk ? "A button on the desktop card" : "Not on the desktop card", "s:desk", s->desk);
+    flow_break(f);
+    schedule_controls(f);
+    flow_break(f);
+    f->cy += 14;
+    scene_button(f, a->del_sure ? "Really delete it?" : "Delete this scene", "s:del", a->del_sure);
+    flow_break(f);
+}
+
+#define EDIT_COL 170
+
+/* The word on the editor's button for one of build_actions()'s actions. */
+static const char *action_word(const struct tuya_dev *d, const struct sact *s)
+{
+    const struct tuya_dp *dp = &d->dp[s->dp];
+    if (s->is_int)
+        return "Set";
+    if (dp->type != TUYA_BOOL)
+        return s->label;
+    bool on = !strcmp(s->value, "true");
+    if (!strcmp(dp->code, "power_go") || !strcmp(dp->code, "switch_go"))
+        return on ? "Start cleaning" : "Stop cleaning";
+    return on ? "On" : "Off";
+}
+
+/* The editor: the name, and for every device what the scene can tell it (a button per thing, lit = chosen, nothing lit = left alone). */
+static void editor_controls(struct flow *f)
+{
+    struct app *a = f->a;
+    const struct scene *s = &a->sed.s;
+    flow_line(f, C_LABEL, "Name");
+    flow_add(f, C_NAME, -1, f->x1 - f->x0, "", NULL);
+    flow_break(f);
+    scene_button(f, "Take the current state", "x:current", false);
+    scene_button(f, s->desk ? "A button on the desktop card" : "Not on the desktop card", "x:desk", s->desk);
+    flow_break(f);
+    flow_line(f, C_LABEL, "What it does");
+    flow_line(f, C_TEXT, "Press what it should do. Nothing lit: left alone.");
+    f->cy += 8;
+    int x0 = f->x0;
+    for (int i = 0; i < a->ndev; i++) {
+        struct tuya_dev *d = &a->dev[i];
+        build_actions(a, d);
+        if (!a->nacts)
+            continue;
+        bool one = a->acts[0].dp == a->acts[a->nacts - 1].dp && !a->acts[0].is_int;      /* one thing to tell: on the name's own line */
+        char name[100];
+        snprintf(name, sizeof(name), "%s%s", d->name, d->online ? "" : " (offline)");
+        f->dev = i;
+        if (!one)
+            flow_line(f, C_LABEL, name);
+        for (int k = 0; k < a->nacts;) {
+            int dp = a->acts[k].dp, from = k;
+            char row[100];
+            while (k < a->nacts && a->acts[k].dp == dp)
+                k++;
+            if (one)
+                copy(row, sizeof(row), name);
+            else
+                pretty(d->dp[dp].code, row, sizeof(row));
+            int in_scene = scene_act_find(s, d->id, d->dp[dp].code);
+            struct ctl *t = add_ctl(a, C_TEXT, i, -1, (struct box){ x0 + (one ? 0 : 10), f->cy + 7, EDIT_COL - 16, 18 }, row, NULL);
+            if (t) {
+                t->modal = true;
+                t->lit = in_scene >= 0;
+            }
+            f->x0 = f->cx = x0 + EDIT_COL;
+            f->used = false;
+            for (int j = from; j < k; j++) {
+                char v[16];
+                const char *word = action_word(d, &a->acts[j]);
+                snprintf(v, sizeof(v), "x:p:%d", j);
+                struct ctl *c = flow_add(f, C_EDIT, dp, lm_font_text_width(word) + 28, word, v);
+                if (c)
+                    c->lit = in_scene >= 0 && (a->acts[j].is_int || !strcmp(s->act[in_scene].value, a->acts[j].value));
+            }
+            flow_break(f);
+            f->x0 = f->cx = x0;
+            if (a->acts[from].is_int && in_scene >= 0) {        /* the number, under its "Set" */
+                flow_add(f, C_SCSLIDER, dp, f->x1 - f->x0, "to", NULL);
+                flow_break(f);
+            }
+        }
+    }
+    f->dev = -1;
 }
 
 #define MODAL_HEAD 62
@@ -1453,6 +1683,21 @@ static void build_layout(struct app *a)
     for (int c = 0; c < cols; c++)
         ybot[c] = y;
     a->cols = cols;
+    if (a->nscene && a->loaded) {                              /* the scenes' buttons stand above the cards */
+        int sx = PAD;
+        for (int i = 0; i < a->nscene; i++) {
+            int wd = LM_MIN(lm_font_text_width(a->scene[i].name) + 36, bw - 2 * PAD);
+            if (sx + wd > bw - PAD && sx > PAD) {
+                sx = PAD;
+                y += ROW + 8;
+            }
+            add_ctl(a, C_SCENE, -1, -1, (struct box){ sx, y, wd, ROW }, a->scene[i].name, a->scene[i].id);
+            sx += wd + 8;
+        }
+        y += ROW + 12;
+        for (int c = 0; c < cols; c++)
+            ybot[c] = y;
+    }
     int perm[TUYA_MAX_DEV];
     card_order(a, perm);
     for (int pos = 0; pos < a->ndev; pos++) {
@@ -1473,23 +1718,35 @@ static void build_layout(struct app *a)
     card_slide(a, a->nctl);
     a->content_h = y + a->scroll - HEAD_H;
     struct tuya_dev *d = a->modal_dev[0] ? find_dev(a, a->modal_dev) : NULL;
-    if (!d) {
+    if (!d)
         a->modal_dev[0] = 0;
+    if (a->view_scene[0] && scene_find(a->scene, a->nscene, a->view_scene) < 0)
+        a->view_scene[0] = 0;
+    if (!modal_open(a))
         return;
-    }
     bw = a->win.bw;
     int mw = LM_MIN(bw - 24, 500), first = a->nctl;
     int mx = LM_CLAMP((bw - mw) / 2 + a->win.card_dx, 0, LM_MAX(bw - mw, 0));          /* (the user may have moved it by its title: wlwin card_dx / card_dy) */
     int top = LM_CLAMP(24 + a->win.card_dy, 0, LM_MAX(a->win.bh - 120, 0)), ctop = top + MODAL_HEAD;
     int room = LM_MAX(a->win.bh - top - 24, 96);
-    struct flow f = { .a = a, .dev = (int)(d - a->dev), .modal = true, .x0 = mx + 16, .x1 = mx + mw - 10 - sbar_w(), .cx = mx + 16, .cy = ctop - a->modal_scroll };
+    struct flow f = { .a = a, .dev = d ? (int)(d - a->dev) : -1, .modal = true, .x0 = mx + 16, .x1 = mx + mw - 10 - sbar_w(), .cx = mx + 16, .cy = ctop - a->modal_scroll };
     a->ed.y0 = a->ed.y1 = 0;
-    modal_controls(&f);
+    if (a->sed.open)
+        editor_controls(&f);
+    else if (a->view_scene[0])
+        scene_view_controls(&f);
+    else
+        modal_controls(&f);
     a->modal_h = f.cy + a->modal_scroll - ctop + 12;
     int mh = LM_MIN(MODAL_HEAD + a->modal_h, room);
     a->modal = (struct box){ mx, top, mw, mh };
     for (int i = first; i < a->nctl; i++)                       /* what is scrolled out of the view is not there */
         a->ctl[i].hidden = a->ctl[i].b.y < ctop || a->ctl[i].b.y + a->ctl[i].b.h > top + mh - 6;
+    if (a->sed.open) {                                          /* the editor's two buttons are in its head, always in sight */
+        modal_ctl(&f, C_EDIT, -1, (struct box){ mx + mw - 16 - 70 - 8 - 62, top + 12, 62, 24 }, "Save", "x:save", false);
+        modal_ctl(&f, C_EDIT, -1, (struct box){ mx + mw - 16 - 70, top + 12, 70, 24 }, "Cancel", "x:cancel", false);
+        return;
+    }
     struct ctl *c = add_ctl(a, C_CLOSE, f.dev, -1, (struct box){ mx + mw - 16 - 60, top + 12, 60, 24 }, "Close", NULL);
     if (c)
         c->modal = true;
@@ -1510,7 +1767,7 @@ static bool sbar_get(struct app *a, int which, struct sbar *s)
         s->scroll = &a->scroll;
         s->track = (struct box){ a->win.bw - sbar_w() - 2, HEAD_H - 4, sbar_w(), s->room + 2 };
     } else {
-        if (!a->modal_dev[0])
+        if (!modal_open(a))
             return false;
         s->room = a->modal.h - MODAL_HEAD;
         s->content = a->modal_h;
@@ -1561,7 +1818,7 @@ static void sbar_paint(struct app *a, int which)
     if (!sbar_get(a, which, &s))
         return;
     struct box t = sbar_thumb(&s);
-    bool hot = a->sb_drag == which || (!a->sb_drag && in(a->px, a->py, t) && (which == 2 || !a->modal_dev[0]));
+    bool hot = a->sb_drag == which || (!a->sb_drag && in(a->px, a->py, t) && (which == 2 || !modal_open(a)));
     wlwin_round_fill(&a->win, s.track.x, s.track.y, s.track.w, s.track.h, s.track.w / 2, lm_theme.field);
     wlwin_round_fill(&a->win, t.x + 2, t.y + 2, t.w - 4, t.h - 4, (t.w - 4) / 2, hot ? lm_theme.button_hover : lm_theme.button_down);
 }
@@ -1589,7 +1846,7 @@ static void rbox(struct wlwin *w, struct box b, int r, uint32_t rgb)
     wlwin_round_fill(w, b.x, b.y, b.w, b.h, r, rgb);
 }
 
-enum tint { T_SLATE, T_BLUE, T_GREEN, T_AMBER, T_RED, T_GREY, T_IDLE };
+enum tint { T_SLATE, T_BLUE, T_GREEN, T_AMBER, T_RED, T_GREY, T_TEAL, T_IDLE };
 
 /* A coloured drop with its label: lighter under the pointer, grey and dim when there is nothing it can do (T_IDLE). */
 static void button(struct wlwin *w, struct box b, const char *label, bool hot, enum tint t)
@@ -1597,7 +1854,7 @@ static void button(struct wlwin *w, struct box b, const char *label, bool hot, e
     const uint32_t fill[][2] = {
         { lm_theme.btn_slate, lm_theme.btn_slate_lit }, { lm_theme.btn_blue, lm_theme.btn_blue_lit }, { lm_theme.btn_green, lm_theme.btn_green_lit },
         { lm_theme.btn_amber, lm_theme.btn_amber_lit }, { lm_theme.btn_red, lm_theme.btn_red_lit }, { lm_theme.btn_grey, lm_theme.btn_grey_lit },
-        { lm_theme.control_idle, lm_theme.control_idle },
+        { lm_theme.btn_teal, lm_theme.btn_teal_lit }, { lm_theme.control_idle, lm_theme.control_idle },
     };
     wlwin_drop(w, b.x, b.y, b.w, b.h, LM_MAX(lm_button_radius(b.h / 2), 3), fill[t][hot]);
     wlwin_text(w, b.x + (b.w - lm_font_text_width(label)) / 2, b.y + (b.h - LM_FONT_H) / 2, label, 1,
@@ -1635,7 +1892,7 @@ static void slider_track(struct box b, int *x0, int *x1)
         *x1 = *x0 + 40;
 }
 
-enum { R_REFRESH, R_ACCOUNT, R_N };
+enum { R_REFRESH, R_SCENE, R_ACCOUNT, R_N };
 
 static void ic_refresh(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 {
@@ -1659,13 +1916,15 @@ static void ic_logout(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 
 static void smart_rail(const struct app *a, struct wlrail *L)
 {
-    bool idle = a->view != V_DEVICES || a->modal_dev[0];
+    bool idle = a->view != V_DEVICES || modal_open(a);
     memset(L, 0, sizeof(*L));
     L->y0 = 0;
     L->y1 = a->win.bh > 0 ? a->win.bh - FOOT_H : 400;
     L->n = R_N;
     L->it[R_REFRESH] = (struct wlrail_item){ .tip = "Ask the devices again  F5", .icon = ic_refresh, .base = lm_theme.btn_blue, .lite = lm_theme.btn_blue_lit,
                                              .show = true, .idle = idle };
+    L->it[R_SCENE] = (struct wlrail_item){ .tip = "New scene  N", .icon = wlrail_ic_new, .base = lm_theme.btn_green, .lite = lm_theme.btn_green_lit,
+                                           .show = true, .idle = idle || !a->loaded };
     L->it[R_ACCOUNT] = (struct wlrail_item){ .tip = a->confirm_logout ? "Stay logged in" : "Log out...", .icon = ic_logout,
                                              .base = a->confirm_logout ? lm_theme.btn_red : lm_theme.btn_slate,
                                              .lite = a->confirm_logout ? lm_theme.btn_red_lit : lm_theme.btn_slate_lit,
@@ -1676,7 +1935,7 @@ static void smart_rail(const struct app *a, struct wlrail *L)
 static int rail_under(struct app *a)
 {
     struct wlrail L;
-    if (a->modal_dev[0] || a->px >= 0 || a->py < 0)             /* (the pointer on a card window reports a place far to the right) */
+    if (modal_open(a) || a->px >= 0 || a->py < 0)             /* (the pointer on a card window reports a place far to the right) */
         return -1;
     smart_rail(a, &L);
     int i = wlrail_at(&L, a->win.rpx, a->win.rpy);
@@ -1695,7 +1954,7 @@ static void dump_state(struct app *a)
     pthread_mutex_lock(&a->lan_lock);
     int lan_cmds = a->lan_cmds, lan_reads = a->lan_reads;
     pthread_mutex_unlock(&a->lan_lock);
-    if (a->view == V_DEVICES && !a->modal_dev[0]) {             /* the rail's account button (left of the drawing area: x < 0), or the question's Log out */
+    if (a->view == V_DEVICES && !modal_open(a)) {               /* the rail's account button (left of the drawing area: x < 0), or the question's Log out */
         struct wlrail L;
         int y[WLRAIL_MAX];
         smart_rail(a, &L);
@@ -1706,7 +1965,7 @@ static void dump_state(struct app *a)
         fprintf(f, "foot - 0 0 0 0\n");
     }
     fprintf(f, "view=%s ndev=%d loaded=%d err=%d lan=%d reads=%d modal=%s\nmsg %s\nqr %s\n", a->view == V_LOGIN ? "login" : a->view == V_QR ? "qr" : "devices", a->ndev,
-            a->loaded, a->msg_err, lan_cmds, lan_reads, a->modal_dev[0] ? a->modal_dev : "-", a->msg, a->view == V_QR && a->have_qr ? a->qr_token : "");
+            a->loaded, a->msg_err, lan_cmds, lan_reads, a->sed.open ? "edit" : a->view_scene[0] ? a->view_scene : a->modal_dev[0] ? a->modal_dev : "-", a->msg, a->view == V_QR && a->have_qr ? a->qr_token : "");
     if (a->view == V_DEVICES) {
         fprintf(f, "cols %d\n", a->cols);
         {
@@ -1715,6 +1974,7 @@ static void dump_state(struct app *a)
             smart_rail(a, &L);
             wlrail_layout(&L, y);
             fprintf(f, "rail refresh %d %d %d %d\n", (WLRAIL_W - WLRAIL_D) / 2 - WLRAIL_W, y[R_REFRESH], WLRAIL_D, WLRAIL_D);
+            fprintf(f, "rail scene %d %d %d %d\n", (WLRAIL_W - WLRAIL_D) / 2 - WLRAIL_W, y[R_SCENE], WLRAIL_D, WLRAIL_D);
         }
         for (int i = 0; i < a->ndev; i++)
             fprintf(f, "card %s %d %d %d %d\n", a->dev[i].id, a->card[i].x, a->card[i].y, a->card[i].w, a->card[i].h);
@@ -1729,11 +1989,18 @@ static void dump_state(struct app *a)
         }
         for (int i = 0; i < a->nctl; i++) {                     /* "ctl" = on a card, "mctl" = in the open device view */
             const struct ctl *c = &a->ctl[i];
-            struct tuya_dev *d = &a->dev[c->dev];
+            struct tuya_dev *d = c->dev >= 0 ? &a->dev[c->dev] : NULL;
             char v[100] = "-";
             if (c->hidden || c->kind == C_LABEL)
                 continue;
-            if (c->kind == C_TEXT)
+            if (c->kind == C_SCENE)
+                snprintf(v, sizeof(v), "%.10s %.80s", c->value, c->label);
+            else if (c->kind == C_NAME)
+                copy(v, sizeof(v), a->sed.s.name);
+            else if (c->kind == C_SCSLIDER) {
+                int k = scene_act_find(&a->sed.s, d->id, d->dp[c->dp].code);
+                copy(v, sizeof(v), k >= 0 ? a->sed.s.act[k].value : "-");
+            } else if (c->kind == C_TEXT)
                 copy(v, sizeof(v), c->label);
             else if (c->kind == C_EDIT)
                 snprintf(v, sizeof(v), "%s %s%s", c->value, c->lit ? "*" : "", c->label);
@@ -1747,7 +2014,7 @@ static void dump_state(struct app *a)
                 copy(v, sizeof(v), d->dp[c->dp].b ? "on" : "off");
             else if (c->dp >= 0)
                 copy(v, sizeof(v), d->dp[c->dp].str);
-            fprintf(f, "%s %s %s %s %d %d %d %d %s\n", c->modal ? "mctl" : "ctl", d->id, c->dp >= 0 ? d->dp[c->dp].code : "-", KIND_NAME[c->kind], c->b.x, c->b.y,
+            fprintf(f, "%s %s %s %s %d %d %d %d %s\n", c->modal ? "mctl" : "ctl", d ? d->id : "@scene", c->dp >= 0 ? d->dp[c->dp].code : "-", KIND_NAME[c->kind], c->b.x, c->b.y,
                     c->b.w, c->b.h, v);
         }
     }
@@ -1810,13 +2077,23 @@ static void paint_arrow(struct wlwin *w, struct box b, const char *dir, uint32_t
 static void paint_ctl(struct app *a, const struct ctl *c, bool live)
 {
     struct wlwin *w = &a->win;
-    struct tuya_dev *d = &a->dev[c->dev];
-    struct tuya_dp *dp = c->dp >= 0 ? &d->dp[c->dp] : NULL;
+    struct tuya_dev *d = c->dev >= 0 ? &a->dev[c->dev] : NULL;
+    struct tuya_dp *dp = d && c->dp >= 0 ? &d->dp[c->dp] : NULL;
     struct box b = c->b;
     bool passive = c->kind == C_DETAILS || c->kind == C_CLOSE;
-    bool hot = live && in(a->px, a->py, b) && (d->online || passive);
-    uint32_t fg = d->online ? lm_theme.text : lm_theme.text_dim;
+    bool hot = live && in(a->px, a->py, b) && (!d || d->online || passive);
+    uint32_t fg = !d || d->online ? lm_theme.text : lm_theme.text_dim;
     switch (c->kind) {
+    case C_SCENE: {
+        bool ran = !strcmp(a->ran_id, c->value);
+        button(w, b, c->label, live && in(a->px, a->py, b), ran ? T_GREEN : T_TEAL);
+        break;
+    }
+    case C_NAME:
+        wlwin_fill(w, b.x - 1, b.y - 1, b.w + 2, b.h + 2, lm_theme.accent);
+        wlwin_fill(w, b.x, b.y, b.w, b.h, lm_theme.field);
+        wltext_paint(w, b.x + 8, b.y + (b.h - LM_FONT_H) / 2, b.w - 16, a->sed.s.name, true, lm_theme.text, lm_theme.button_hover, lm_theme.accent);
+        break;
     case C_TOGGLE: {
         bool on = dp->has && dp->b;
         struct box box = { b.x, b.y + (b.h - 18) / 2, 18, 18 };              /* a check box: the switch used to be a 44 px pill */
@@ -1866,9 +2143,10 @@ static void paint_ctl(struct app *a, const struct ctl *c, bool live)
     case C_EDIT: {
         bool hot_e = live && in(a->px, a->py, b);
         const char *v = c->value;
-        enum tint t = !strcmp(v, "save") || !strcmp(v, "add") ? T_GREEN
-                      : !strcmp(v, "cancel")                  ? T_GREY
-                      : !strncmp(v, "del:", 4)                ? T_RED
+        enum tint t = !strcmp(v, "save") || !strcmp(v, "add") || !strcmp(v, "x:save") || !strcmp(v, "s:run") ? T_GREEN
+                      : !strcmp(v, "cancel") || !strcmp(v, "x:cancel")                ? T_GREY
+                      : !strncmp(v, "del:", 4) || !strcmp(v, "s:del")                 ? T_RED
+                      : !strcmp(v, "s:change")                                        ? T_BLUE
                       : !strncmp(v, "tog:", 4)                ? (c->lit ? T_GREEN : T_GREY)
                       : c->lit || !strncmp(v, "ed:", 3)       ? T_BLUE
                                                               : T_SLATE;
@@ -1877,14 +2155,19 @@ static void paint_ctl(struct app *a, const struct ctl *c, bool live)
         button(w, b, c->label, hot_e, t);
         break;
     }
-    case C_EDSLIDER: {
+    case C_EDSLIDER:
+    case C_SCSLIDER: {
         int x0, x1;
         char v[48];
         struct tuya_dp shown = *dp;
         slider_track(b, &x0, &x1);
         shown.has = true;
         shown.num = a->ed.num;
-        double f = dp->max > dp->min ? LM_CLAMP((a->ed.num - dp->min) / (dp->max - dp->min), 0.0, 1.0) : 0.0;
+        if (c->kind == C_SCSLIDER) {
+            int k = scene_act_find(&a->sed.s, d->id, dp->code);
+            shown.num = k >= 0 ? atof(a->sed.s.act[k].value) : dp->min;
+        }
+        double f = dp->max > dp->min ? LM_CLAMP((shown.num - dp->min) / (dp->max - dp->min), 0.0, 1.0) : 0.0;
         int kx = x0 + (int)(f * (x1 - x0) + 0.5);
         wlwin_text(w, b.x, b.y + 7, c->label, 1, lm_theme.text, 142);
         rbox(w, (struct box){ x0, b.y + 12, x1 - x0, 6 }, 3, lm_theme.button);
@@ -1920,14 +2203,14 @@ static void paint_devices(struct app *a)
 {
     struct wlwin *w = &a->win;
     build_layout(a);
-    if (a->ed.reveal && a->modal_dev[0] && a->ed.y1 > a->ed.y0) {   /* a form that has just opened is scrolled into sight (its top first of all) */
+    if (a->ed.reveal && modal_open(a) && a->ed.y1 > a->ed.y0) {   /* a form that has just opened is scrolled into sight (its top first of all) */
         int over = a->ed.y1 - (a->modal.y + a->modal.h - 8), most = a->ed.y0 - (a->modal.y + MODAL_HEAD);
         a->modal_scroll += LM_MAX(LM_MIN(over, most), 0);
         a->ed.reveal = false;
     }
     clamp_scroll(a);
     build_layout(a);
-    bool live = !a->modal_dev[0] && a->py >= HEAD_H && a->py < w->bh - FOOT_H;
+    bool live = !modal_open(a) && a->py >= HEAD_H && a->py < w->bh - FOOT_H;
     if (!a->ndev)
         wlwin_text(w, 24, HEAD_H + 16, a->loaded ? "This account has no devices." : "Asking for the devices...", 1, lm_theme.text_dim, w->bw - 48);
     for (int i = 0; i < a->ndev; i++) {
@@ -1968,24 +2251,39 @@ static void paint_list_bar(struct app *a)
     sbar_paint(a, 1);
 }
 
-/* The open device's own view: the window dims, a card with the name, what it reports in a line, its battery, and every control. */
+/* The view that lies over the list: the window dims, a card with a head and the controls. A device's has its name, what it reports in a line, its
+ * battery; a scene's and the editor's say what they are. */
 static void paint_modal(struct app *a)
 {
     struct wlwin *w = &a->win;
-    struct tuya_dev *d = find_dev(a, a->modal_dev);
-    if (!d)
+    struct tuya_dev *d = a->modal_dev[0] ? find_dev(a, a->modal_dev) : NULL;
+    int at = a->view_scene[0] ? scene_find(a->scene, a->nscene, a->view_scene) : -1;
+    if (!d && at < 0 && !a->sed.open)
         return;
     wlwin_dim(w, 0.6);
     struct box m = a->modal;
     wlcard_pane(w, m.x, m.y, m.w, m.h, 11, lm_theme.accent, true);
     rbox(w, (struct box){ m.x - 1, m.y - 1, m.w + 2, m.h + 2 }, 11, lm_theme.accent);
     rbox(w, m, 10, lm_theme.card);
-    wlwin_text(w, m.x + 16, m.y + 14, d->name, 1, d->online ? lm_theme.text : lm_theme.text_dim, m.w - 190);
-    char info[300];
-    info_text(d, info, sizeof(info));
-    wlwin_text(w, m.x + 16, m.y + 36, info[0] ? info : d->product, 1, d->online ? lm_theme.text_dim : lm_theme.alert, m.w - 32);
+    char info[300], count[40];
+    const char *title;
+    if (a->sed.open) {
+        title = a->sed.is_new ? "New scene" : "Change the scene";
+        snprintf(info, sizeof(info), "%d thing%s to do", a->sed.s.n, a->sed.s.n == 1 ? "" : "s");
+    } else if (at >= 0) {
+        title = a->scene[at].name;
+        snprintf(count, sizeof(count), "%d thing%s to do", a->scene[at].n, a->scene[at].n == 1 ? "" : "s");
+        snprintf(info, sizeof(info), "A scene, %s", count);
+    } else {
+        title = d->name;
+        info_text(d, info, sizeof(info));
+        if (!info[0])
+            copy(info, sizeof(info), d->product);
+    }
+    wlwin_text(w, m.x + 16, m.y + 14, title, 1, !d || d->online ? lm_theme.text : lm_theme.text_dim, m.w - 190);
+    wlwin_text(w, m.x + 16, m.y + 36, info, 1, !d || d->online ? lm_theme.text_dim : lm_theme.alert, m.w - 32);
     static const char *const cells[] = { "electricity_left", "battery_percentage", "residual_electricity", NULL };
-    for (int i = 0; cells[i]; i++) {                            /* the device's own battery: a small cell filled to its level */
+    for (int i = 0; d && cells[i]; i++) {                       /* the device's own battery: a small cell filled to its level */
         struct tuya_dp *dp = tuya_find_dp(d, cells[i]);
         if (!dp || !dp->has || dp->type != TUYA_INT)
             continue;
@@ -2047,8 +2345,11 @@ static void paint(struct wlwin *w)
     } else if (a->msg[0]) {
         wlwin_text(w, PAD, sy + 7, a->msg, 1, a->msg_err ? lm_theme.error : lm_theme.caution, foot_w);
     } else {
-        wlwin_text(w, PAD, sy + 7, a->view == V_DEVICES ? "Click a card to open it, drag it to move it   F5 asks again   Esc closes" : "Esc closes", 1,
-                   lm_theme.text_dim, foot_w);
+        const char *hint = a->view == V_DEVICES ? "Click a card to open it, drag it to move it   N new scene   F5 asks again" : "Esc closes";
+        for (int i = 0; i < a->nctl; i++)
+            if (a->ctl[i].kind == C_SCENE && !modal_open(a) && in(a->px, a->py, a->ctl[i].b))
+                hint = "Click runs it   Right click: its times, change, delete";
+        wlwin_text(w, PAD, sy + 7, hint, 1, lm_theme.text_dim, foot_w);
     }
     if (a->view == V_DEVICES)
         paint_list_bar(a);
@@ -2056,7 +2357,7 @@ static void paint(struct wlwin *w)
     smart_rail(a, &L);
     wlrail_paint(w, &L, &a->ran, a->hovertool, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.button_hover, lm_theme.text_soft);
     wlrail_foot(w, &L, lm_theme.bar);
-    if (a->view == V_DEVICES && a->modal_dev[0])
+    if (a->view == V_DEVICES && modal_open(a))
         paint_modal(a);
     dump_state(a);
 }
@@ -2113,13 +2414,213 @@ static void rules_changed(struct app *a)
     sched_spawn_background();                                   /* (it ends by itself when another one runs or no rule is on) */
 }
 
-/* A button of the timetable. */
+static void close_modal(struct app *a);
+
+/* The scene's view. */
+static void open_scene(struct app *a, const char *id)
+{
+    char keep[12];
+    copy(keep, sizeof(keep), id);
+    close_modal(a);
+    copy(a->view_scene, sizeof(a->view_scene), keep);
+}
+
+/* The editor, for a scene of the list or (id = NULL) for a new one. */
+static void open_editor(struct app *a, const char *id)
+{
+    int at = id ? scene_find(a->scene, a->nscene, id) : -1;
+    if (at < 0 && a->nscene >= SCENE_MAX) {
+        set_msg(a, true, "There is no room for more scenes");
+        return;
+    }
+    close_modal(a);
+    a->sed.open = true;
+    a->sed.is_new = at < 0;
+    if (at >= 0) {
+        a->sed.s = a->scene[at];
+    } else {
+        memset(&a->sed.s, 0, sizeof(a->sed.s));
+        a->sed.s.desk = true;
+    }
+    wltext_end(a->sed.s.name);
+}
+
+static void editor_cancel(struct app *a)
+{
+    if (a->sed.is_new)
+        close_modal(a);
+    else
+        open_scene(a, a->sed.s.id);
+}
+
+static void editor_save(struct app *a)
+{
+    struct scene s = a->sed.s;
+    for (char *p = s.name; *p; p++)                             /* (one line, whatever was pasted) */
+        if ((unsigned char)*p < 0x20)
+            *p = ' ';
+    char *from = s.name + strspn(s.name, " ");
+    memmove(s.name, from, strlen(from) + 1);
+    for (size_t n = strlen(s.name); n && s.name[n - 1] == ' '; n--)
+        s.name[n - 1] = 0;
+    if (!s.name[0]) {
+        set_msg(a, true, "Give the scene a name");
+        return;
+    }
+    if (!s.n) {
+        set_msg(a, true, "Press what the scene should do first");
+        return;
+    }
+    int at = a->sed.is_new ? -1 : scene_find(a->scene, a->nscene, s.id);
+    if (at < 0) {
+        if (a->nscene >= SCENE_MAX) {
+            set_msg(a, true, "There is no room for more scenes");
+            return;
+        }
+        scene_new_id(a->scene, a->nscene, s.id, sizeof(s.id));
+        at = a->nscene++;
+    }
+    a->scene[at] = s;
+    if (!scene_save(a->scene, a->nscene))
+        set_msg(a, true, "The scenes could not be saved");
+    else
+        set_msg(a, false, "Saved the scene %s", s.name);
+    open_scene(a, s.id);
+}
+
+/* The state of the things as they are now becomes what the scene does: switches, lights and the blind's position. The robot and the feeder are
+ * left out (a scene taken from them would start or feed). */
+static void editor_current(struct app *a)
+{
+    struct scene *s = &a->sed.s;
+    bool full = false;
+    s->n = 0;
+    for (int i = 0; i < a->ndev; i++) {
+        struct tuya_dev *d = &a->dev[i];
+        if (!d->online || !strcmp(d->category, "sd"))
+            continue;
+        for (int k = 0; k < d->ndp; k++) {
+            struct tuya_dp *dp = &d->dp[k];
+            char v[24];
+            if (!controllable(dp) || !primary(d, dp) || !dp->has || !strcmp(dp->code, "manual_feed"))
+                continue;
+            if (dp->type == TUYA_BOOL && (!strncmp(dp->code, "switch", 6) || !strcmp(dp->code, "power")) && strcmp(dp->code, "switch_go") &&
+                strcmp(dp->code, "switch_charge"))
+                copy(v, sizeof(v), dp->b ? "true" : "false");
+            else if (dp->type == TUYA_INT)
+                snprintf(v, sizeof(v), "%.0f", slider_shown(a, d, dp));
+            else
+                continue;
+            full = !scene_act_set(s, d->id, dp->code, v) || full;
+        }
+    }
+    set_msg(a, full, full ? "Only %d things fit in a scene" : "Taken: %d things. Press a lit button to leave that one alone.", s->n);
+}
+
+static void editor_press(struct app *a, const struct ctl *c, const char *v)
+{
+    struct scene *s = &a->sed.s;
+    if (!strcmp(v, "save")) {
+        editor_save(a);
+    } else if (!strcmp(v, "cancel")) {
+        editor_cancel(a);
+    } else if (!strcmp(v, "desk")) {
+        s->desk = !s->desk;
+    } else if (!strcmp(v, "current")) {
+        editor_current(a);
+    } else if (!strncmp(v, "p:", 2) && c->dev >= 0) {
+        struct tuya_dev *d = &a->dev[c->dev];
+        build_actions(a, d);
+        int j = atoi(v + 2);
+        if (j < 0 || j >= a->nacts)
+            return;
+        const struct sact *act = &a->acts[j];
+        const char *code = d->dp[act->dp].code;
+        int k = scene_act_find(s, d->id, code);
+        if (k >= 0 && (act->is_int || !strcmp(s->act[k].value, act->value))) {
+            scene_act_remove(s, d->id, code);                   /* the lit button again: left alone */
+            return;
+        }
+        char value[24];
+        if (act->is_int)
+            snprintf(value, sizeof(value), "%.0f", slider_shown(a, d, &d->dp[act->dp]));
+        else
+            copy(value, sizeof(value), act->value);
+        if (!strcmp(code, "control"))                           /* a blind is told one of the two */
+            scene_act_remove(s, d->id, "percent_control");
+        else if (!strcmp(code, "percent_control"))
+            scene_act_remove(s, d->id, "control");
+        if (!scene_act_set(s, d->id, code, value))
+            set_msg(a, true, "Only %d things fit in a scene", SCENE_ACTS);
+    }
+}
+
+/* The editor's slider in the hand. */
+static void editor_slide(struct app *a, const struct ctl *c)
+{
+    char v[24];
+    snprintf(v, sizeof(v), "%.0f", slider_value(a, c));
+    scene_act_set(&a->sed.s, a->dev[c->dev].id, a->dev[c->dev].dp[c->dp].code, v);
+}
+
+static void rules_changed(struct app *a);
+
+/* The buttons of a scene's view. */
+static void scene_view_press(struct app *a, const char *v)
+{
+    int at = scene_find(a->scene, a->nscene, a->view_scene);
+    if (at < 0)
+        return;
+    bool sure = a->del_sure;
+    a->del_sure = false;
+    if (!strcmp(v, "run")) {
+        run_scene(a, a->view_scene);
+    } else if (!strcmp(v, "change")) {
+        char id[12];
+        copy(id, sizeof(id), a->view_scene);
+        open_editor(a, id);
+    } else if (!strcmp(v, "desk")) {
+        a->scene[at].desk = !a->scene[at].desk;
+        if (!scene_save(a->scene, a->nscene))
+            set_msg(a, true, "The scenes could not be saved");
+    } else if (!strcmp(v, "del")) {
+        if (!sure) {
+            a->del_sure = true;
+            return;
+        }
+        int left = 0;
+        for (int i = 0; i < a->nrules; i++)                     /* its times go with it */
+            if (!rule_for(a, NULL, &a->rules[i]))
+                a->rules[left++] = a->rules[i];
+        if (left != a->nrules) {
+            a->nrules = left;
+            rules_changed(a);
+        }
+        set_msg(a, false, "Deleted the scene %s", a->scene[at].name);
+        memmove(&a->scene[at], &a->scene[at + 1], sizeof(a->scene[0]) * (size_t)(a->nscene - at - 1));
+        a->nscene--;
+        if (!scene_save(a->scene, a->nscene))
+            set_msg(a, true, "The scenes could not be saved");
+        close_modal(a);
+    }
+}
+
+/* A button of the timetable, a scene's view or the editor. */
 static void press_edit(struct app *a, const struct ctl *c)
 {
-    struct tuya_dev *d = &a->dev[c->dev];
+    struct tuya_dev *d = c->dev >= 0 ? &a->dev[c->dev] : NULL;
     const char *v = c->value;
+    if (!strncmp(v, "x:", 2)) {
+        editor_press(a, c, v + 2);
+        return;
+    }
+    if (!strncmp(v, "s:", 2)) {
+        scene_view_press(a, v + 2);
+        return;
+    }
+    a->del_sure = false;
     int n = atoi(strchr(v, ':') ? strchr(v, ':') + 1 : "0");
-    if (!strcmp(v, "fav")) {
+    if (!strcmp(v, "fav") && d) {
         char ids[FAV_MAX][FAV_ID_MAX];
         bool pinned = fav_find(ids, fav_load(ids, FAV_MAX), d->id) >= 0;
         if (!fav_set(d->id, !pinned))
@@ -2145,7 +2646,7 @@ static void press_edit(struct app *a, const struct ctl *c)
         }
         a->ed.days = r->days;
         a->ed.num = atof(r->value);
-        if (act < 0) {                                          /* (the "As it is" that the layout puts at the end of the list) */
+        if (act < 0 && d) {                                     /* (the "As it is" that the layout puts at the end of the list) */
             build_actions(a, d);
             act = LM_MIN(a->nacts, 23);
         }
@@ -2159,7 +2660,7 @@ static void press_edit(struct app *a, const struct ctl *c)
         a->ed.offset = 0;
         a->ed.days = 0x7f;
         a->ed.action = 0;
-        for (int i = 0; i < a->nacts; i++)                      /* a number starts at what the device has now */
+        for (int i = 0; d && i < a->nacts; i++)                 /* a number starts at what the device has now */
             if (a->acts[i].is_int)
                 a->ed.num = slider_shown(a, d, &d->dp[a->acts[i].dp]);
     } else if (!strncmp(v, "tog:", 4) && n >= 0 && n < a->nrules) {
@@ -2194,7 +2695,7 @@ static void press_edit(struct app *a, const struct ctl *c)
     } else if (v[0] == 'a' && atoi(v + 1) < a->nacts) {
         bool same = a->ed.action == atoi(v + 1);
         a->ed.action = atoi(v + 1);
-        if (!same && a->acts[a->ed.action].is_int)
+        if (!same && d && a->acts[a->ed.action].is_int)
             a->ed.num = slider_shown(a, d, &d->dp[a->acts[a->ed.action].dp]);
     } else if (!strcmp(v, "cancel")) {
         a->ed.open = false;
@@ -2219,10 +2720,14 @@ static void press_edit(struct app *a, const struct ctl *c)
         r->sun = a->ed.kind;
         r->offset = a->ed.kind ? a->ed.offset : 0;
         r->days = a->ed.days & 0x7f;
-        copy(r->dev, sizeof(r->dev), d->id);
-        if (act->dp >= 0)
+        copy(r->dev, sizeof(r->dev), d ? d->id : SCHED_SCENE);
+        if (!d)
+            copy(r->code, sizeof(r->code), a->view_scene);
+        else if (act->dp >= 0)
             copy(r->code, sizeof(r->code), d->dp[act->dp].code);
-        if (act->dp < 0)
+        if (!d)
+            copy(r->value, sizeof(r->value), "run");
+        else if (act->dp < 0)
             ;                                                   /* "As it is": the code and the value stay */
         else if (act->is_int)
             snprintf(r->value, sizeof(r->value), "%lld", (long long)(a->ed.num < 0 ? a->ed.num - 0.5 : a->ed.num + 0.5));
@@ -2238,14 +2743,12 @@ static const struct ctl *drag_ctl(struct app *a)
 {
     for (int i = 0; i < a->nctl; i++) {
         const struct ctl *c = &a->ctl[i];
-        if (c->kind == C_SLIDER && c->modal == (a->modal_dev[0] != 0) && !strcmp(a->dev[c->dev].id, a->drag_dev) &&
+        if (c->kind == C_SLIDER && c->modal == modal_open(a) && !strcmp(a->dev[c->dev].id, a->drag_dev) &&
             !strcmp(a->dev[c->dev].dp[c->dp].code, a->drag_code))
             return c;
     }
     return NULL;
 }
-
-static void close_modal(struct app *a);
 
 /* Driving: the direction goes out now, "stop" when the button or the key is let go. */
 static void hold_start(struct app *a, struct tuya_dev *d, struct tuya_dp *dp, const char *value)
@@ -2279,6 +2782,9 @@ static void close_modal(struct app *a)
     a->ed.open = false;
     a->ed_drag = false;
     a->modal_dev[0] = 0;
+    a->view_scene[0] = 0;
+    a->sed.open = a->sed.drag = false;
+    a->del_sure = false;
     a->modal_scroll = 0;
     a->dragging = false;
     a->win.redraw = true;
@@ -2286,18 +2792,31 @@ static void close_modal(struct app *a)
 
 static void open_modal(struct app *a, const struct tuya_dev *d)
 {
+    close_modal(a);
     copy(a->modal_dev, sizeof(a->modal_dev), d->id);
-    a->ed.open = false;
-    a->modal_scroll = 0;
     a->win.redraw = true;
 }
 
 /* A press on a control. */
 static void press_ctl(struct app *a, const struct ctl *c)
 {
-    struct tuya_dev *d = &a->dev[c->dev];
     if (c->kind == C_DETAILS) {
-        open_modal(a, d);
+        open_modal(a, &a->dev[c->dev]);
+        return;
+    }
+    if (c->kind == C_SCENE) {
+        run_scene(a, c->value);
+        return;
+    }
+    if (c->kind == C_NAME) {
+        wltext_click(a->sed.s.name, (int)a->px - (c->b.x + 8), (a->win.mods & LM_MOD_SHIFT) != 0);
+        return;
+    }
+    if (c->kind == C_SCSLIDER) {
+        a->sed.drag = true;
+        copy(a->sed.drag_dev, sizeof(a->sed.drag_dev), a->dev[c->dev].id);
+        copy(a->sed.drag_code, sizeof(a->sed.drag_code), a->dev[c->dev].dp[c->dp].code);
+        editor_slide(a, c);
         return;
     }
     if (c->kind == C_CLOSE) {
@@ -2315,6 +2834,7 @@ static void press_ctl(struct app *a, const struct ctl *c)
         a->ed.num = slider_value(a, c);
         return;
     }
+    struct tuya_dev *d = &a->dev[c->dev];
     struct tuya_dp *dp = &d->dp[c->dp];
     if (!d->online) {
         set_msg(a, true, "%s is offline", d->name);
@@ -2351,12 +2871,13 @@ static void press_devices(struct app *a)
 {
     struct wlwin *w = &a->win;
     build_layout(a);
-    if (a->modal_dev[0]) {                                      /* the device view takes every click; one beside it closes it */
+    if (modal_open(a)) {                                        /* the view takes every click; one beside it closes it (not the editor: it holds work) */
         if (!in(a->px, a->py, a->modal)) {
-            close_modal(a);
+            if (!a->sed.open)
+                close_modal(a);
             return;
         }
-        if (a->py < a->modal.y + 34 && a->px < a->modal.x + a->modal.w - 100) {            /* the title strip (not the Close button): take hold of the view */
+        if (a->py < a->modal.y + 34 && a->px < a->modal.x + a->modal.w - (a->sed.open ? 164 : 100)) {            /* the title strip (not the Close button): take hold of the view */
             if (wlwin_pane_shown(w, WLPANE_CARD)) {             /* a window of its own: the compositor carries it */
                 wlwin_pane_move(w, WLPANE_CARD);
                 return;
@@ -2388,6 +2909,8 @@ static void press_devices(struct app *a)
         wlrail_press(&a->ran, tool, wlrail_now());
         if (tool == R_REFRESH)
             refresh(a);
+        else if (tool == R_SCENE)
+            open_editor(a, NULL);
         else
             a->confirm_logout = true;
         return;
@@ -2448,6 +2971,52 @@ static void card_release(struct app *a)
     order_save(ord, a->ndev);
 }
 
+static void press_right(struct app *a)
+{
+    build_layout(a);
+    for (int i = 0; i < a->nctl; i++) {
+        const struct ctl *c = &a->ctl[i];
+        if (c->hidden || c->modal != modal_open(a) || !in(a->px, a->py, c->b))
+            continue;
+        if (c->kind == C_SCENE && a->py >= HEAD_H - 4 && a->py < a->win.bh - FOOT_H) {
+            copy(a->menu_scene, sizeof(a->menu_scene), c->value);
+            a->menu_kind = 1;
+            if (!wlwin_menu(&a->win, "Run\nTimes and details...\nChange..."))
+                open_scene(a, a->menu_scene);                   /* (no menu here: the view has it all) */
+            return;
+        }
+        if (c->kind == C_NAME) {
+            a->menu_kind = 2;
+            wlwin_menu(&a->win, wltext_menu(a->sed.s.name));
+            return;
+        }
+    }
+}
+
+static void menu_event(struct wlwin *w, int index)
+{
+    struct app *a = w->data;
+    w->redraw = true;
+    if (index < 0)
+        return;
+    if (a->menu_kind == 2 && a->sed.open)
+        wltext_menu_do(&a->clip, a->sed.s.name, sizeof(a->sed.s.name), index);
+    else if (a->menu_kind == 1 && scene_find(a->scene, a->nscene, a->menu_scene) >= 0) {
+        if (index == 0)
+            run_scene(a, a->menu_scene);
+        else if (index == 1)
+            open_scene(a, a->menu_scene);
+        else if (index == 2)
+            open_editor(a, a->menu_scene);
+    }
+}
+
+static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
+{
+    struct app *a = w->data;
+    wlclip_global(&a->clip, w, name, iface, ver);
+}
+
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
@@ -2456,7 +3025,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->px = lm_fixed_to_double(args[base].f);
         a->py = lm_fixed_to_double(args[base + 1].f);
         a->hovertool = rail_under(a);
-        if (w->card_drag && a->modal_dev[0]) {                  /* the device view follows the pointer */
+        if (w->card_drag && modal_open(a)) {                  /* the device view follows the pointer */
             double nx = a->px - w->card_gx, ny = a->py - w->card_gy;
             nx = LM_CLAMP(nx, 0.0, (double)LM_MAX(w->bw - a->modal.w, 0));
             ny = LM_CLAMP(ny, 0.0, (double)LM_MAX(w->bh - a->modal.h, 0));
@@ -2497,6 +3066,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
                 slider_set(a, c);
         }
         sbar_drag(a);
+        for (int i = 0; a->sed.drag && i < a->nctl; i++)
+            if (a->ctl[i].kind == C_SCSLIDER && !strcmp(a->dev[a->ctl[i].dev].id, a->sed.drag_dev) &&
+                !strcmp(a->dev[a->ctl[i].dev].dp[a->ctl[i].dp].code, a->sed.drag_code))
+                editor_slide(a, &a->ctl[i]);
         for (int i = 0; a->ed_drag && i < a->nctl; i++)
             if (a->ctl[i].kind == C_EDSLIDER)
                 a->ed.num = slider_value(a, &a->ctl[i]);
@@ -2513,14 +3086,20 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
     if (op == LM_WL_POINTER_EVT_AXIS && args[1].u == 0) {
         double v = lm_fixed_to_double(args[2].f);
-        int *scroll = a->modal_dev[0] ? &a->modal_scroll : &a->scroll;
+        int *scroll = modal_open(a) ? &a->modal_scroll : &a->scroll;
         *scroll += v > 0 ? 48 : v < 0 ? -48 : 0;
         w->redraw = true;
         return;
     }
-    if (op != LM_WL_POINTER_EVT_BUTTON || args[2].u != 272)
+    if (op != LM_WL_POINTER_EVT_BUTTON || (args[2].u != 272 && args[2].u != 273))
         return;
     w->redraw = true;
+    a->clip.serial = args[0].u;
+    if (args[2].u == 273) {                                     /* the right button: a scene's menu, the name field's */
+        if (args[3].u != 0 && a->view == V_DEVICES)
+            press_right(a);
+        return;
+    }
     if (args[3].u == 0) {                                       /* let go: a dragged slider is sent now, a held direction stops */
         w->card_drag = false;
         wlrail_release(&a->ran);
@@ -2535,6 +3114,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         }
         hold_end(a);
         a->ed_drag = false;
+        a->sed.drag = false;
         a->sb_drag = 0;
         return;
     }
@@ -2599,14 +3179,34 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         }
         return;
     }
-    int *scroll = a->modal_dev[0] ? &a->modal_scroll : &a->scroll;
+    a->clip.serial = args[0].u;
+    int *scroll = modal_open(a) ? &a->modal_scroll : &a->scroll;
+    if (a->sed.open) {                                          /* the keys are the name field's */
+        if (ks == LM_KS_Escape)
+            editor_cancel(a);
+        else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter)
+            editor_save(a);
+        else if (ks == LM_KS_Down)
+            *scroll += 48;
+        else if (ks == LM_KS_Up)
+            *scroll -= 48;
+        else if (ks == LM_KS_Page_Down)
+            *scroll += page;
+        else if (ks == LM_KS_Page_Up)
+            *scroll -= page;
+        else if (wltext_edit(&a->clip, a->sed.s.name, sizeof(a->sed.s.name), ks, w->mods))
+            *scroll = 0;                                        /* (what is typed is seen) */
+        return;
+    }
     const char *drive = drive_key(a, ks, &d, &dp);
     if (drive)
         hold_start(a, d, dp, drive);
     else if (ks == LM_KS_Escape && a->confirm_logout)
         a->confirm_logout = false;
-    else if (ks == LM_KS_Escape && a->modal_dev[0])
+    else if (ks == LM_KS_Escape && modal_open(a))
         close_modal(a);
+    else if ((ks == 'n' || ks == 'N') && !modal_open(a) && !a->confirm_logout && a->loaded)
+        open_editor(a, NULL);
     else if (ks == LM_KS_Escape)
         w->running = false;
     else if (ks == LM_KS_F1 + 4 || ks == 'r' || ks == 'R')
@@ -2622,7 +3222,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     else if (ks == LM_KS_Home)
         *scroll = 0;
     else if (ks == LM_KS_End)
-        *scroll = a->modal_dev[0] ? a->modal_h : a->content_h;
+        *scroll = modal_open(a) ? a->modal_h : a->content_h;
 }
 
 /* ---- the worker's answers, the clocks ------------------------------------------------------------------------------------------------------ */
@@ -2635,8 +3235,12 @@ static void apply_results(struct app *a)
     memset(&a->res, 0, sizeof(a->res));
     pthread_mutex_unlock(&a->lock);
     uint64_t now = mono_ms();
-    if (r.have_msg && (r.msg[0] || !a->msg_err || r.have_devs))
+    if (r.have_msg && (r.msg[0] || (now >= a->msg_until && (!a->msg_err || r.have_devs))))
         set_msg(a, r.msg_err, "%s", r.msg);
+    if (r.have_scene) {
+        set_msg(a, r.scene_err, "%s", r.scene_msg);
+        a->msg_until = now + 10000;
+    }
     if (r.qr_done) {
         a->qr_busy = false;
         if (r.qr[0] && a->view != V_DEVICES) {
@@ -2746,6 +3350,10 @@ static void tick(struct app *a)
             open_modal(a, d);
     }
     apply_results(a);
+    if (a->ran_id[0] && now >= a->ran_until) {
+        a->ran_id[0] = 0;
+        a->win.redraw = true;
+    }
     pthread_mutex_lock(&a->lan_lock);
     if (a->lan_changed) {
         a->lan_changed = false;
@@ -2831,15 +3439,26 @@ static int cmd_list(void)
 }
 
 /* The pinned devices with what the desktop card needs, one tab separated line each:
+ *   scene ID NAME                          a scene with a button on the card (they come first)
  *   fav ID NAME ONLINE KIND CODE VALUE     KIND switch (VALUE 0 / 1), blind (VALUE the position in per cent, -1 unknown; CODE control) or none */
+static void print_desk_scenes(const struct scene *s, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (s[i].desk)
+            printf("scene\t%s\t%s\n", s[i].id, s[i].name);
+}
+
 static int cmd_favourites(void)
 {
     static struct tuya_session s;
     static struct tuya_dev dev[TUYA_MAX_DEV];
     char ids[FAV_MAX][FAV_ID_MAX], err[200] = "";
     int nf = fav_load(ids, FAV_MAX), n = 0;
+    static struct scene scene[SCENE_MAX];
+    int ns = scene_load(scene, SCENE_MAX);
     if (!nf) {
         printf("favs\t0\n");
+        print_desk_scenes(scene, ns);
         return 0;
     }
     if (need_login(&s))
@@ -2849,6 +3468,7 @@ static int cmd_favourites(void)
         return 1;
     }
     printf("favs\t%d\n", nf);
+    print_desk_scenes(scene, ns);
     for (int f = 0; f < nf; f++)
         for (int i = 0; i < n; i++) {
             struct tuya_dev *d = &dev[i];
@@ -3038,37 +3658,28 @@ static int cmd_set_local(const char *id, const char *code, const char *value)
     return 0;
 }
 
-/* The scenes of the app as text, or one of them started (by its name or id): for a key binding. */
-static int cmd_scene(const char *which)
+/* The scenes as text, or one of them run (by its name or id) through the cloud: for a key binding and the desktop card. */
+static int cmd_scene(const char *which, bool tell)
 {
-    static struct tuya_session s;
-    static struct tuya_scene scene[TUYA_MAX_SCENE];
-    int n = 0;
-    char err[200] = "";
-    if (need_login(&s))
-        return 1;
-    if (!tuya_load_scenes(&s, scene, &n, err, sizeof(err))) {
-        fprintf(stderr, "mellagui-smart: %s\n", err);
-        return 1;
+    static struct scene scene[SCENE_MAX];
+    int n = scene_load(scene, SCENE_MAX);
+    if (!which) {
+        for (int i = 0; i < n; i++)
+            printf("%s  %s  (%d thing%s to do%s)\n", scene[i].id, scene[i].name, scene[i].n, scene[i].n == 1 ? "" : "s", scene[i].desk ? ", on the desktop" : "");
+        printf("%d scene%s\n", n, n == 1 ? "" : "s");
+        return 0;
     }
-    for (int i = 0; i < n; i++) {
-        if (!which) {
-            printf("%s  %s%s\n", scene[i].id, scene[i].name, scene[i].enabled ? "" : "  (off)");
-        } else if (!strcasecmp(scene[i].name, which) || !strcmp(scene[i].id, which)) {
-            if (!tuya_trigger_scene(&s, scene[i].home, scene[i].id, err, sizeof(err))) {
-                fprintf(stderr, "mellagui-smart: %s\n", err);
-                return 1;
-            }
-            printf("started %s\n", scene[i].name);
-            return 0;
-        }
-    }
-    if (which) {
-        fprintf(stderr, "mellagui-smart: the account has no scene '%s' (--scenes lists them)\n", which);
+    int at = scene_find(scene, n, which);
+    if (at < 0) {
+        fprintf(stderr, "mellagui-smart: there is no scene '%s' (--scenes lists them)\n", which);
         return 1;
     }
-    printf("%d scene%s\n", n, n == 1 ? "" : "s");
-    return 0;
+    char summary[300];
+    int failed = scene_run_cloud(&scene[at], summary, sizeof(summary));
+    printf("%s\n", summary);
+    if (failed && tell)
+        sched_notify(summary);
+    return failed ? 1 : 0;
 }
 
 /* --sun: today's sunrise and sunset where the timetable works them out. */
@@ -3165,7 +3776,7 @@ static int cmd_scan(int seconds)
 
 static int selftest(void)
 {
-    int bad = tuya_selftest() + qr_selftest() + tuyalan_selftest() + sched_selftest() + sun_selftest();
+    int bad = tuya_selftest() + qr_selftest() + tuyalan_selftest() + sched_selftest() + scene_selftest() + sun_selftest();
 #define CHECK(cond, ...) do { if (!(cond)) { fprintf(stderr, "mellagui-smart selftest: " __VA_ARGS__); fputc('\n', stderr); bad++; } } while (0)
     char s[64];
     pretty("switch_1", s, sizeof(s));
@@ -3287,9 +3898,9 @@ int main(int argc, char **argv)
         return cmd_sun();
     }
     if (argc == 2 && !strcmp(argv[1], "--scenes"))
-        return cmd_scene(NULL);
-    if (argc == 3 && !strcmp(argv[1], "--scene"))
-        return cmd_scene(argv[2]);
+        return cmd_scene(NULL, false);
+    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--notify"))) && !strcmp(argv[1], "--scene"))
+        return cmd_scene(argv[2], argc == 4);
     if (argc == 3 && !strcmp(argv[1], "--login"))
         return cmd_login(argv[2]);
     if (argc == 2 && !strcmp(argv[1], "--logout")) {
@@ -3315,7 +3926,7 @@ int main(int argc, char **argv)
         argc = 1;
     }
     if (argc > 1) {
-        fprintf(stderr, "usage: mellagui-smart [--device ID] | --list | --favourites | --fav ID on|off | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME | --background | --sun | --place LAT LON|auto | --login USERCODE | --logout | --qr TEXT | --selftest\n");
+        fprintf(stderr, "usage: mellagui-smart [--device ID] | --list | --favourites | --fav ID on|off | --set ID CODE VALUE | --set-local ID CODE VALUE | --get-local ID | --scan [SECONDS] | --scenes | --scene NAME [--notify] | --background | --sun | --place LAT LON|auto | --login USERCODE | --logout | --qr TEXT | --selftest\n");
         return 2;
     }
     const char *rt = getenv("XDG_RUNTIME_DIR"), *disp = getenv("WAYLAND_DISPLAY");
@@ -3349,7 +3960,7 @@ int main(int argc, char **argv)
             (void)lfd;
     }
     signal(SIGUSR1, on_usr1);
-    static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event };
+    static const struct wlwin_ops ops = { .paint = paint, .global = global_event, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     static struct app a;
     a.dump = getenv("MELLAGUI_SMART_DUMP");
     a.cdrag = a.cdrop = -1;
@@ -3369,6 +3980,7 @@ int main(int argc, char **argv)
     pthread_mutex_init(&a.lan_io, NULL);
     pthread_cond_init(&a.cond, NULL);
     a.nrules = sched_load(a.rules, SCHED_MAX);
+    a.nscene = scene_load(a.scene, SCENE_MAX);
     bool logged_in = tuya_session_load(&a.sess);
     copy(a.code, sizeof(a.code), a.sess.user_code);
     copy(a.username, sizeof(a.username), a.sess.username);
@@ -3381,6 +3993,7 @@ int main(int argc, char **argv)
         wlwin_destroy(&a.win);
         return 1;
     }
+    wlclip_attach(&a.clip, &a.win);
     if (pthread_create(&a.thread, NULL, worker, &a) != 0) {
         fprintf(stderr, "mellagui-smart: no thread: %s\n", strerror(errno));
         wlwin_destroy(&a.win);

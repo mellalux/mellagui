@@ -23,6 +23,7 @@ struct lm_smart {
     unsigned gen;                       /* bumped by every click: a poll that began earlier is stale about that device */
     unsigned poll_gen;
     struct lm_timer *soon;              /* a poll a moment after a command */
+    struct lm_timer *unlit;             /* a pressed scene button goes dark again */
 };
 
 static void notify(struct lm_smart *s)
@@ -62,6 +63,7 @@ static void parse(struct lm_smart *s, const char *text)
     struct lm_smart_state ns;
     memset(&ns, 0, sizeof(ns));
     ns.ready = true;
+    ns.ran = s->st.ran;
     char *copy = strdup(text), *save = NULL;
     if (!copy)
         return;
@@ -75,6 +77,11 @@ static void parse(struct lm_smart *s, const char *text)
             if (!p)
                 break;
             *p++ = 0;
+        }
+        if (k >= 3 && !strcmp(f[0], "scene") && ns.nscene < LM_SMART_SCENES) {
+            struct lm_smart_scene *sc = &ns.scene[ns.nscene++];
+            snprintf(sc->id, sizeof(sc->id), "%s", f[1]);
+            snprintf(sc->name, sizeof(sc->name), "%s", f[2]);
         }
         if (k < 7 || strcmp(f[0], "fav"))
             continue;
@@ -123,7 +130,7 @@ static void parse(struct lm_smart *s, const char *text)
         s->st = ns;
         return;
     }
-    if (!ns.n)
+    if (!ns.n && !ns.nscene)
         snprintf(ns.note, sizeof(ns.note), "Nothing is pinned yet. In Smart home open a device and press \"Show it on the desktop\".");
     s->st = ns;
 }
@@ -158,6 +165,13 @@ static void poll_cb(void *data)
         lm_smart_refresh(s);
 }
 
+static void unlit_cb(void *data)
+{
+    struct lm_smart *s = data;
+    s->st.ran = -1;
+    notify(s);
+}
+
 static void soon_cb(void *data)
 {
     struct lm_smart *s = data;
@@ -175,6 +189,8 @@ struct lm_smart *lm_smart_create(struct lm_loop *loop, void (*changed)(void *), 
     s->data = data;
     s->poll = lm_loop_add_timer(loop, poll_cb, s);
     s->soon = lm_loop_add_timer(loop, soon_cb, s);
+    s->unlit = lm_loop_add_timer(loop, unlit_cb, s);
+    s->st.ran = -1;
     return s;
 }
 
@@ -188,6 +204,8 @@ void lm_smart_destroy(struct lm_smart *s)
         lm_timer_destroy(s->poll);
     if (s->soon)
         lm_timer_destroy(s->soon);
+    if (s->unlit)
+        lm_timer_destroy(s->unlit);
     free(s);
 }
 
@@ -254,6 +272,23 @@ void lm_smart_open_card(struct lm_smart *s, int index)
     spawn_detached(argv);
 }
 
+void lm_smart_scene_run(struct lm_smart *s, int index)
+{
+    if (!s || index < 0 || index >= s->st.nscene)
+        return;
+    char prog[512];
+    program(prog, sizeof(prog));
+    char *argv[] = { prog, (char *)"--scene", s->st.scene[index].id, (char *)"--notify", NULL };
+    lm_proc_run(s->loop, argv, 60000, NULL, NULL);                  /* what does not go out is said by a notification */
+    s->gen++;
+    s->st.ran = index;
+    if (s->unlit)
+        lm_timer_arm_ms(s->unlit, LM_SMART_SCENE_MS, 0);
+    if (s->soon)
+        lm_timer_arm_ms(s->soon, 6000, 0);
+    notify(s);
+}
+
 void lm_smart_toggle(struct lm_smart *s, int index)
 {
     if (!s || index < 0 || index >= s->st.n || s->st.item[index].kind != LM_SMART_SWITCH || !s->st.item[index].online)
@@ -311,6 +346,22 @@ static int group_cols(int w)
     return n < 1 ? 1 : n;
 }
 
+/* The scene buttons: rows of equal cells, as many side by side as fit. */
+static int scene_cols(const struct lm_smart_state *st, int w)
+{
+    int n = (w - 16) / 88;
+    n = n < 1 ? 1 : n;
+    return st->nscene < n ? st->nscene : n;
+}
+
+static int scenes_height(const struct lm_smart_state *st, int w)
+{
+    if (!st->nscene)
+        return 0;
+    int cols = scene_cols(st, w);
+    return (st->nscene + cols - 1) / cols * LM_SMART_SCENE_H + 4;
+}
+
 /* The height one item (or a whole group, on its first item) takes, and the gap that follows it. */
 static int block_height(const struct lm_smart_state *st, int i, int w)
 {
@@ -328,6 +379,13 @@ void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_sm
 {
     memset(l, 0, sizeof(*l));
     int ry = y + title_h + 4, bottom = y + h - 4;
+    for (int i = 0; i < st->nscene && i < LM_SMART_SCENES; i++) {
+        int cols = scene_cols(st, w), cw = (w - 16) / cols;
+        struct lm_smart_rect r = { x + 8 + (i % cols) * cw + 2, ry + (i / cols) * LM_SMART_SCENE_H + 2, cw - 4, LM_SMART_SCENE_H - 4 };
+        if (r.y + r.h <= bottom)
+            l->scene[i] = r;
+    }
+    ry += scenes_height(st, w);
     for (int i = 0; i < st->n && i < LM_SMART_MAX;) {
         const struct lm_smart_item *it = &st->item[i];
         int rh = block_height(st, i, w);
@@ -367,7 +425,7 @@ void lm_smart_layout(int x, int y, int w, int h, int title_h, const struct lm_sm
 
 int lm_smart_height(const struct lm_smart_state *st, int w, int title_h)
 {
-    int h = title_h + 4;
+    int h = title_h + 4 + scenes_height(st, w);
     for (int i = 0; i < st->n && i < LM_SMART_MAX; i++)
         h += block_height(st, i, w);
     return h;
@@ -389,6 +447,11 @@ static bool inside(const struct lm_smart_rect *r, int px, int py)
 
 enum lm_smart_part lm_smart_hit(const struct lm_smart_layout *l, const struct lm_smart_state *st, int px, int py, int *index)
 {
+    for (int i = 0; i < st->nscene && i < LM_SMART_SCENES; i++)
+        if (l->scene[i].w > 0 && inside(&l->scene[i], px, py)) {
+            *index = i;
+            return LM_SMART_SCENE_PART;
+        }
     for (int i = 0; i < l->rows && i < st->n; i++) {
         if (st->item[i].kind == LM_SMART_SWITCH && st->item[i].online && inside(st->item[i].label[0] ? &l->row[i] : &l->sw[i], px, py)) {
             *index = i;

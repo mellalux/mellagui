@@ -423,7 +423,7 @@ int lm_theme_list(char names[][LM_THEME_NAME_MAX], char descs[][80], int max)
         memcpy(found[j + 1], tmp, sizeof(tmp));
     }
     for (int i = 0; i < nf && n < max; i++, n++) {
-        snprintf(names[n], LM_THEME_NAME_MAX, "%s", found[i]);
+        snprintf(names[n], LM_THEME_NAME_MAX, "%.*s", LM_THEME_NAME_MAX - 1, found[i]);
         if (descs)
             snprintf(descs[n], 80, "A theme file.");
     }

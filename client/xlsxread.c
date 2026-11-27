@@ -4254,8 +4254,8 @@ static int cfs_find_stream(const struct cfs *f, const char *want, uint32_t *star
 /* A whole stream by name (malloc'd, *n bytes, at most `cap`); NULL when it is missing. */
 static uint8_t *ole_stream(const struct cfs *f, const char *name, size_t cap, size_t *n)
 {
-    uint32_t start, rstart;
-    uint64_t size, rsize;
+    uint32_t start = 0, rstart = 0;
+    uint64_t size = 0, rsize = 0;
     if (!cfs_find_stream(f, name, &start, &size, &rstart, &rsize) || size > cap)
         return NULL;
     struct cstream cs;

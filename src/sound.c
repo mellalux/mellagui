@@ -662,7 +662,8 @@ void lm_sound_startup(void)
         fd = open(wav, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0)
             _exit(1);
-        uint8_t h[44] = "RIFF....WAVEfmt \x10\0\0\0\x01\0\x01\0........\x02\0\x10\0data....";
+        uint8_t h[44];                  /* (the literal is these 44 bytes and a NUL that has no room) */
+        memcpy(h, "RIFF....WAVEfmt \x10\0\0\0\x01\0\x01\0........\x02\0\x10\0data....", sizeof(h));
         le32(h + 4, (uint32_t)(36 + total));
         le32(h + 24, LM_CHIME_RATE);
         le32(h + 28, LM_CHIME_RATE * 2);

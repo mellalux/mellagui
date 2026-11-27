@@ -30478,6 +30478,10 @@ class TestSmart(Base):
         self.type_keys(self.CODE_KEYS[:3])
         self.edit('x:current')
         self.wait(lambda: self.lit('plug1', 'switch_1', 'Off') and self.lit('blind1', 'percent_control', 'Set'), 'the state as it is')
+        self.pick('plug1', 'switch_1', 'Toggle')                                # a third choice beside On and Off
+        self.wait(lambda: self.lit('plug1', 'switch_1', 'Toggle') and not self.lit('plug1', 'switch_1', 'Off'), 'toggle instead of off')
+        self.pick('plug1', 'switch_1', 'Off')
+        self.wait(lambda: self.lit('plug1', 'switch_1', 'Off'), 'off again')
         self.edit('x:save')
         self.wait(lambda: os.path.exists(conf), 'saved')
         text = open(conf).read()
@@ -30508,6 +30512,22 @@ class TestSmart(Base):
         time.sleep(0.6)
         self.assertEqual(self.log().count('/commands'), 3)                      # one from --scene, two of the rule, once
         pr.kill()
+        pr.wait()
+        with open(conf, 'a') as f:
+            f.write('scene s3 - Flip\ndo plug1 switch_1 toggle\n')
+        for want in (True, False):                                              # a toggle goes the other way each time
+            code, out = self.cli('--scene', 'Flip')
+            self.assertEqual((code, self.state()['plug1']['status']['switch_1']), (0, want), out)
+        with open(os.path.join(self.dir, 'cfg', 'mellagui', 'smart-schedule.conf'), 'w') as f:
+            f.write('on 07:30 MTWTFSS plug1 switch_1 toggle\n')
+        pr = subprocess.Popen([self.exe, '--background'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
+        self.wait(lambda: self.state()['plug1']['status']['switch_1'] is True, 'the timetable toggles')
+        time.sleep(0.6)
+        self.assertTrue(self.state()['plug1']['status']['switch_1'])            # once in its minute
+        pr.kill()
+        c.tap(1)                                                                # the window's own run of a scene with a toggle
+        self.wait(lambda: self.view().get('modal') == '-', 'the editor is closed')
 
     def edits(self):
         """The buttons of the timetable in the open device view: {value: (x, y, lit, label)}."""

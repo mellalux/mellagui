@@ -194,9 +194,21 @@ int scene_run(const struct scene *s, struct tuya_dev *dev, int ndev, scene_send_
             continue;
         }
         char json[100], err[200] = "", why[240];
-        scene_value_json(tuya_find_dp(d, c->code), c->value, json, sizeof(json));
+        struct tuya_dp *dp = tuya_find_dp(d, c->code);
+        const char *value = c->value;
+        if (!strcmp(value, "toggle")) {                         /* the other way from what the device says now */
+            if (!dp || !dp->has || dp->type != TUYA_BOOL) {
+                failed++;
+                add(trouble, sizeof(trouble), d->name, ": its state is not known");
+                continue;
+            }
+            value = dp->b ? "false" : "true";
+        }
+        scene_value_json(dp, value, json, sizeof(json));
         if (send(ud, c->dev, c->code, json, err, sizeof(err))) {
             done++;
+            if (dp && dp->type == TUYA_BOOL)
+                dp->b = !strcmp(value, "true");                 /* (what the list says now, for the next toggle) */
         } else {
             failed++;
             snprintf(why, sizeof(why), ": %.120s", err[0] ? err : "did not go out");
@@ -280,6 +292,19 @@ int scene_selftest(void)
     int failed = scene_run(&s[0], dev, 2, test_send, NULL, sum, sizeof(sum));
     CHECK(failed == 3 && g_sent == 2 && !strcmp(g_log, "d1 switch_1 true;d1 control \"close\";"), "the actions go out in order, not to an offline device");
     CHECK(!strcmp(sum, "Good night: 2 done, Tree is offline, a device is gone from the account"), "the summary");
+    static struct scene t;
+    snprintf(t.name, sizeof(t.name), "Flip");
+    scene_act_set(&t, "d1", "switch_1", "toggle");
+    dev[0].ndp = 1;
+    snprintf(dev[0].dp[0].code, sizeof(dev[0].dp[0].code), "switch_1");
+    dev[0].dp[0].type = TUYA_BOOL;
+    CHECK(scene_run(&t, dev, 1, test_send, NULL, sum, sizeof(sum)) == 1 && !strcmp(sum, "Flip: 0 done, Blind: its state is not known"),
+          "a switch whose state is not known is not toggled");
+    dev[0].dp[0].has = true;
+    g_log[0] = 0;
+    scene_run(&t, dev, 1, test_send, NULL, sum, sizeof(sum));
+    scene_run(&t, dev, 1, test_send, NULL, sum, sizeof(sum));
+    CHECK(!strcmp(g_log, "d1 switch_1 true;d1 switch_1 false;"), "toggle goes the other way each time");
     scene_act_remove(&s[0], "d1", "switch_1");
     CHECK(s[0].n == 4 && scene_act_find(&s[0], "d1", "switch_1") < 0 && scene_act_find(&s[0], "d1", "control") == 0, "removing an action");
 #undef CHECK

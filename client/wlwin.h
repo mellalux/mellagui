@@ -205,6 +205,8 @@ void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int 
 /* A coloured button as a bead of water (dark rim, light gathered towards the bottom, a small glint): the look of every MellaGUI program's coloured buttons.
  * Same arguments as wlwin_round_fill. */
 void wlwin_drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t rgb);
+/* The same drop on a card with an alpha channel too (wlwin_drop paints those plain). */
+void wlwin_card_drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t rgb);
 /* Everything drawn so far mixed with black: t = 0 nothing, 1 all black (a modal card dims the page behind it). */
 void wlwin_dim(struct wlwin *w, double t);
 /* An XRGB / ARGB picture of sw x sh pixels (stride in pixels) scaled to the logical rectangle (x, y, width, height). */

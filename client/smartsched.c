@@ -286,20 +286,30 @@ int sched_background(void)
                 f->tries = 0;
                 f->done = false;
             }
-            if (!strcmp(r->dev, SCHED_SCENE)) {                 /* a scene: tried again only while nothing at all went out (a feeder must not feed twice) */
-                static struct scene scene[SCENE_MAX];
-                int ns = scene_load(scene, SCENE_MAX), at = scene_find(scene, ns, r->code);
-                if (at < 0) {
-                    printf("%02d:%02d the scene %s is gone\n", h, m, r->code);
-                    fflush(stdout);
-                    f->done = true;
-                    continue;
+            bool toggle = !strcmp(r->value, "toggle");
+            if (toggle || !strcmp(r->dev, SCHED_SCENE)) {       /* a scene (or a toggle, a scene of one thing): tried again only while nothing at all
+                                                                 * went out (a feeder must not feed twice, a switch not flip back) */
+                static struct scene scene[SCENE_MAX], one;
+                const struct scene *run = &one;
+                if (toggle) {
+                    memset(&one, 0, sizeof(one));
+                    sched_time_text(r, one.name, sizeof(one.name));
+                    scene_act_set(&one, r->dev, r->code, r->value);
+                } else {
+                    int ns = scene_load(scene, SCENE_MAX), at = scene_find(scene, ns, r->code);
+                    if (at < 0) {
+                        printf("%02d:%02d the scene %s is gone\n", h, m, r->code);
+                        fflush(stdout);
+                        f->done = true;
+                        continue;
+                    }
+                    run = &scene[at];
                 }
                 char summary[300];
-                int res = scene_run_cloud(&scene[at], summary, sizeof(summary));
+                int res = scene_run_cloud(run, summary, sizeof(summary));
                 f->tries++;
                 f->done = res >= 0 || f->tries >= 3;
-                printf("%02d:%02d scene %s\n", h, m, summary);
+                printf("%02d:%02d %s %s\n", h, m, toggle ? "toggle" : "scene", summary);
                 fflush(stdout);
                 if (f->done && res)
                     sched_notify(summary);

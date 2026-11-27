@@ -75,6 +75,7 @@
 #define PAD 12
 #define ROW 30
 #define MAX_CTL 600
+#define MAX_ACTS 48                     /* what a device can be told by a rule or a scene (a strip: on, off and toggle for every switch) */
 #define MAX_HOLD 16
 #define MAX_JOBS 16
 #define HOLD_MS 5000
@@ -119,6 +120,7 @@ enum job_type { J_QR_START, J_QR_POLL, J_LOAD, J_POLL, J_CMD, J_SCENE, J_LOGOUT,
 struct job {
     enum job_type type;
     char a[64], b[64], c[200];
+    struct scene *scene;                /* J_SCENE: what to run, the worker frees it */
 };
 
 /* What the worker hands to the window (under app.lock). */
@@ -209,7 +211,7 @@ struct app {
         int dp;
         bool is_int;
         char value[24], label[64];
-    } acts[24];
+    } acts[MAX_ACTS];
     int nacts;
     bool ed_drag;
     bool holding;                       /* a C_HOLD button or an arrow key is down: "stop" goes out when it is let go */
@@ -483,6 +485,24 @@ static bool push_job(struct app *a, enum job_type type, const char *x, const cha
         copy(j->a, sizeof(j->a), x ? x : "");
         copy(j->b, sizeof(j->b), y ? y : "");
         copy(j->c, sizeof(j->c), z ? z : "");
+        j->scene = NULL;
+        ok = true;
+        pthread_cond_signal(&a->cond);
+    }
+    pthread_mutex_unlock(&a->lock);
+    return ok;
+}
+
+/* A scene for the worker, which takes the (malloc'd) copy over; false when the queue is full. */
+static bool push_scene(struct app *a, struct scene *s)
+{
+    bool ok = false;
+    pthread_mutex_lock(&a->lock);
+    if (a->njobs < MAX_JOBS) {
+        struct job *j = &a->jobs[a->njobs++];
+        memset(j, 0, sizeof(*j));
+        j->type = J_SCENE;
+        j->scene = s;
         ok = true;
         pthread_cond_signal(&a->cond);
     }
@@ -630,12 +650,9 @@ static void *worker(void *arg)
                 result_msg(a, true, err);
             break;
         case J_SCENE: {
-            static struct scene scene[SCENE_MAX];
-            int n = scene_load(scene, SCENE_MAX), at = scene_find(scene, n, j.a);
-            if (at < 0)
-                break;
             char summary[300];
-            int failed = scene_run(&scene[at], a->master, a->nmaster, worker_send, a, summary, sizeof(summary));
+            int failed = scene_run(j.scene, a->master, a->nmaster, worker_send, a, summary, sizeof(summary));
+            free(j.scene);
             pthread_mutex_lock(&a->lock);
             a->res.have_scene = true;
             a->res.scene_err = failed > 0;
@@ -771,15 +788,28 @@ static void run_scene(struct app *a, const char *id)
     int at = scene_find(a->scene, a->nscene, id);
     if (at < 0)
         return;
-    const struct scene *s = &a->scene[at];
-    if (!push_job(a, J_SCENE, s->id, NULL, NULL)) {
+    struct scene *s = malloc(sizeof(*s));
+    if (!s)
+        return;
+    *s = a->scene[at];
+    for (int i = 0; i < s->n; i++) {                            /* a toggle is decided here: the window knows best how things are now */
+        struct tuya_dev *d = find_dev(a, s->act[i].dev);
+        struct tuya_dp *dp = d ? tuya_find_dp(d, s->act[i].code) : NULL;
+        if (!strcmp(s->act[i].value, "toggle") && dp && dp->has && dp->type == TUYA_BOOL)
+            copy(s->act[i].value, sizeof(s->act[i].value), dp->b ? "false" : "true");
+    }
+    static struct scene shown;
+    shown = *s;                                                 /* (the worker owns `s` once it is queued) */
+    if (!push_scene(a, s)) {
+        free(s);
         set_msg(a, true, "Too many commands are waiting");
         return;
     }
+    s = &shown;
     for (int i = 0; i < s->n; i++) {
         struct tuya_dev *d = find_dev(a, s->act[i].dev);
         struct tuya_dp *dp = d && d->online ? tuya_find_dp(d, s->act[i].code) : NULL;
-        if (!dp || !dp->func)
+        if (!dp || !dp->func || !strcmp(s->act[i].value, "toggle"))
             continue;
         if (dp->type == TUYA_BOOL)
             dp->b = !strcmp(s->act[i].value, "true");
@@ -1196,7 +1226,7 @@ static void modal_controls(struct flow *f)
 static void build_actions(struct app *a, struct tuya_dev *d)
 {
     a->nacts = 0;
-#define ACT(k_, int_, value_, ...) do { if (a->nacts < 24) { struct sact *s_ = &a->acts[a->nacts++]; s_->dp = (k_); s_->is_int = (int_); \
+#define ACT(k_, int_, value_, ...) do { if (a->nacts < MAX_ACTS) { struct sact *s_ = &a->acts[a->nacts++]; s_->dp = (k_); s_->is_int = (int_); \
         copy(s_->value, sizeof(s_->value), (value_)); snprintf(s_->label, sizeof(s_->label), __VA_ARGS__); } } while (0)
     for (int k = 0; k < d->ndp; k++) {
         struct tuya_dp *dp = &d->dp[k];
@@ -1216,6 +1246,7 @@ static void build_actions(struct app *a, struct tuya_dev *d)
         } else if (dp->type == TUYA_BOOL) {
             ACT(k, false, "true", "%.40s on", name);
             ACT(k, false, "false", "%.40s off", name);
+            ACT(k, false, "toggle", "%.40s toggle", name);
         } else if (dp->type == TUYA_INT) {
             ACT(k, true, "", "%.40s", name);
         } else if (!strcmp(dp->code, "control")) {
@@ -1252,7 +1283,7 @@ static void what_text(struct tuya_dev *d, const char *code, const char *value, c
     if (dp && dp->type == TUYA_BOOL && (!strcmp(code, "power_go") || !strcmp(code, "switch_go")))
         snprintf(what, n, "%s", !strcmp(value, "true") ? "Start cleaning" : "Stop cleaning");
     else if (dp && dp->type == TUYA_BOOL)
-        snprintf(what, n, "%.40s %s", name, !strcmp(value, "true") ? "on" : "off");
+        snprintf(what, n, "%.40s %s", name, !strcmp(value, "toggle") ? "toggle" : !strcmp(value, "true") ? "on" : "off");
     else if (dp && dp->type == TUYA_INT && !strcmp(code, "manual_feed"))
         snprintf(what, n, "Feed %.10s", value);
     else if (dp && dp->type == TUYA_INT) {
@@ -1319,7 +1350,7 @@ static void schedule_controls(struct flow *f)
     if (!a->nacts)
         return;                                                 /* nothing a rule could tell it */
     if (d && a->ed.open && a->ed.rule >= 0 && a->ed.rule < a->nrules && rule_action(a, d, &a->rules[a->ed.rule]) < 0) {
-        struct sact *s = &a->acts[a->nacts < 24 ? a->nacts++ : 23];             /* what it does is not in the list: it can stay as it is */
+        struct sact *s = &a->acts[a->nacts < MAX_ACTS ? a->nacts++ : MAX_ACTS - 1];             /* what it does is not in the list: it can stay as it is */
         s->dp = -1;
         s->is_int = false;
         memcpy(s->value, a->rules[a->ed.rule].value, sizeof(s->value));
@@ -1488,7 +1519,7 @@ static const char *action_word(const struct tuya_dev *d, const struct sact *s)
     bool on = !strcmp(s->value, "true");
     if (!strcmp(dp->code, "power_go") || !strcmp(dp->code, "switch_go"))
         return on ? "Start cleaning" : "Stop cleaning";
-    return on ? "On" : "Off";
+    return !strcmp(s->value, "toggle") ? "Toggle" : on ? "On" : "Off";
 }
 
 /* The editor: the name, and for every device what the scene can tell it (a button per thing, lit = chosen, nothing lit = left alone). */
@@ -2514,7 +2545,10 @@ static void editor_current(struct app *a)
             full = !scene_act_set(s, d->id, dp->code, v) || full;
         }
     }
-    set_msg(a, full, full ? "Only %d things fit in a scene" : "Taken: %d things. Press a lit button to leave that one alone.", s->n);
+    if (full)
+        set_msg(a, true, "Only %d things fit in a scene", s->n);
+    else
+        set_msg(a, false, "Taken: %d thing%s. Press a lit button to leave that one alone.", s->n, s->n == 1 ? "" : "s");
 }
 
 static void editor_press(struct app *a, const struct ctl *c, const char *v)
@@ -2648,7 +2682,7 @@ static void press_edit(struct app *a, const struct ctl *c)
         a->ed.num = atof(r->value);
         if (act < 0 && d) {                                     /* (the "As it is" that the layout puts at the end of the list) */
             build_actions(a, d);
-            act = LM_MIN(a->nacts, 23);
+            act = LM_MIN(a->nacts, MAX_ACTS - 1);
         }
         a->ed.action = act;
     } else if (!strcmp(v, "add")) {

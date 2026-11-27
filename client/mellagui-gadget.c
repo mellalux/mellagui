@@ -930,6 +930,12 @@ static bool smart_press(struct app *a)
     return part != LM_SMART_NOTHING;
 }
 
+/* A button of the smart home card: the drop the program's window uses, in the same colours. */
+static void card_button(struct wlwin *w, struct lm_rect r, uint32_t rgb)
+{
+    wlwin_card_drop(w, r.x, r.y, r.w, r.h, LM_MAX(lm_button_radius(r.h / 2), 3), rgb);
+}
+
 /* A check box (18 px, centred in `hit`): green with a tick while the switch is on. */
 static void check_box(struct wlwin *w, struct lm_smart_rect hit, bool on)
 {
@@ -965,7 +971,7 @@ static void paint_smart(struct app *a)
         struct lm_rect r = lm_rect_make(l.scene[i].x, l.scene[i].y, l.scene[i].w, l.scene[i].h);
         if (r.w <= 0)
             continue;
-        rr(w, r, 12, st->ran == i ? lm_theme.btn_green : lm_theme.btn_teal);
+        card_button(w, r, st->ran == i ? lm_theme.btn_green : lm_theme.btn_teal);
         int tw = lm_font_text_width(st->scene[i].name), room = r.w - 12;
         text_fit(w, r.x + (tw < room ? (r.w - tw) / 2 : 6), r.y + (r.h - LM_FONT_H) / 2, st->scene[i].name, room, lm_theme.on_colour);
     }
@@ -1017,24 +1023,24 @@ static void paint_smart(struct app *a)
             check_box(w, l.sw[i], it->on);
         } else if (it->kind == LM_SMART_VACUUM) {                       /* its own buttons: Start / Stop cleaning, and home to the dock */
             struct lm_rect cr = lm_rect_make(l.vac[i][0].x, l.vac[i][0].y, l.vac[i][0].w, l.vac[i][0].h);
-            rr(w, cr, 12, it->on ? lm_theme.btn_red : lm_theme.btn_green);
+            card_button(w, cr, it->on ? lm_theme.btn_red : lm_theme.btn_green);
             text_centered(w, cr, it->on ? "Stop" : "Start", lm_theme.on_colour);
             if (it->dock_code[0]) {
                 struct lm_rect dr = lm_rect_make(l.vac[i][1].x, l.vac[i][1].y, l.vac[i][1].w, l.vac[i][1].h);
-                rr(w, dr, 12, lm_theme.button);
-                text_centered(w, dr, "Dock", lm_theme.text);
+                card_button(w, dr, lm_theme.btn_slate);
+                text_centered(w, dr, "Dock", lm_theme.on_colour);
             }
         } else if (it->kind == LM_SMART_BLIND) {
             for (int b = 0; b < 3; b++) {
                 struct lm_rect br = lm_rect_make(l.btn[i][b].x, l.btn[i][b].y, l.btn[i][b].w, l.btn[i][b].h);
-                rr(w, br, 8, lm_theme.button);
+                card_button(w, br, lm_theme.btn_slate);
                 int cx = br.x + br.w / 2, cy = br.y + br.h / 2;
                 if (b == 0)
-                    tri_up(w, cx, cy, 6, lm_theme.text);
+                    tri_up(w, cx, cy, 6, lm_theme.on_colour);
                 else if (b == 1)
-                    rr(w, lm_rect_make(cx - 4, cy - 4, 8, 8), 1, lm_theme.text);        /* stop: a small square */
+                    rr(w, lm_rect_make(cx - 4, cy - 4, 8, 8), 1, lm_theme.on_colour);        /* stop: a small square */
                 else
-                    tri_down(w, cx, cy, 6, lm_theme.text);
+                    tri_down(w, cx, cy, 6, lm_theme.on_colour);
             }
         }
     }

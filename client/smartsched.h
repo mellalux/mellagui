@@ -7,6 +7,7 @@
  *
  *     on 07:30 MTWTF-- DEVICE_ID percent_control 30        (on | off, the time, the seven days from Monday with '-' for "not", device, code, value)
  *     on sunrise+15 MTWTFSS DEVICE_ID control open         (the time can be `sunrise` or `sunset`, with minutes before (-) or after (+): smartsun.h)
+ *     on 22:00 MTWTFSS DEVICE_ID switch_1 toggle           (a switch: the other way from what it is then)
  *     on sunset MTWTFSS @scene s1 run                      (a rule can run one of the program's scenes: SCHED_SCENE, the scene's id: smartscene.h)
  *
  * One window-less process carries them out (`mellagui-smart --background`, started with the compositor and by the window when a rule is saved; it

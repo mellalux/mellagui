@@ -883,17 +883,27 @@ void wlwin_round_fill(struct wlwin *w, int x, int y, int width, int height, int 
 }
 
 /* A coloured button as a bead of water; the drawing is lm_drop_px (uikit.h), here only the scale is worked out. */
+static void drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t c)
+{
+    x += w->inx;
+    y += w->iny;
+    double f = fscale(w);
+    int px = P(f, x), py = P(f, y), pwid = P(f, x + bw) - px, phei = P(f, y + bh) - py, pr = P(f, r);
+    lm_drop_any(w->pixels, w->pw, w->pw, w->ph, px, py, pwid, phei, pr, c, LM_MAX((int)(f + 0.5), 1), w->argb);
+}
+
 void wlwin_drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t c)
 {
     if (w->argb) {                                                      /* (a card over the desktop: plain) */
         wlwin_round_fill(w, x, y, bw, bh, r, c);
         return;
     }
-    x += w->inx;
-    y += w->iny;
-    double f = fscale(w);
-    int px = P(f, x), py = P(f, y), pwid = P(f, x + bw) - px, phei = P(f, y + bh) - py, pr = P(f, r);
-    lm_drop_px(w->pixels, w->pw, w->pw, w->ph, px, py, pwid, phei, pr, c, LM_MAX((int)(f + 0.5), 1));
+    drop(w, x, y, bw, bh, r, c);
+}
+
+void wlwin_card_drop(struct wlwin *w, int x, int y, int bw, int bh, int r, uint32_t c)
+{
+    drop(w, x, y, bw, bh, r, c);
 }
 
 void wlwin_dim(struct wlwin *w, double t)

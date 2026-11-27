@@ -9,7 +9,8 @@
  *     do DEVICE_ID control close               (what it tells a device: code and value, in the order they are sent)
  *     do DEVICE_ID switch_1 false
  *
- * The id never changes (the timetable and the card refer to it), the name may.
+ * The id never changes (the timetable and the card refer to it), the name may. A switch's value may be `toggle`: the other way from what the device
+ * says when the scene runs.
  */
 
 #include <stdbool.h>

@@ -29,11 +29,12 @@ void dv_hash(const char *password, char out[9]);
 
 enum { DV_VIDEO_KEY, DV_VIDEO, DV_AUDIO, DV_INFO };
 enum { DV_CODEC_NONE = 0, DV_CODEC_H264 = 2, DV_CODEC_H265 = 3 };
+#define DV_SOUND_ALAW 14
 
 struct dv_frame {
     int kind;
-    int codec, w, h;                        /* of a key frame (DV_CODEC_*, pixels); 0 otherwise */
-    const uint8_t *data;                    /* video: the elementary stream (Annex B); valid during the callback only */
+    int codec, w, h;                        /* of a key frame (DV_CODEC_*, pixels); of sound: codec = its kind (DV_SOUND_ALAW); 0 otherwise */
+    const uint8_t *data;                    /* video: the elementary stream (Annex B), sound: the samples; valid during the callback only */
     size_t len;
 };
 

@@ -12,6 +12,10 @@
  * talks to the cameras directly (dvrip.c), nothing leaves the local network; ffmpeg turns the H.264 / H.265 into pictures. A lost connection is made
  * again by itself, but a camera that REFUSES the login is not asked again until you say so (R): cameras lock accounts after a few wrong tries.
  *
+ * S saves a picture and V starts / stops a recording (of the camera shown alone, else of every camera that is live): full size, into ~/CCTV
+ * ($MELLAGUI_CCTV_DIR), cctvrec.c. M plays the sound of the camera shown alone ($MELLAGUI_CCTV_PLAYER = a program that takes 16 bit 8000 Hz mono
+ * samples, or "none"). O opens the folder.
+ *
  * Every camera has a thread of its own: it keeps the connection, feeds ffmpeg and takes its pictures; the window only shows the newest one.
  */
 #include <errno.h>
@@ -30,6 +34,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "cctvrec.h"
 #include "dvrip.h"
 #include "ffpipe.h"
 #include "font.h"
@@ -76,6 +81,7 @@ struct cam {
     unsigned cmd;                           /* goes up when the connection has to be made again */
     int box_w, box_h;                       /* the room the picture has, in buffer pixels */
     bool quit;
+    bool listen;                            /* play its sound */
     /* what the thread tells (under the lock) */
     enum state state;
     char msg[200];
@@ -100,10 +106,15 @@ struct cam {
     unsigned dec_failures;
     unsigned got_frames, got_bytes;         /* since the last count */
     int64_t last_picture;
+    pid_t player;                           /* the program that plays the sound, 0 = none */
+    int speaker;                            /* its input */
+    bool mute_failed;                       /* it ended by itself: not started again before M */
     bool broken;                            /* the connection is to be dropped (cur message says why) */
     char why[200];
     /* the window's own */
-    unsigned seen;
+    struct cctv_job *rec, *snap;
+    unsigned seen, rec_seen;
+    int rec_secs;
     struct lm_rect tile, pic;
 };
 
@@ -116,10 +127,16 @@ struct app {
     double px, py;
     struct wlrail_anim ran;
     const char *conf;
+    bool sound;                             /* M */
+    char note[600];                         /* a word for the status line */
+    int64_t note_until;
+    char dir[400];                          /* where pictures and recordings go */
     char conf_note[300];                    /* why there are no cameras */
 };
 
 static const char *g_dump;
+static volatile sig_atomic_t g_end;          /* SIGTERM / SIGINT: the recordings are finished first */
+static void on_end(int sig) { (void)sig; g_end = 1; }
 static const char *g_ffmpeg;
 
 static int64_t now_ms(void) { return wlrail_now(); }
@@ -313,11 +330,91 @@ static bool pend_add(struct cam *c, const void *p, size_t n)
     return true;
 }
 
+/* ---- sound ---- */
+
+static void player_stop(struct cam *c)
+{
+    if (!c->player)
+        return;
+    close(c->speaker);
+    kill(c->player, SIGKILL);               /* silence at once: it would first play out what it holds */
+    waitpid(c->player, NULL, 0);
+    c->player = 0;
+}
+
+static bool player_start(struct cam *c)
+{
+    const char *own = getenv("MELLAGUI_CCTV_PLAYER");
+    int p[2];
+    if ((own && !strcmp(own, "none")) || pipe2(p, O_CLOEXEC) < 0)
+        return false;
+    pid_t pid = fork();
+    if (pid == 0) {
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        dup2(p[0], 0);
+        if (own && *own) {
+            execl(own, own, (char *)NULL);
+        } else {
+            execlp("paplay", "paplay", "--raw", "--format=s16le", "--rate=8000", "--channels=1", "--latency-msec=150", (char *)NULL);
+            execlp("pw-cat", "pw-cat", "--playback", "--format=s16", "--rate=8000", "--channels=1", "-", (char *)NULL);
+            execlp("aplay", "aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", "8000", "-c", "1", (char *)NULL);
+        }
+        _exit(127);
+    }
+    close(p[0]);
+    if (pid < 0) {
+        close(p[1]);
+        return false;
+    }
+    c->player = pid;
+    c->speaker = p[1];
+    fcntl(c->speaker, F_SETFL, O_NONBLOCK);
+    if (fcntl(c->speaker, F_SETPIPE_SZ, 4096) < 0) {}        /* a quarter of a second at most waits in the pipe */
+    return true;
+}
+
+static int16_t alaw(uint8_t v)
+{
+    v ^= 0x55;
+    int t = (v & 15) << 4, e = (v >> 4) & 7;
+    t = e == 0 ? t + 8 : (t + 0x108) << (e - 1);
+    return (int16_t)(v & 0x80 ? t : -t);
+}
+
+static void play(struct cam *c, const uint8_t *data, size_t len)
+{
+    pthread_mutex_lock(&c->lock);
+    bool wanted = c->listen;
+    pthread_mutex_unlock(&c->lock);
+    if (!wanted) {
+        player_stop(c);
+        c->mute_failed = false;
+        return;
+    }
+    if (c->mute_failed || (!c->player && !player_start(c)))
+        return;
+    int16_t out[1024];
+    while (len) {
+        size_t n = len < LM_ARRAY_LEN(out) ? len : LM_ARRAY_LEN(out);
+        for (size_t i = 0; i < n; i++)
+            out[i] = alaw(data[i]);
+        if (write(c->speaker, out, n * 2) < 0 && errno != EAGAIN && errno != EINTR) {     /* (a full pipe: these samples are dropped) */
+            player_stop(c);
+            c->mute_failed = true;
+            return;
+        }
+        data += n;
+        len -= n;
+    }
+}
+
 static void on_frame(void *ud, const struct dv_frame *f)
 {
     struct cam *c = ud;
+    if (f->kind == DV_AUDIO && f->codec == DV_SOUND_ALAW)
+        play(c, f->data, f->len);
     if (f->kind != DV_VIDEO && f->kind != DV_VIDEO_KEY)
-        return;                             /* (sound and the rest come later) */
+        return;
     if (f->kind == DV_VIDEO_KEY && (f->codec == DV_CODEC_H264 || f->codec == DV_CODEC_H265)) {
         pthread_mutex_lock(&c->lock);
         if (c->cur_stream == WANT_MAIN && f->w > 0 && f->h > 0)
@@ -554,6 +651,8 @@ static void *cam_thread(void *ud)
         }
         bool pictured = c->frames != frames_before;
         dec_stop(&c->dec);
+        player_stop(c);
+        c->mute_failed = false;
         dv_close(&c->s);
         c->demux.len = c->packets.len = 0;
         c->pend_len = 0;
@@ -600,6 +699,7 @@ static void set_wants(struct app *a)
         struct cam *c = &a->cam[i];
         int want = a->single < 0 ? WANT_SUB : a->single == i ? WANT_MAIN : WANT_NONE;
         pthread_mutex_lock(&c->lock);
+        c->listen = a->sound && a->single == i;
         bool changed = c->want != want;
         if (changed) {
             c->want = want;
@@ -625,7 +725,162 @@ static void reconnect(struct app *a, int i)
 
 /* ---- the window ----------------------------------------------------------------------------------------------------------- */
 
-enum { B_ALL, B_CAM0, B_AGAIN = B_CAM0 + MAX_CAMS, B_COUNT };
+/* ---- pictures, recordings, the folder ---- */
+
+static void note(struct app *a, const char *text)
+{
+    snprintf(a->note, sizeof(a->note), "%s", text);
+    a->note_until = now_ms() + 6000;
+    a->win.redraw = true;
+}
+
+static struct cctv_job *start_job(struct app *a, struct cam *c, int kind)
+{
+    struct cctv_target t = { .name = c->name, .host = c->host, .port = c->port, .user = c->user, .password = c->pass };
+    return cctv_job_start(&t, kind, a->dir, g_ffmpeg);
+}
+
+static bool is_live(struct cam *c)
+{
+    pthread_mutex_lock(&c->lock);
+    bool live = c->state == ST_LIVE;
+    pthread_mutex_unlock(&c->lock);
+    return live;
+}
+
+/* S: a picture of the camera shown alone, else of every one that shows a picture. (Only those: their login is known to be good.) */
+static void snapshot(struct app *a)
+{
+    int n = 0;
+    for (int i = 0; i < a->n; i++) {
+        struct cam *c = &a->cam[i];
+        if ((a->single >= 0 && a->single != i) || !is_live(c))
+            continue;
+        if (!c->snap)
+            c->snap = start_job(a, c, CCTV_SNAPSHOT);
+        n += c->snap != NULL;
+    }
+    note(a, n ? "Taking the picture..." : "No camera shows a picture");
+}
+
+/* V: stop the recordings of what is shown; when there are none, start them. */
+static void toggle_record(struct app *a)
+{
+    int stopped = 0, started = 0;
+    for (int i = 0; i < a->n; i++)
+        if ((a->single < 0 || a->single == i) && a->cam[i].rec) {
+            cctv_job_stop(a->cam[i].rec);
+            stopped++;
+        }
+    if (stopped) {
+        note(a, "Finishing the recording...");
+        return;
+    }
+    for (int i = 0; i < a->n; i++) {
+        struct cam *c = &a->cam[i];
+        if ((a->single >= 0 && a->single != i) || !is_live(c))
+            continue;
+        c->rec = start_job(a, c, CCTV_RECORD);
+        c->rec_secs = -1;
+        started += c->rec != NULL;
+    }
+    note(a, started ? "Starting to record..." : "No camera shows a picture");
+}
+
+/* What the jobs have to say; the ones that are over are put away. */
+static void collect_jobs(struct app *a)
+{
+    for (int i = 0; i < a->n; i++) {
+        struct cam *c = &a->cam[i];
+        for (int k = 0; k < 2; k++) {
+            struct cctv_job **j = k ? &c->rec : &c->snap;
+            if (!*j)
+                continue;
+            struct cctv_status st;
+            cctv_job_status(*j, &st);
+            if (k) {
+                int secs = st.state == CCTV_RECORDING ? (int)((now_ms() - st.since_ms) / 1000) : -1;
+                if (secs != c->rec_secs || st.serial != c->rec_seen) {
+                    c->rec_secs = secs;
+                    c->rec_seen = st.serial;
+                    a->win.redraw = true;
+                }
+            }
+            if (st.state != CCTV_DONE && st.state != CCTV_FAILED)
+                continue;
+            char text[600];
+            const char *base = strrchr(st.file, '/');
+            if (st.state == CCTV_FAILED)
+                snprintf(text, sizeof(text), "%s: %s", c->name, st.msg);
+            else if (base)
+                snprintf(text, sizeof(text), "Saved %s in %s", base + 1, a->dir);
+            else
+                snprintf(text, sizeof(text), "%s: nothing was recorded", c->name);
+            cctv_job_free(*j);
+            *j = NULL;
+            note(a, text);
+        }
+    }
+}
+
+/* O: the folder in the file manager. */
+static void open_folder(struct app *a)
+{
+    const char *own = getenv("MELLAGUI_CCTV_FILES");
+    if (own && !strcmp(own, "none"))
+        return;
+    static char prog[PATH_MAX + 32];
+    if (own && *own) {
+        snprintf(prog, sizeof(prog), "%s", own);
+    } else {
+        ssize_t n = readlink("/proc/self/exe", prog, PATH_MAX - 1);
+        char *slash = n > 0 ? (prog[n] = 0, strrchr(prog, '/')) : NULL;
+        if (slash)
+            strcpy(slash + 1, "mellagui-files");
+        else
+            strcpy(prog, "mellagui-files");
+    }
+    if (mkdir(a->dir, 0700) < 0 && errno != EEXIST) {
+        note(a, "The folder cannot be made");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {                  /* nobody has to wait for it */
+            setsid();
+            execlp(prog, prog, a->dir, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
+static void toggle_sound(struct app *a)
+{
+    if (a->single < 0) {
+        note(a, "Show one camera alone to hear it");
+        return;
+    }
+    a->sound = !a->sound;
+    set_wants(a);
+    note(a, a->sound ? "Sound on" : "Sound off");
+}
+
+static void speaker_icon(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    (void)bg;
+    wlwin_fill(w, cx - 7, cy - 3, 4, 7, c);
+    for (int i = 0; i < 5; i++)
+        wlwin_fill(w, cx - 3 + i, cy - 3 - i, 1, 7 + 2 * i, c);
+    wlwin_fill(w, cx + 4, cy - 3, 2, 7, c);
+    wlwin_fill(w, cx + 7, cy - 6, 1, 13, c);
+}
+
+/* ---- the window ---- */
+
+enum { B_ALL, B_CAM0, B_SHOT = B_CAM0 + MAX_CAMS, B_REC, B_SOUND, B_FOLDER, B_AGAIN, B_COUNT };
 
 static void rail(struct app *a, struct wlrail *L)
 {
@@ -640,6 +895,16 @@ static void rail(struct app *a, struct wlrail *L)
         L->it[B_CAM0 + i] = (struct wlrail_item){ .tip = i < a->n ? a->cam[i].name : NULL, .text = num[i], .base = lm_theme.btn_teal, .lite = lm_theme.btn_teal_lit,
                                                   .show = i < a->n, .lit = a->single == i, .gap = i == 0 };
     }
+    bool recording = false;
+    for (int i = 0; i < a->n; i++)
+        recording |= a->cam[i].rec && (a->single < 0 || a->single == i);
+    L->it[B_SHOT] = (struct wlrail_item){ .tip = "Save a picture (S)", .icon = wlrail_ic_camera, .base = lm_theme.btn_green, .lite = lm_theme.btn_green_lit,
+                                          .show = true, .gap = true, .idle = !a->n };
+    L->it[B_REC] = (struct wlrail_item){ .tip = recording ? "Stop recording (V)" : "Record (V)", .icon = wlrail_ic_rec, .base = lm_theme.btn_red,
+                                         .lite = lm_theme.btn_red_lit, .show = true, .lit = recording, .idle = !a->n };
+    L->it[B_SOUND] = (struct wlrail_item){ .tip = a->single < 0 ? "Sound (M): one camera alone" : a->sound ? "Sound off (M)" : "Sound on (M)", .icon = speaker_icon,
+                                           .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .show = true, .lit = a->sound && a->single >= 0, .idle = a->single < 0 };
+    L->it[B_FOLDER] = (struct wlrail_item){ .tip = "Open the folder (O)", .icon = wlrail_ic_open, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit, .show = true };
     L->it[B_AGAIN] = (struct wlrail_item){ .tip = "Connect again (R)", .icon = wlrail_ic_swap, .base = lm_theme.btn_amber, .lite = lm_theme.btn_amber_lit,
                                            .show = true, .bottom = true, .idle = !a->n };
 }
@@ -734,7 +999,13 @@ static void write_dump(struct app *a)
         pthread_mutex_unlock(&c->lock);
         fprintf(f, "tile %d %d %d %d %d\n", i, c->tile.x, c->tile.y, c->tile.w, c->tile.h);
         fprintf(f, "pic %d %d %d %d %d\n", i, c->pic.x, c->pic.y, c->pic.w, c->pic.h);
+        struct cctv_status st = { 0 };
+        if (c->rec)
+            cctv_job_status(c->rec, &st);
+        fprintf(f, "rec %d on=%d state=%d snap=%d\n", i, c->rec != NULL, st.state, c->snap != NULL);
     }
+    fprintf(f, "sound on=%d\n", a->sound);
+    fprintf(f, "note %s\n", a->note);
     fclose(f);
     if (rename(tmp, g_dump) < 0) {}
 }
@@ -770,6 +1041,12 @@ static void paint(struct wlwin *w)
         else if (st != ST_LIVE)             /* the last picture stays, with a word about what is wrong */
             chip(w, c->tile.x + 8, c->tile.y + c->tile.h - 32, msg, c->tile.w - 16, 0);
         chip(w, c->tile.x + 8, c->tile.y + 8, c->name, c->tile.w - 16, dot);
+        if (c->rec) {
+            char r[64] = "Starting to record";
+            if (c->rec_secs >= 0)
+                snprintf(r, sizeof(r), "REC %d:%02d", c->rec_secs / 60, c->rec_secs % 60);
+            chip(w, c->tile.x + 8, c->tile.y + 38, r, c->tile.w - 16, 0xff3b30);
+        }
         if (st == ST_LIVE && (a->single == i || a->hover == i)) {
             char info[96];
             snprintf(info, sizeof(info), "%d x %d  %d.%d fps  %d kbit/s", sw, sh, fps10 / 10, fps10 % 10, kbps);
@@ -786,8 +1063,15 @@ static void paint(struct wlwin *w)
         live += a->cam[i].state == ST_LIVE;
         pthread_mutex_unlock(&a->cam[i].lock);
     }
+    int recording = 0;
+    for (int i = 0; i < a->n; i++)
+        recording += a->cam[i].rec != NULL;
     if (!g_ffmpeg)
         snprintf(status, sizeof(status), "ffmpeg is not installed: the pictures cannot be shown");
+    else if (a->note[0])
+        snprintf(status, sizeof(status), "%.299s", a->note);
+    else if (recording && a->single >= 0 && !a->cam[a->single].rec)
+        snprintf(status, sizeof(status), "Recording %d other camera%s  -  Esc: all cameras", recording, recording > 1 ? "s" : "");
     else if (a->single >= 0)
         snprintf(status, sizeof(status), "%s (%s)  -  Esc: all cameras", a->cam[a->single].name, a->cam[a->single].host);
     else
@@ -815,6 +1099,14 @@ static void press_button(struct app *a, int b)
         show(a, -1);
     else if (b >= B_CAM0 && b < B_CAM0 + a->n)
         show(a, b - B_CAM0);
+    else if (b == B_SHOT && g_ffmpeg)
+        snapshot(a);
+    else if (b == B_REC && g_ffmpeg)
+        toggle_record(a);
+    else if (b == B_SOUND)
+        toggle_sound(a);
+    else if (b == B_FOLDER)
+        open_folder(a);
     else if (b == B_AGAIN)
         for (int i = 0; i < a->n; i++)
             if (a->single < 0 || a->single == i)
@@ -893,6 +1185,14 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         show(a, (int)(ks - '1'));
     else if (ks == 'r' || ks == 'R')
         press_button(a, B_AGAIN);
+    else if (ks == 's' || ks == 'S' || ks == ' ')
+        press_button(a, B_SHOT);
+    else if (ks == 'v' || ks == 'V')
+        press_button(a, B_REC);
+    else if (ks == 'm' || ks == 'M')
+        press_button(a, B_SOUND);
+    else if (ks == 'o' || ks == 'O')
+        press_button(a, B_FOLDER);
 }
 
 /* ---- self test ------------------------------------------------------------------------------------------------------------- */
@@ -974,7 +1274,7 @@ int main(int argc, char **argv)
             cli_conf = argv[++i];
         } else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
             char junk;
-            if (sscanf(argv[++i], "%dx%d%c", &win_w, &win_h, &junk) != 2 || win_w < 360 || win_h < 240) {
+            if (sscanf(argv[++i], "%dx%d%c", &win_w, &win_h, &junk) != 2 || win_w < 420 || win_h < 400) {
                 fprintf(stderr, "mellagui-cctv: --size wants a size like 960x440\n");
                 return 2;
             }
@@ -989,6 +1289,11 @@ int main(int argc, char **argv)
     a.conf = path;
     a.single = a.hover = a.rhover = -1;
     load_conf(&a);
+    const char *dir = getenv("MELLAGUI_CCTV_DIR"), *home = getenv("HOME");
+    if (dir && *dir)
+        snprintf(a.dir, sizeof(a.dir), "%s", dir);
+    else
+        snprintf(a.dir, sizeof(a.dir), "%s/CCTV", home ? home : ".");
     if (list) {
         for (int i = 0; i < a.n; i++)
             printf("%s\t%s:%d\t%s\t%s\n", a.cam[i].name, a.cam[i].host, a.cam[i].port, a.cam[i].user, a.cam[i].pass[0] ? "password set" : "no password");
@@ -1003,7 +1308,7 @@ int main(int argc, char **argv)
     if (wlwin_connect(&a.win, "mellagui-cctv", &ops, &a) < 0)
         return 1;
     wlwin_set_inset(&a.win, WLRAIL_W);
-    if (wlwin_open(&a.win, "Cameras", "mellagui.cctv", win_w, win_h, 360, 240) < 0)
+    if (wlwin_open(&a.win, "Cameras", "mellagui.cctv", win_w, win_h, 420, 400) < 0)
         return 1;
     for (int i = 0; i < a.n; i++) {
         struct cam *c = &a.cam[i];
@@ -1014,8 +1319,11 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    struct sigaction sa = { .sa_handler = on_end };
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
     bool started = false;
-    while (a.win.running) {
+    while (a.win.running && !g_end) {
         if (!started && a.win.configured) {         /* connect when the room for the pictures is known */
             layout(&a);
             set_wants(&a);
@@ -1026,6 +1334,11 @@ int main(int argc, char **argv)
         int timeout = wlrail_loop(&a.win, &a.ran, &L, a.rhover, a.n ? 30 : -1);
         if (!wlwin_step(&a.win, timeout))
             break;
+        collect_jobs(&a);
+        if (a.note[0] && now_ms() >= a.note_until) {
+            a.note[0] = 0;
+            a.win.redraw = true;
+        }
         for (int i = 0; i < a.n; i++) {
             struct cam *c = &a.cam[i];
             pthread_mutex_lock(&c->lock);
@@ -1043,7 +1356,12 @@ int main(int argc, char **argv)
         pthread_mutex_unlock(&c->lock);
         poke(c);
     }
+    for (int i = 0; i < a.n; i++)           /* all are told first, so that they finish side by side */
+        if (a.cam[i].rec)
+            cctv_job_stop(a.cam[i].rec);
     for (int i = 0; i < a.n; i++) {
+        cctv_job_free(a.cam[i].snap);
+        cctv_job_free(a.cam[i].rec);
         pthread_join(a.cam[i].thread, NULL);
         free(a.cam[i].px);
     }

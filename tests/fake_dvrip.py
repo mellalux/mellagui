@@ -25,6 +25,9 @@ def sofia(pw):
     return "".join(HASHSET[(d[2 * i] + d[2 * i + 1]) % 62] for i in range(8))
 
 
+TONE = (b"\xaa" * 8 + b"\x2a" * 8) * 50          # a loud 500 Hz square wave, A-law, a tenth of a second
+
+
 def say(*a):
     print(*a, flush=True)
 
@@ -84,7 +87,7 @@ class Camera:
                     head = struct.pack("<4sBBBBII", b"\x00\x00\x01\xfc", 2, 10, w // 8, h // 8, 0, len(unit))
                 else:
                     head = struct.pack("<4sI", b"\x00\x00\x01\xfd", len(unit))
-                pending += head + unit + struct.pack("<4sBBH", b"\x00\x00\x01\xfa", 14, 2, 5) + b"sound"
+                pending += head + unit + struct.pack("<4sBBH", b"\x00\x00\x01\xfa", 14, 2, 800) + TONE
                 while len(pending) > 700:                       # messages end anywhere in a frame
                     send_msg(sock, 1412, pending[:700])
                     pending = pending[700:]

@@ -33394,15 +33394,22 @@ class TestCctv(Base):
             f.write(conf)
         os.chmod(path, 0o600)
         self.dump = os.path.join(self.dir, 'dump')
-        p = subprocess.Popen([self.EXE, '--size', '700x360'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             env=dict(os.environ, MELLAGUI_CCTV_CONF=path, MELLAGUI_CCTV_DUMP=self.dump))
+        self.saved = os.path.join(self.dir, 'saved')
+        self.heard = os.path.join(self.dir, 'heard')
+        player = os.path.join(self.dir, 'player')
+        with open(player, 'w') as f:
+            f.write('#!/bin/sh\nexec cat >> %s\n' % self.heard)
+        os.chmod(player, 0o700)
+        p = subprocess.Popen([self.EXE, '--size', '700x420'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, MELLAGUI_CCTV_CONF=path, MELLAGUI_CCTV_DUMP=self.dump, MELLAGUI_CCTV_DIR=self.saved,
+                                      MELLAGUI_CCTV_PLAYER=player, MELLAGUI_CCTV_FILES='none'))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         self.win = wait_for_window('mellagui.cctv')
         self.assertIsNotNone(self.win, 'the window did not appear')
         return p
 
     def state(self):
-        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}}
+        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}, 'rec': {}}
         try:
             with open(self.dump) as f:
                 lines = f.read().splitlines()
@@ -33412,8 +33419,12 @@ class TestCctv(Base):
             f = l.split()
             if f[0] == 'state':
                 st.update(x.split('=') for x in f[1:])
-            elif f[0] == 'cam':
-                st['cam'][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] in ('cam', 'rec'):
+                st[f[0]][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'sound':
+                st['sound'] = f[1]
+            elif f[0] == 'note':
+                st['note'] = ' '.join(f[1:])
             elif f[0] == 'msg':
                 st['msg'][int(f[1])] = ' '.join(f[2:])
             else:
@@ -33491,6 +33502,105 @@ class TestCctv(Base):
         before = int(st['cam'][0]['frames'])
         self.wait(lambda s: s['cam'][0]['state'] == 'live' and int(s['cam'][0]['frames']) > before + 3, 'back')
         self.assertEqual(len(self.lines(log, 'login admin ok')), 2)
+
+    def files(self, ext):
+        return sorted(os.path.join(self.saved, n) for n in os.listdir(self.saved) if n.endswith(ext)) if os.path.isdir(self.saved) else []
+
+    def probe(self, path):
+        r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_name,width,height:format=duration', '-of', 'json', path],
+                           capture_output=True, text=True, timeout=20)
+        j = json.loads(r.stdout)
+        return [(s['codec_name'], s.get('width'), s.get('height')) for s in j['streams']], float(j['format'].get('duration', 0))      # (a JPEG has none)
+
+    def pixel(self, path):
+        d = subprocess.run(['ffmpeg', '-v', 'error', '-i', path, '-frames:v', '1', '-vf', 'scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
+                           capture_output=True, check=True, timeout=20).stdout
+        return tuple(d[:3])
+
+    def live(self, n):
+        return self.wait(lambda s: all(s['cam'][i]['state'] == 'live' and int(s['cam'][i]['frames']) > 3 for i in range(n)), 'live')
+
+    def test_pictures_are_saved_in_full_size(self):
+        port, log = self.camera('')
+        bad, badlog = self.camera('sala')
+        self.start('Yard 127.0.0.1:%d admin -\nDoor 127.0.0.1:%d admin -\nShed 127.0.0.1:%d admin wrong\n' % (port, port, bad))
+        self.live(2)
+        self.wait(lambda s: s['cam'][2]['state'] == 'refused', 'refused')
+        ctl.tap(31)                                                         # S
+        self.wait(lambda s: len(self.files('.jpg')) == 2 and s['rec'][0]['snap'] == '0' and s['rec'][1]['snap'] == '0' and s['note'].startswith('Saved '), 'two pictures')
+        names = [os.path.basename(f) for f in self.files('.jpg')]
+        self.assertRegex(names[0], r'^Door-\d{8}-\d{6}\.jpg$')
+        for f in self.files('.jpg'):
+            streams, _ = self.probe(f)
+            self.assertEqual(streams, [('mjpeg', 640, 480)])                # the big stream, though the grid shows the small one
+            r, g, b = self.pixel(f)
+            self.assertTrue(b > 200 and r < 60, (r, g, b))
+            self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+        ctl.tap(31)
+        self.wait(lambda s: len(self.files('.jpg')) == 4, 'nothing is written over')
+        self.assertEqual(len(self.lines(badlog, 'login')), 1)               # the refused camera was left alone
+
+    def test_a_recording_has_picture_and_sound(self):
+        port, log = self.camera('')
+        self.start('Yard 127.0.0.1:%d admin -\nDoor 127.0.0.1:%d admin -\n' % (port, port))
+        self.live(2)
+        ctl.tap(47)                                                         # V
+        self.wait(lambda s: all(s['rec'][i] == {'on': '1', 'state': '1', 'snap': '0'} for i in (0, 1)), 'both recording')
+        time.sleep(1.0)
+        ctl.tap(3)                                                          # camera 2 alone: both recordings go on
+        self.wait(lambda s: s['view'] == '1' and s['rec'][0]['on'] == '1', 'still recording')
+        time.sleep(1.5)
+        ctl.tap(1)
+        self.wait(lambda s: s['view'] == '-1', 'all')
+        ctl.tap(47)
+        self.wait(lambda s: s['rec'][0]['on'] == '0' and s['rec'][1]['on'] == '0', 'finished')
+        files = self.files('.mp4')
+        self.assertEqual(len(files), 2)
+        for f in files:
+            streams, duration = self.probe(f)
+            self.assertEqual(streams, [('h264', 640, 480), ('aac', None, None)])
+            self.assertTrue(2.0 < duration < 8.0, duration)
+            r = subprocess.run(['ffmpeg', '-v', 'error', '-i', f, '-fps_mode', 'passthrough', '-enc_time_base', 'demux', '-f', 'null', '-'], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.stderr, '')
+            self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+
+    def test_closing_the_window_finishes_the_recording(self):
+        port, log = self.camera('')
+        p = self.start('Yard 127.0.0.1:%d admin -\n' % port)
+        self.live(1)
+        ctl.tap(47)
+        self.wait(lambda s: s['rec'][0]['state'] == '1', 'recording')
+        time.sleep(1.5)
+        p.terminate()
+        self.assertEqual(p.wait(timeout=15), 0)
+        files = self.files('.mp4')
+        self.assertEqual(len(files), 1)
+        streams, duration = self.probe(files[0])
+        self.assertEqual(streams[0], ('h264', 640, 480))
+        self.assertGreater(duration, 1.0)
+
+    def test_sound_of_the_camera_shown_alone(self):
+        port, log = self.camera('')
+        self.start('Yard 127.0.0.1:%d admin -\nDoor 127.0.0.1:%d admin -\n' % (port, port))
+        self.live(2)
+        ctl.tap(50)                                                         # M in the grid: nothing to hear
+        self.wait(lambda s: s['note'] == 'Show one camera alone to hear it' and s['sound'] == 'on=0', 'told')
+        ctl.tap(2)
+        self.wait(lambda s: s['view'] == '0' and s['cam'][0]['stream'] == '2', 'alone')
+        time.sleep(0.5)
+        self.assertFalse(os.path.exists(self.heard))
+        ctl.tap(50)
+        self.wait(lambda s: os.path.getsize(self.heard) > 8000 if os.path.exists(self.heard) else False, 'heard')
+        with open(self.heard, 'rb') as f:
+            data = f.read(3200)
+        samples = {int.from_bytes(data[i:i + 2], 'little', signed=True) for i in range(0, len(data), 2)}
+        self.assertEqual(len(samples), 2, samples)                          # the camera's square wave
+        self.assertEqual(sum(samples), 0)
+        ctl.tap(50)
+        time.sleep(0.5)
+        n = os.path.getsize(self.heard)
+        time.sleep(0.6)
+        self.assertEqual(os.path.getsize(self.heard), n)
 
     def test_selftest_and_list_do_not_show_passwords(self):
         self.assertEqual(subprocess.run([self.EXE, '--selftest'], capture_output=True, timeout=20).returncode, 0)

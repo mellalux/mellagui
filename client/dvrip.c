@@ -86,6 +86,8 @@ static long frame_at(const uint8_t *p, size_t n, struct dv_frame *f)
         if (n < head)
             return 0;
         f->kind = p[3] == 0xfa ? DV_AUDIO : DV_INFO;
+        if (p[3] == 0xfa)
+            f->codec = p[4];                /* the kind of sound: 14 = G.711 A-law, 8000 samples a second */
         len = (size_t)p[6] | (size_t)p[7] << 8;
         break;
     default:

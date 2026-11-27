@@ -20731,11 +20731,88 @@ class TestBlocks(Base):
         st = self.state()                                       # the rail's button does the same, and shows whether the panel is on
         self.assertIn(9, st['rail'], 'a game has its goal button')
         self.assertEqual(st['rail'][8]['lit'], 1)
+        self.win = self.view(wait_for_window('mellagui.blocks'))     # (it was dragged: the rail is where the window is now)
         self.rail(8)
         self.until(lambda: not self.own('tool'))
         self.wait(lambda s: s['panel']['on'] == '0' and s['rail'][8]['lit'] == 0)
         self.rail(8)
         self.until(lambda: self.own('tool'))
+
+    def newgame_click(self, i):                                 # the i-th level of the row on the new game card: calm, easy, normal, hard
+        n = self.state()['newgame']
+        x, y, w, h = (int(v) for v in n['levels'].split(','))
+        self.click_view(x + i * (w + 6) + w // 2, y + h // 2)
+
+    def test_a_new_game_has_a_level_that_sets_what_one_starts_with_and_is_kept(self):
+        data = tempfile.mkdtemp(prefix='blocks-data-', dir=tmp)
+        self.start(data=data, survival=True, nomode=True)
+        self.ctrl_tap('n')
+        self.prompt(2)
+        self.assertEqual(self.state()['newgame']['level'], 'normal')
+        self.tap('up')
+        self.wait(lambda s: s['newgame']['level'] == 'easy')
+        self.newgame_click(0)
+        self.wait(lambda s: s['newgame']['level'] == 'calm')
+        for key in ('q', 'i', 'e', 't'):
+            self.tap(key)
+        self.tap('enter')
+        st = self.wait(lambda s: s['game']['level'] == 'calm')
+        self.assertEqual((st['inv']['cobble'], st['inv']['planks'], st['inv']['gold']), (30, 30, 20))
+        self.tap('esc')
+        self.quit_game()
+        self.start(data=data, nomode=True, flat=False)
+        self.assertEqual(self.state()['game']['level'], 'calm', 'the file keeps it')
+
+    def test_the_open_card_deletes_a_game_after_asking_and_never_the_open_one(self):
+        data = tempfile.mkdtemp(prefix='blocks-data-', dir=tmp)
+        self.start(data=data)
+        self.ctrl_tap('s')                                       # (a seed's world has no file yet: Save as)
+        self.prompt(8)
+        for key in ('s', 'a', 'd'):
+            self.tap(key)
+        self.tap('enter')
+        self.prompt(1)
+        old = os.path.join(data, 'sad.bl')
+        self.assertTrue(os.path.exists(old))
+        shutil.copy(old, os.path.join(data, 'gone.bl'))
+        self.ctrl_tap('o')
+        self.prompt(7)
+        for key in ('s', 'a', 'd'):
+            self.tap(key)
+        self.shift_delete()
+        self.wait(lambda s: 'game_you_are_in' in s.get('cmsg', ''))
+        self.assertTrue(os.path.exists(old))
+        for _ in range(3):
+            self.tap('backspace')
+        for key in ('g', 'o', 'n', 'e'):
+            self.tap(key)
+        self.shift_delete()
+        self.prompt(13)
+        self.tap('enter')                                        # Enter does not delete
+        self.prompt(7)
+        self.assertTrue(os.path.exists(os.path.join(data, 'gone.bl')))
+        self.shift_delete()
+        self.prompt(13)
+        self.tap('y')
+        self.prompt(7)
+        self.assertFalse(os.path.exists(os.path.join(data, 'gone.bl')))
+        self.assertTrue(os.path.exists(old))
+
+    def test_after_a_lost_game_the_next_start_asks_for_a_new_one(self):
+        data = tempfile.mkdtemp(prefix='blocks-data-', dir=tmp)
+        for name, text in (('player.conf', 'world = -\n'), ('world.bl', 'not looked at')):
+            with open(os.path.join(data, name), 'w') as f:
+                f.write(text)
+        self.start(data=data, flat=False, nomode=True)
+        self.prompt(2)
+        self.assertEqual(self.state()['newgame']['first'], '1')
+
+    def shift_delete(self):
+        ctl.key(42, True)
+        ctl.key(111, True)
+        ctl.key(111, False)
+        ctl.key(42, False)
+        time.sleep(0.2)
 
     def test_a_slow_click_breaks_or_puts_one_block_only(self):
         self.start('--pitch', '-45')

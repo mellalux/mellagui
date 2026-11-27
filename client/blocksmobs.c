@@ -2235,7 +2235,7 @@ void bl_mobs_step(struct bl_mobs *M, const struct bl_world *w, const float pl[3]
 					M->spawn_t = 1.0f + 1.5f * rf(&M->rng);
 					if (M->wave_left > 0 && bl_daylight(time_h) < 0.55f && bl_mobs_count_kind(M, BL_MOB_GOBLIN) < M->wave_cap)
 						try_spawn_wave(M, w, pl, &R);
-				} else if (M->enabled && pl_alive && bl_daylight(time_h) < 0.3f) {
+				} else if (M->enabled && !M->calm && pl_alive && bl_daylight(time_h) < 0.3f) {
 					try_spawn(M, w, pl, cap, &R);
 				}
 			}

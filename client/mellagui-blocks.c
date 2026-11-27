@@ -123,6 +123,33 @@ enum {
 #define RAID_NEAR 28.0f                                     /* this near where they are bound: "the raiders are here" */
 #define RAID_NO_HOUSE 4                                     /* a party is at most this big until their longhouse stands (then BL_RAIDER_MAX) */
 
+/* how hard a game is, chosen with its name (the file keeps it: `level =`; a game with none is a Normal one) */
+enum { LV_NORMAL = 0, LV_CALM, LV_EASY, LV_HARD, LV_N };
+static const struct level {
+	const char *id, *name;
+	float first, pause;                     /* seconds of play by day until the first raid, and from the end of one to the next */
+	int chief_from;                         /* the first party their Captain may lead (he leads every second one) */
+	int quiet_nights;                       /* nights at the start without goblins */
+	int wave_shift, party_extra;            /* the waves as if so many more nights had passed; so many more men in a raiding party */
+	int cobble, planks, gold;               /* what is in the pockets at the start */
+} k_level[LV_N] = {
+	[LV_NORMAL] = { "normal", "Normal", RAID_FIRST, RAID_PAUSE, 2, 0, 0, 0, 0, 0, 0 },
+	[LV_CALM] = { "calm", "Calm", 900.0f, 480.0f, 6, 1, 0, 0, 30, 30, 20 },
+	[LV_EASY] = { "easy", "Easy", 600.0f, 360.0f, 4, 0, 0, 0, 20, 20, 20 },
+	[LV_HARD] = { "hard", "Hard", 180.0f, 180.0f, 2, 0, 1, 1, 0, 0, 0 },
+};
+static const int k_level_order[LV_N] = { LV_CALM, LV_EASY, LV_NORMAL, LV_HARD };   /* as the card shows them */
+
+static int level_by_id(const char *s)
+{
+	for (int i = 0; i < LV_N; i++) {
+		const size_t l = strlen(k_level[i].id);
+		if (!strncmp(s, k_level[i].id, l) && (!s[l] || s[l] == '\n' || s[l] == '\r' || s[l] == ' '))
+			return i;
+	}
+	return -1;
+}
+
 /* the buildings of their camp, in the order they are made (the first tower is there from the start; one that is brought down is built again) */
 enum { CAMP_TOWER, CAMP_HOUSE, CAMP_TOWER2, CAMP_TOWER3, CAMP_BUILDINGS };
 static const struct {
@@ -136,7 +163,7 @@ static const struct {
 
 #define N_SFX 33                                            /* the sounds of k_sfx */
 
-enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE, P_GOAL, P_WON, P_ARMS };
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE, P_GOAL, P_WON, P_ARMS, P_DELETE };
 
 struct app {
 	struct wlhelp help;                                     /* the pages of F1 */
@@ -161,6 +188,10 @@ struct app {
 	char gname[64];                                         /* the card of a new game: its name ... */
 	bool new_survival;                                      /* ... a game (else free building) ... */
 	bool new_first;                                         /* ... and there is no world to go back to */
+	int level, new_level;                                   /* how hard the game is (k_level), and what the card of a new one says */
+	int cli_level;                                          /* --level plus one: of a new game (0 = nothing said) */
+	bool lost, lost_deleted;                                /* the game is lost: it is not saved any more, and its file is gone */
+	bool no_world;                                          /* ... so the next start has no world to open: it asks for a new game */
 	uint32_t arms;                                          /* the weapons he has, bit 1 << BL_WP_* */
 	int weapon;                                             /* the one in his hand */
 	int charges[BL_WP_COUNT];                               /* shots left of the gold that was paid into the fire staff and the laser */
@@ -563,6 +594,10 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 				a->rsite = site;
 				a->rhands = hands;
 			}
+		} else if (with_player && !strcmp(k, "level")) {
+			const int l = level_by_id(v);
+			if (l >= 0)
+				a->level = l;
 		} else if (with_player && !strcmp(k, "raid")) {
 			int raids, used = 0;
 			float t;
@@ -752,7 +787,7 @@ static void conf_write(const struct app *a, FILE *f)
 	if (a->pets.placed)
 		fprintf(f, "yard_x = %.2f\nyard_z = %.2f\ntom_x = %.3f\ntom_y = %.3f\ntom_z = %.3f\nfilip_x = %.3f\nfilip_y = %.3f\nfilip_z = %.3f\n", a->pets.yard[0], a->pets.yard[2],
 		        a->pets.tom.x, a->pets.tom.y, a->pets.tom.z, a->pets.filip.x, a->pets.filip.y, a->pets.filip.z);
-	fprintf(f, "survival = %d\nnights = %d\nkills = %d\npanel = %d\n", a->survival, a->nights, a->kills, a->panel);
+	fprintf(f, "survival = %d\nnights = %d\nkills = %d\npanel = %d\nlevel = %s\n", a->survival, a->nights, a->kills, a->panel, k_level[a->level].id);
 	if (a->have_keep)
 		fprintf(f, "keep_x = %d\nkeep_y = %d\nkeep_z = %d\nkeep_hp = %.1f\n", a->keep[0], a->keep[1], a->keep[2], a->keep_hp);
 	fprintf(f, "workers = ");
@@ -836,6 +871,8 @@ static void conf_save(const struct app *a)
 	conf_write(a, f);
 	if (a->path[0])
 		fprintf(f, "world = %s\n", a->path);
+	else if (a->no_world)
+		fprintf(f, "world = -\n");
 	if (fclose(f) != 0 || rename(tmp, path) != 0)
 		unlink(tmp);
 }
@@ -1428,6 +1465,11 @@ static void survival_setup(struct app *a, float cx, float cz)
 	ensure_keep(a, cx, cz);
 	if (a->have_keep)
 		workers_start(a, 2);
+	if (a->survival) {                                      /* what an easier game starts with */
+		a->inv[BL_COBBLE] = k_level[a->level].cobble;
+		a->inv[BL_PLANKS] = k_level[a->level].planks;
+		a->inv[BL_GOLD] = k_level[a->level].gold;
+	}
 }
 
 /* ================================================================ workers and the command view ================================================================ */
@@ -2028,7 +2070,7 @@ static const char *rival_bearing(const struct app *a, float *dist)
 
 static float raid_first(const struct app *a)
 {
-	return a->cli_raid > 0.0f ? a->cli_raid : a->survival ? RAID_FIRST : RAID_FIRST_CREATIVE;
+	return a->cli_raid > 0.0f ? a->cli_raid : a->survival ? k_level[a->level].first : RAID_FIRST_CREATIVE;
 }
 
 /* where their raiders are bound: the player's keep, when there is none the player himself */
@@ -2057,7 +2099,7 @@ static bool raid_send(struct app *a)
 		}
 	}
 	const float ox = (float)k_side[side][0], oz = (float)k_side[side][1];
-	int want = LM_MIN(RAID_SMALL + a->raids, a->rbuilt & 1 << CAMP_HOUSE ? BL_RAIDER_MAX : RAID_NO_HOUSE), came = 0;
+	int want = LM_MIN(RAID_SMALL + a->raids + k_level[a->level].party_extra, a->rbuilt & 1 << CAMP_HOUSE ? BL_RAIDER_MAX : RAID_NO_HOUSE), came = 0;
 	want = LM_MIN(want, a->rstock / RIVAL_RAIDER_COST);
 	if (want < RAID_SMALL)                                      /* (not enough in the store for a party) */
 		return false;
@@ -2078,7 +2120,7 @@ static bool raid_send(struct app *a)
 	a->raid_here = a->raid_home = false;
 	float dist;
 	const char *way = rival_bearing(a, &dist);
-	if (a->raids % 2 == 0 && bl_mobs_chief_raid(&a->mobs))          /* every second party has him at its head */
+	if (a->raids % 2 == 0 && a->raids >= k_level[a->level].chief_from && bl_mobs_chief_raid(&a->mobs))          /* every second party has him at its head */
 		say(a, "The %s leads %d raiders at you! Their camp is %s", CHIEF_NAME, came, way);
 	else
 		say(a, "The %s sends %d raiders at you! Their camp is %s", RIVAL_NAME, came, way);
@@ -2097,7 +2139,7 @@ static void raid_step(struct app *a, float dt)
 	if (a->raid_out) {
 		if (bl_mobs_count_raiders(&a->mobs) == 0) {
 			a->raid_out = false;
-			a->raid_t = RAID_PAUSE;
+			a->raid_t = k_level[a->level].pause;
 			say(a, a->raid_home ? "The raiders have gone home" : "The raiding party is beaten");
 			return;
 		}
@@ -2812,6 +2854,7 @@ static void new_world(struct app *a, const char *path, int mode)
 		return;
 	}
 	state_reset(a);
+	a->level = a->new_level;
 	snprintf(a->path, sizeof a->path, "%s", file);
 	a->nosave = a->cli_no_save;
 	world_begin(a, false, mode, -1, -1);
@@ -2827,6 +2870,8 @@ static void new_world(struct app *a, const char *path, int mode)
 static void state_reset(struct app *a)
 {
 	a->survival = true;
+	a->level = LV_NORMAL;
+	a->lost = a->lost_deleted = a->no_world = false;
 	a->conf_read = a->conf_mode = false;
 	a->nlog = 0;
 	memset(a->inv, 0, sizeof a->inv);
@@ -3532,6 +3577,26 @@ static void look_by(struct app *a, double dyaw, double dpitch)
 }
 
 /* The keep has no hit points left. With the price of a new one it is built again; without it the game is lost (a card). */
+/* a game that is lost is not kept: its file goes, and the next start asks for a new game */
+static void lost_game(struct app *a)
+{
+	a->lost = true;
+	a->lost_deleted = false;
+	if (!a->path[0] || a->nosave)                           /* (a seed's world, or --no-save: the file is not ours to touch) */
+		return;
+	if (unlink(a->path) != 0 && errno != ENOENT) {
+		say(a, "The lost game's file cannot be deleted: %s", strerror(errno));
+		a->nosave = true;
+		return;
+	}
+	a->lost_deleted = true;
+	a->path[0] = 0;
+	a->nosave = true;
+	a->no_world = true;
+	conf_save(a);
+	title_update(a);
+}
+
 static void keep_fall(struct app *a)
 {
 	keep_remove(a, a->keep, BL_KEEP);
@@ -3550,6 +3615,7 @@ static void keep_fall(struct app *a)
 	keep_sync(a);
 	pause_game(a, P_LOST);
 	say(a, "The keep has fallen");
+	lost_game(a);
 }
 
 /* a new keep rises where the old one stood; whoever stands there is put on top of it */
@@ -3717,10 +3783,15 @@ static void survival_tick(struct app *a, float dt)
 {
 	a->keep_msg_t = fmaxf(0.0f, a->keep_msg_t - dt);
 	float day = bl_daylight(a->time_h);
+	const struct level *lv = &k_level[a->level];
+	a->mobs.calm = a->nights < lv->quiet_nights;
 	if (day < 0.3f) {
-		if (!a->in_night && a->have_keep && !a->keep_down && a->mobs_on) {              /* a night begins: a wave comes for the keep (the bigger the more nights are behind him) */
-			int n = 3 + 2 * a->nights > 18 ? 18 : 3 + 2 * a->nights, cap = 3 + a->nights > 10 ? 10 : 3 + a->nights;
-			int brutes = a->nights == 0 ? 0 : (a->nights + 1) / 2 > 4 ? 4 : (a->nights + 1) / 2;       /* from the second night on: the big ones, last of the wave */
+		if (!a->in_night && a->have_keep && !a->keep_down && a->mobs_on && a->mobs.calm) {
+			say(a, "Night %d: the goblins stay away", a->nights + 1);
+		} else if (!a->in_night && a->have_keep && !a->keep_down && a->mobs_on) {       /* a night begins: a wave comes for the keep (the bigger the more nights are behind him) */
+			const int k = a->nights - lv->quiet_nights + lv->wave_shift;
+			int n = 3 + 2 * k > 18 ? 18 : 3 + 2 * k, cap = 3 + k > 10 ? 10 : 3 + k;
+			int brutes = k == 0 ? 0 : (k + 1) / 2 > 4 ? 4 : (k + 1) / 2;       /* from the second wave on: the big ones, last of it */
 			bl_mobs_start_wave(&a->mobs, n, cap, brutes);
 			a->wave_msg_done = false;
 			if (brutes > 0)
@@ -4369,6 +4440,8 @@ static const char *const HP_WELCOME[] = {
 	"Every game is a file of its own with the name you gave it. The one that was open last is opened the next time.",
 	"|Ctrl+N|A new game: it asks for its name. The old one stays saved.",
 	"|Ctrl+O|Open another game; the one you are in is saved first.",
+	"|Shift+Delete|On the Open card (or its Delete button): delete the chosen game for good. It asks first.",
+	"|Lost|A game that is lost is deleted at once.",
 	"|Ctrl+S|Save (the game also saves itself every minute and when you pause or quit).",
 	"|Ctrl+Shift+S|Save as: the game goes into another file and goes on there.",
 };
@@ -4482,13 +4555,19 @@ static const char *const HP_RIVAL[] = {
 	"# The Red Banner",
 	"The rival clan: every game has it, 80 to 120 blocks from your keep. A wall with two gateways, their keep in the middle, a watchtower with an archer, guards in black with red helmets and workers in dark red with a sack.",
 	"# The Red Captain",
-	"Their chief wears a crown and a red cape. He flies, over walls and water too, and takes the best weapon he has for the distance: sword and bow to begin with, then, with gold to spare, spear, war hammer, fire staff and laser. He guards the camp and leads every second raiding party; badly hurt he flies home. When he falls he is back after ninety seconds, as long as their keep stands.",
+	"Their chief wears a crown and a red cape. He flies, over walls and water too, and takes the best weapon he has for the distance: sword and bow to begin with, then, with gold to spare, spear, war hammer, fire staff and laser. He guards the camp and leads every second raiding party (on the easier levels not the first ones); badly hurt he flies home. When he falls he is back after ninety seconds, as long as their keep stands.",
 	"# Their workers",
 	"They fell trees, cut stone and dig gold. Trees and stone fill their store, which pays for guards (5), raiders (4) and buildings; gold pays for a new keep and the Captain's weapons. A worker runs home when you or your people come near.",
 	"# The camp grows",
 	"With material to spare they build a longhouse (then more men) and two more watchtowers. What you pull down they build again.",
 	"# Raids",
-	"By day a raiding party sets out for your keep, the first after five minutes of play, then four minutes after the last is over: two men, one more each time, up to six.",
+	"By day a raiding party sets out for your keep: two men, one more each time, up to six. When it comes depends on the level of the game.",
+	"# Levels",
+	"A level is chosen with a new game's name (Up and Down). The times are minutes of play: to the first raid, and from the end of one to the next.",
+	"|Calm|15 and 8; the Captain from raid 6; a quiet first night; 30 cobble, 30 planks, 20 gold",
+	"|Easy|10 and 6; the Captain from raid 4; 20 cobble, 20 planks, 20 gold",
+	"|Normal|5 and 4; the Captain from raid 2; empty pockets",
+	"|Hard|3 and 3; as Normal, with a man more in every raid and bigger waves",
 	"# Finding them",
 	"The top right says how far their camp is and which way. In the command view End looks at it.",
 };
@@ -4544,6 +4623,9 @@ static int pal_cell(const struct app *a)                   /* the size of a squa
 	return L.slot + 10;
 }
 
+static bool deletable(const struct app *a, char *out, size_t n, const char **why);   /* (the open card's Delete) */
+static void delete_rect(const struct wlcard *c, int *x, int *y, int *bw, int *bh);
+
 /* is the card one with a path in it (open, save as)? */
 static bool file_card(const struct app *a)
 {
@@ -4554,7 +4636,7 @@ static bool file_card(const struct app *a)
 static void name_layout(const struct app *a, struct wlcard *c, int *fx, int *fy, int *fw, int *my, int *mw)
 {
 	c->w = LM_MIN(540, a->win.bw - 16);
-	c->h = LM_MIN(256, a->win.bh - 16);
+	c->h = LM_MIN(350, a->win.bh - 16);
 	wlcard_center(&a->win, c);
 	*fx = c->x + WLCARD_PAD;
 	*fy = c->y + WLCARD_PAD + 40;
@@ -4563,6 +4645,14 @@ static void name_layout(const struct app *a, struct wlcard *c, int *fx, int *fy,
 	*mw = (*fw - 10) / 2;
 }
 #define MODE_H 52
+#define LEVEL_H 26
+
+/* the row of levels under the two modes: its top, and the width of one (6 px between them) */
+static void level_row(int fw, int my, int *ly, int *lw)
+{
+	*ly = my + MODE_H + 8;
+	*lw = (fw - 6 * (LV_N - 1)) / LV_N;
+}
 #define ARMS_ROW 40
 
 /* a card that has to be answered before anything else: the rail waits */
@@ -4586,7 +4676,7 @@ static void file_layout(const struct app *a, struct wlcard *c, int *fx, int *fy,
 
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
-	*nb = a->prompt == P_PAUSE ? 4 : (a->prompt == P_NEW || a->prompt == P_REPLACE || file_card(a)) ? 2 : 1;
+	*nb = a->prompt == P_PAUSE ? 4 : (a->prompt == P_NEW || a->prompt == P_REPLACE || a->prompt == P_DELETE || file_card(a)) ? 2 : 1;
 	if (a->prompt == P_NEW) {
 		int fx, fy, fw, my, mw;
 		name_layout(a, c, &fx, &fy, &fw, &my, &mw);
@@ -4651,7 +4741,7 @@ static void paint_card(struct app *a)
 	int nb;
 	card_rect(a, &c, &nb);
 	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new game" : a->prompt == P_HELP ? "Help" : a->prompt == P_PALETTE ? "Blocks" :
-	                    a->prompt == P_GOAL ? "How to win" : a->prompt == P_ARMS ? "Weapons" : a->prompt == P_WON ? "Victory" : a->prompt == P_OPEN ? "Open a world" : a->prompt == P_SAVEAS ? "Save the world as" : a->prompt == P_REPLACE ? "Replace the world" : a->first ? "Blocks" : "Paused";
+	                    a->prompt == P_GOAL ? "How to win" : a->prompt == P_ARMS ? "Weapons" : a->prompt == P_WON ? "Victory" : a->prompt == P_OPEN ? "Open a world" : a->prompt == P_SAVEAS ? "Save the world as" : a->prompt == P_REPLACE ? "Replace the world" : a->prompt == P_DELETE ? "Delete a game" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
 	char name[300];
 	world_name(a->path, name, sizeof name);
@@ -4669,7 +4759,7 @@ static void paint_card(struct app *a)
 		cols[2] = lm_theme.btn_amber;
 		cols[3] = lm_theme.btn_green;
 		char l[400];
-		snprintf(l, sizeof l, "World: %s%s", name, kept || !a->path[0] ? "" : "  (not saved)");
+		snprintf(l, sizeof l, "World: %s%s%s%s", name, a->survival ? "  -  " : "", a->survival ? k_level[a->level].name : "", kept || !a->path[0] ? "" : "  (not saved)");
 		wlwin_text(w, tx, ty, l, 1, lm_theme.accent, tw);
 		ty += LM_FONT_H + 6;
 		wlwin_text(w, tx, ty, a->first ? "Click in the window to look around and play." : "Click in the window to go on.", 1, lm_theme.text, tw);
@@ -4683,6 +4773,8 @@ static void paint_card(struct app *a)
 		wlwin_text(w, tx, ty, "It fell and you had not 20 gold for another. The game is over.", 1, lm_theme.text, tw);
 		snprintf(l, sizeof l, "Nights survived: %d     Goblins killed: %d", a->nights, a->kills);
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
+		if (a->lost_deleted)
+			wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Its file is deleted: a lost game is not kept.", 1, lm_theme.text_dim, tw);
 	} else if (a->prompt == P_DEAD) {
 		labels[0] = "Respawn";
 		cols[0] = lm_theme.btn_green;
@@ -4729,7 +4821,32 @@ static void paint_card(struct app *a)
 			wlwin_text_bold(w, x + 12, my + 8, i == 0 ? "Game" : "Free building", 1, on ? lm_theme.text_bright : lm_theme.text_dim, mw - 20);
 			wlwin_text(w, x + 12, my + 10 + LM_FONT_H, i == 0 ? "fight the Red Banner" : "every block, nobody about", 1, lm_theme.text_dim, mw - 20);
 		}
-		wlwin_text(w, fx, my + MODE_H + 8, a->card_msg, 1, lm_theme.caution, fw);
+		int ly, lw;
+		level_row(fw, my, &ly, &lw);
+		for (int i = 0; i < LV_N; i++) {
+			const int x = fx + i * (lw + 6), l = k_level_order[i];
+			const bool on = a->new_survival && a->new_level == l;
+			wlwin_round_fill(w, x, ly, lw, LEVEL_H, 13, on ? lm_theme.accent : lm_theme.panel_line);
+			wlwin_round_fill(w, x + 2, ly + 2, lw - 4, LEVEL_H - 4, 11, on ? lm_theme.bar : lm_theme.background);
+			wlwin_text(w, x + LM_MAX(4, (lw - lm_font_text_width(k_level[l].name)) / 2), ly + (LEVEL_H - LM_FONT_H) / 2, k_level[l].name, 1,
+			           on ? lm_theme.text_bright : a->new_survival ? lm_theme.text : lm_theme.text_dim, lw - 8);
+		}
+		{
+			const struct level *lv = &k_level[a->new_level];
+			char t[3][120] = { "A level is for a game only.", "", "" };
+			if (a->new_survival) {
+				snprintf(t[0], sizeof t[0], "First raid after %.0f minutes, the next %.0f after each.", lv->first / 60.0f, lv->pause / 60.0f);
+				snprintf(t[1], sizeof t[1], "Their Captain from raid %d.%s", lv->chief_from,
+				         lv->quiet_nights ? " The first night is quiet." : lv->party_extra ? " Bigger raids and waves." : "");
+				if (lv->cobble || lv->planks || lv->gold)
+					snprintf(t[2], sizeof t[2], "Start: %d cobble, %d planks, %d gold.", lv->cobble, lv->planks, lv->gold);
+				else
+					snprintf(t[2], sizeof t[2], "You start with empty pockets.");
+			}
+			for (int i = 0; i < 3; i++)
+				wlwin_text(w, fx, ly + LEVEL_H + 6 + i * (LM_FONT_H + 2), t[i], 1, lm_theme.text_dim, fw);
+		}
+		wlwin_text(w, fx, ly + LEVEL_H + 8 + 3 * (LM_FONT_H + 2), a->card_msg, 1, lm_theme.caution, fw);
 		labels[0] = a->new_first ? "Quit" : "Cancel";
 		labels[1] = "Start";
 		cols[0] = a->new_first ? lm_theme.btn_red : lm_theme.btn_slate;
@@ -4781,6 +4898,15 @@ static void paint_card(struct app *a)
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
 		labels[0] = "Play on";
 		cols[0] = lm_theme.btn_green;
+	} else if (a->prompt == P_DELETE) {
+		char l[400], other[300];
+		world_name(a->target, other, sizeof other);
+		snprintf(l, sizeof l, "Delete the game %s?", other);
+		wlwin_text(w, tx, ty, l, 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty + LM_FONT_H + 5, "It cannot be brought back.", 1, lm_theme.caution, tw);
+		labels[1] = "Delete";
+		cols[0] = lm_theme.btn_slate;
+		cols[1] = lm_theme.btn_red;
 	} else if (a->prompt == P_REPLACE) {
 		char l[400], other[300];
 		world_name(a->target, other, sizeof other);
@@ -4810,6 +4936,14 @@ static void paint_card(struct app *a)
 		labels[1] = a->prompt == P_OPEN ? "Open" : "Save";
 		cols[0] = lm_theme.btn_slate;
 		cols[1] = a->prompt == P_OPEN ? lm_theme.btn_blue : lm_theme.btn_green;
+		if (a->prompt == P_OPEN) {
+			int x, y, bw, bh;
+			char path[1024];
+			const char *why = NULL;
+			delete_rect(&c, &x, &y, &bw, &bh);
+			const bool can = deletable(a, path, sizeof path, &why);
+			wlcard_drop(w, x, y, bw, bh, can ? lm_theme.btn_red : lm_theme.panel_line, can && a->pc_hover == 2, a->pc_down == 2, "Delete", can ? lm_theme.on_colour : lm_theme.text_dim);
+		}
 	} else {
 		labels[0] = "Close";
 		cols[0] = lm_theme.btn_blue;
@@ -4871,13 +5005,16 @@ static void write_dump(struct app *a)
 		struct wlcard c;
 		int fx, fy, fw, my, mw;
 		name_layout(a, &c, &fx, &fy, &fw, &my, &mw);
-		fprintf(f, "newgame survival=%d first=%d field=%d,%d,%d modes=%d,%d,%d name=%s\nnmsg %s\n", a->new_survival, a->new_first, fx, fy, fw, my, mw, MODE_H, a->gname, a->card_msg);
+		int ly, lw;
+		level_row(fw, my, &ly, &lw);
+		fprintf(f, "newgame survival=%d first=%d field=%d,%d,%d modes=%d,%d,%d level=%s levels=%d,%d,%d,%d name=%s\nnmsg %s\n", a->new_survival, a->new_first, fx, fy, fw, my, mw, MODE_H,
+		        k_level[a->new_level].id, fx, ly, lw, LEVEL_H, a->gname, a->card_msg);
 	}
 	fprintf(f, "panel on=%d shown=%d messages=%d\n", a->panel, wlwin_pane_shown(&a->win, WLPANE_TOOL), a->nlog);
 	if (a->nlog)
 		fprintf(f, "said %s\n", a->log[0].text);
-	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f wave=%d/%d/%d barracks=%d brutes=%d\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
-	        a->dig_on ? a->dig_t : -1.0f, a->mobs.wave_on ? bl_mobs_wave_remaining(&a->mobs) : 0, a->mobs.wave_on ? a->mobs.wave_size : 0, a->mobs.wave_on, barracks_find(a, NULL), bl_mobs_count_brutes(&a->mobs));
+	fprintf(f, "game survival=%d have_keep=%d keep=%d,%d,%d keep_hp=%.1f nights=%d dig=%.2f wave=%d/%d/%d barracks=%d brutes=%d level=%s\n", a->survival, a->have_keep, a->keep[0], a->keep[1], a->keep[2], a->keep_hp, a->nights,
+	        a->dig_on ? a->dig_t : -1.0f, a->mobs.wave_on ? bl_mobs_wave_remaining(&a->mobs) : 0, a->mobs.wave_on ? a->mobs.wave_size : 0, a->mobs.wave_on, barracks_find(a, NULL), bl_mobs_count_brutes(&a->mobs), k_level[a->level].id);
 	{
 		struct bl_camera cam;
 		cmd_camera(a, &cam);
@@ -5516,9 +5653,14 @@ static void paint(struct wlwin *w)
 /* Puts up the new / open / save as card; the game waits, and Cancel goes back to where it came from. */
 static void open_dialog(struct app *a, enum prompt p)
 {
+	if (p == P_SAVEAS && a->lost) {
+		say(a, "A lost game is not saved");
+		a->win.redraw = true;
+		return;
+	}
 	if (a->prompt == P_DEAD || a->prompt == P_LOST)
 		a->back = a->prompt;
-	else if (a->prompt != P_NEW && a->prompt != P_OPEN && a->prompt != P_SAVEAS && a->prompt != P_REPLACE)
+	else if (a->prompt != P_NEW && a->prompt != P_OPEN && a->prompt != P_SAVEAS && a->prompt != P_REPLACE && a->prompt != P_DELETE)
 		a->back = P_PAUSE;
 	if (a->playing) {
 		pause_game(a, p);
@@ -5532,6 +5674,7 @@ static void open_dialog(struct app *a, enum prompt p)
 	if (p == P_NEW) {
 		a->gname[0] = 0;
 		a->new_survival = true;
+		a->new_level = a->survival ? a->level : LV_NORMAL;
 		wltext_end(a->gname);
 	}
 	if (p == P_OPEN || p == P_SAVEAS) {
@@ -5563,6 +5706,63 @@ static void card_close(struct app *a, enum prompt p)
 	a->prompt = p;
 	a->pc_hover = a->pc_down = -1;
 	a->pk.sb_drag = -1;
+}
+
+/* the world file the open card's field names, if it may be deleted: a world's file that is not the one that is open */
+static bool deletable(const struct app *a, char *out, size_t n, const char **why)
+{
+	const char *w = NULL;
+	if (!a->field[0] || !field_path(a, false, out, n, &w)) {
+		*why = "Choose a game in the list first";
+		return false;
+	}
+	struct stat st;
+	char magic[4] = { 0 };
+	const size_t l = strlen(out);
+	FILE *f = l > 3 && !strcmp(out + l - 3, ".bl") && lstat(out, &st) == 0 && S_ISREG(st.st_mode) ? fopen(out, "rb") : NULL;
+	const bool world = f && fread(magic, 1, 4, f) == 4 && !memcmp(magic, "MGBL", 4);
+	if (f)
+		fclose(f);
+	if (!world) {
+		*why = "That is no game to delete";
+		return false;
+	}
+	if (a->path[0] && same_file(out, a->path)) {
+		*why = "That is the game you are in: open another one first";
+		return false;
+	}
+	return true;
+}
+
+/* where the open card's Delete button is: at the left, away from Open */
+static void delete_rect(const struct wlcard *c, int *x, int *y, int *bw, int *bh)
+{
+	*x = c->x + WLCARD_PAD;
+	*y = c->y + c->h - WLCARD_PAD - WLCARD_BTN_H;
+	*bw = WLCARD_BTN_W;
+	*bh = WLCARD_BTN_H;
+}
+
+/* the card after "Delete the game?": the answer is yes. Back to the list. */
+static void delete_world(struct app *a)
+{
+	char name[300];
+	world_name(a->target, name, sizeof name);
+	card_close(a, P_OPEN);
+	if (a->path[0] && same_file(a->target, a->path))
+		return;
+	if (unlink(a->target) != 0) {
+		snprintf(a->card_msg, sizeof a->card_msg, "It cannot be deleted: %s", strerror(errno));
+		return;
+	}
+	char *slash = strrchr(a->field, '/');                   /* the list shows the same folder */
+	if (slash)
+		slash[1] = 0;
+	else
+		a->field[0] = 0;
+	wltext_end(a->field);
+	wlpicker_reset(&a->pk);
+	snprintf(a->card_msg, sizeof a->card_msg, "%.150s is deleted", name);
 }
 
 static void card_action(struct app *a, int which)
@@ -5616,9 +5816,27 @@ static void card_action(struct app *a, int which)
 			resume_game(a);
 		return;
 	}
+	if (a->prompt == P_DELETE) {
+		if (which == 1)
+			delete_world(a);
+		else
+			card_close(a, P_OPEN);                              /* (the field is as it was) */
+		return;
+	}
 	if (a->prompt == P_OPEN) {
 		if (which == 0) {
 			card_close(a, a->back);
+			return;
+		}
+		if (which == 2) {                                       /* Delete: asked about first */
+			char path[1024];
+			const char *why = NULL;
+			if (!deletable(a, path, sizeof path, &why)) {
+				snprintf(a->card_msg, sizeof a->card_msg, "%s", why);
+				return;
+			}
+			snprintf(a->target, sizeof a->target, "%s", path);
+			card_close(a, P_DELETE);
 			return;
 		}
 		size_t l = strlen(a->field);
@@ -5716,17 +5934,20 @@ static void file_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 	file_layout(a, &c, &fx, &fy, &fw, &ly, &rows);
 	char base[1024];
 	card_base(a, base, sizeof base);
+	int dx, dy, dw, dh;
+	delete_rect(&c, &dx, &dy, &dw, &dh);
+	const bool on_delete = a->prompt == P_OPEN && a->px >= dx && a->px < dx + dw && a->py >= dy && a->py < dy + dh;
 	if (op == LM_WL_POINTER_EVT_AXIS) {
 		if (args[1].u == 0)
 			wlpicker_wheel(&a->pk, lm_fixed_to_double(args[2].f) > 0 ? 1 : -1);
 	} else if (op == LM_WL_POINTER_EVT_MOTION) {
 		if (!wlcard_drag_motion(&a->win, &c, a->px, a->py)) {
 			wlpicker_motion(&a->pk, base, a->field, ly, rows, a->py);
-			a->pc_hover = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+			a->pc_hover = on_delete ? 2 : wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
 		}
 	} else if (op == LM_WL_POINTER_EVT_BUTTON) {
 		uint32_t button = args[2].u, state = args[3].u;
-		int k = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+		int k = on_delete ? 2 : wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
 		bool on_field = a->px >= fx && a->px < fx + fw && a->py >= fy && a->py < fy + 28;
 		a->clip.serial = args[0].u;
 		if (button == 273 && state == 1 && on_field) {
@@ -5787,6 +6008,12 @@ static void name_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 			wltext_click(a->gname, (int)a->px - (fx + 12), (a->win.mods & LM_MOD_SHIFT) != 0);
 		} else if (a->py >= my && a->py < my + MODE_H && a->px >= fx && a->px < fx + fw) {
 			a->new_survival = a->px < fx + mw + 5;
+		} else if (a->new_survival && a->px >= fx) {
+			int ly, lw;
+			level_row(fw, my, &ly, &lw);
+			const int i = (int)(a->px - fx) / (lw + 6);
+			if (a->py >= ly && a->py < ly + LEVEL_H && i < LV_N)
+				a->new_level = k_level_order[i];
 		}
 	}
 	a->win.redraw = true;
@@ -5803,6 +6030,12 @@ static void name_key(struct app *a, uint32_t code)
 		card_action(a, 1);
 	} else if (ks == LM_KS_Tab) {
 		a->new_survival = !a->new_survival;
+	} else if ((ks == LM_KS_Up || ks == LM_KS_Down) && a->new_survival) {         /* the level: up is easier */
+		int i = 0;
+		while (i < LV_N - 1 && k_level_order[i] != a->new_level)
+			i++;
+		i = LM_CLAMP(i + (ks == LM_KS_Up ? -1 : 1), 0, LV_N - 1);
+		a->new_level = k_level_order[i];
 	} else if (wltext_edit(&a->clip, a->gname, sizeof a->gname, ks, a->win.mods)) {
 		a->card_msg[0] = 0;
 	}
@@ -5815,7 +6048,9 @@ static void file_key(struct app *a, uint32_t code)
 	char base[1024];
 	card_base(a, base, sizeof base);
 	int rows = wlpicker_fit(a->win.bh, 180);
-	if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0)) {
+	if (ks == LM_KS_Delete && (a->win.mods & LM_MOD_SHIFT) && a->prompt == P_OPEN) {
+		card_action(a, 2);
+	} else if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Page_Up || ks == LM_KS_Page_Down || ((ks == LM_KS_Return || ks == LM_KS_KP_Enter) && a->pk.sel >= 0)) {
 		if (wlpicker_key(&a->pk, base, a->field, sizeof a->field, rows, ks) == WLPICKER_OPEN)
 			card_action(a, 1);
 	} else if (ks == LM_KS_Escape) {
@@ -6206,7 +6441,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			open_dialog(a, P_NEW);
 		return;
 	}
-	if (a->prompt == P_REPLACE) {                               /* (Enter does not replace by accident: Y or the button does) */
+	if (a->prompt == P_REPLACE || a->prompt == P_DELETE) {      /* (Enter does not replace or delete by accident: Y or the button does) */
 		if (code == K_ESC || code == K_ENTER)
 			card_action(a, 0);
 		else if (code == K_Y)
@@ -6844,6 +7079,7 @@ static int selftest(void)
 		rv.inv[BL_GOLD] = KEEP_GOLD - 1;
 		keep_fall(&rv);
 		CHECK(!rv.have_keep && rv.prompt == P_LOST, "without the gold it is lost");
+		CHECK(rv.lost && rv.lost_deleted && !rv.path[0] && rv.nosave && rv.no_world, "and a lost game's file is not kept");
 		/* the name of a new game */
 		char np[600];
 		const char *nw = NULL;
@@ -7645,6 +7881,13 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--no-mobs")) {
 			no_mobs = true;
+		} else if (!strcmp(argv[i], "--level") && i + 1 < argc) {
+			const int l = level_by_id(argv[++i]);
+			if (l < 0) {
+				fprintf(stderr, "mellagui-blocks: --level wants calm, easy, normal or hard\n");
+				return 2;
+			}
+			a.cli_level = l + 1;
 		} else if (!strcmp(argv[i], "--survival")) {
 			mode_cli = 1;
 		} else if (!strcmp(argv[i], "--creative")) {
@@ -7698,7 +7941,7 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--no-save")) {
 			no_save = true;
 		} else {
-			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--rival | --no-rival] [--raid-after SECONDS] [--no-body] [--no-panel] [--survival | --creative] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
+			fprintf(stderr, "usage: mellagui-blocks [--seed N] [--flat] [--world-size N] [--size WxH] [--render WxH] [--threads N] [--time H] [--no-clock | --clock | --real-clock] [--no-sound] [--no-pets] [--no-mobs] [--rival | --no-rival] [--raid-after SECONDS] [--no-body] [--no-panel] [--survival | --creative] [--level calm|easy|normal|hard] [--give NAME=N,...] [--day-minutes M] [--workers N] [--soldiers N] [--goblin DX,DZ] [--brute DX,DZ] [--pet-at SECONDS] [--yaw D] [--pitch D] "
 			                "[--fov D] [--save | --no-save] | --selftest\n");
 			return 2;
 		}
@@ -7726,11 +7969,13 @@ int main(int argc, char **argv)
 		char deflt[600], path[1024], gone[300] = "";
 		world_path(&a, deflt, sizeof deflt);
 		snprintf(path, sizeof path, "%s", a.last_world[0] ? a.last_world : deflt);
-		if (a.last_world[0] && access(path, F_OK) != 0 && strcmp(path, deflt) != 0) {
+		if (a.last_world[0] && strcmp(a.last_world, "-") && access(path, F_OK) != 0 && strcmp(path, deflt) != 0) {
 			world_name(path, gone, sizeof gone);
 			snprintf(path, sizeof path, "%s", deflt);
 		}
-		if (access(path, F_OK) == 0) {
+		if (!strcmp(a.last_world, "-")) {
+			a.new_first = true;                                 /* the last game was lost */
+		} else if (access(path, F_OK) == 0) {
 			const char *err = NULL;
 			from_file = world_load(&a, path, &err, mode_cli, workers_cli, soldiers_cli);
 			if (!from_file) {
@@ -7754,6 +7999,8 @@ int main(int argc, char **argv)
 			world_path(&a, a.path, sizeof a.path);
 		if (no_save)
 			a.nosave = true;
+		if (a.cli_level)
+			a.level = a.cli_level - 1;
 		world_begin(&a, false, a.new_first ? 0 : mode_cli < 0 ? 1 : mode_cli, workers_cli, soldiers_cli);   /* (behind the card of the first game: just a landscape) */
 	}
 	if (a.cli_rival && a.rival != 1)
@@ -7802,6 +8049,7 @@ int main(int argc, char **argv)
 	if (a.new_first) {
 		a.prompt = P_NEW;
 		a.new_survival = mode_cli != 0;
+		a.new_level = a.cli_level ? a.cli_level - 1 : LV_NORMAL;
 		a.gname[0] = 0;
 		wltext_end(a.gname);
 	}

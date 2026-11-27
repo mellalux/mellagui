@@ -239,6 +239,7 @@ static inline float bl_mob_height(const struct bl_mob *b)       /* the height of
 struct bl_mobs {
 	struct bl_mob mob[BL_MOBS_MAX];
 	bool enabled;                   /* false: nothing spawns and the ones there are go */
+	bool calm;                      /* a quiet night: no goblins come out of the ground by themselves (a wave still does) */
 	int cap;                        /* how many there may be at a time (1 .. BL_MOBS_MAX) */
 	bool keep_on;                   /* there is a keep: the goblins that are not near the player go to it and hit it */
 	float keep[3];                  /* the middle of the bottom of it */

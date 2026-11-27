@@ -43,6 +43,7 @@ static const struct { const char *name; uint32_t color; } icons[LM_DOCKICON_COUN
     [LM_DOCKICON_BLOCKS] = { "blocks", 0 },
     [LM_DOCKICON_CHESS] = { "chess", 0 },
     [LM_DOCKICON_CUBE] = { "cube", 0 },
+    [LM_DOCKICON_CCTV] = { "cctv", 0 },
 };
 
 /* The disc colour of a built-in icon: the palette's icon-* colours. */
@@ -78,6 +79,7 @@ static uint32_t icon_color(int kind)
     case LM_DOCKICON_BLOCKS: return lm_theme.icon_blocks;
     case LM_DOCKICON_CHESS: return lm_theme.icon_chess;
     case LM_DOCKICON_CUBE: return lm_theme.icon_cube;
+    case LM_DOCKICON_CCTV: return lm_theme.icon_cctv;
     default: return lm_theme.icon_generic;
     }
 }
@@ -98,7 +100,7 @@ int lm_dockicon_by_name(const char *name)
 int lm_dockicon_guess(const char *entry_name)
 {
     static const struct { const char *part; int kind; } hints[] = {
-        { "chess", LM_DOCKICON_CHESS }, { "voxel", LM_DOCKICON_CUBE }, { "cube", LM_DOCKICON_CUBE }, { "sandbox", LM_DOCKICON_CUBE }, { "tetris", LM_DOCKICON_BLOCKS }, { "blocks", LM_DOCKICON_BLOCKS }, { "solitaire", LM_DOCKICON_CARDS }, { "cards", LM_DOCKICON_CARDS }, { "game", LM_DOCKICON_CARDS }, { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
+        { "cctv", LM_DOCKICON_CCTV }, { "surveillance", LM_DOCKICON_CCTV }, { "chess", LM_DOCKICON_CHESS }, { "voxel", LM_DOCKICON_CUBE }, { "cube", LM_DOCKICON_CUBE }, { "sandbox", LM_DOCKICON_CUBE }, { "tetris", LM_DOCKICON_BLOCKS }, { "blocks", LM_DOCKICON_BLOCKS }, { "solitaire", LM_DOCKICON_CARDS }, { "cards", LM_DOCKICON_CARDS }, { "game", LM_DOCKICON_CARDS }, { "paint", LM_DOCKICON_PAINT }, { "picture editor", LM_DOCKICON_PAINT }, { "draw", LM_DOCKICON_PAINT }, { "archive", LM_DOCKICON_ARCHIVE }, { "zip", LM_DOCKICON_ARCHIVE }, { "compress", LM_DOCKICON_ARCHIVE }, { "overview", LM_DOCKICON_OVERVIEW }, { "bluetooth", LM_DOCKICON_BLUETOOTH }, { "shortcut", LM_DOCKICON_KEYBOARD }, { "keyboard", LM_DOCKICON_KEYBOARD },
         { "notification", LM_DOCKICON_BELL }, { "bell", LM_DOCKICON_BELL }, { "screenshot", LM_DOCKICON_SHOT }, { "disk", LM_DOCKICON_DISK }, { "timer", LM_DOCKICON_TIMER }, { "pomodoro", LM_DOCKICON_TIMER }, { "stopwatch", LM_DOCKICON_TIMER }, { "sticky", LM_DOCKICON_NOTE }, { "memo", LM_DOCKICON_NOTE },
         { "display", LM_DOCKICON_DISPLAY }, { "record", LM_DOCKICON_RECORD }, { "process", LM_DOCKICON_MONITOR }, { "monitor", LM_DOCKICON_MONITOR }, { "task", LM_DOCKICON_MONITOR },
         { "cam", LM_DOCKICON_CAMERA },   /* before "web": a Webcam is a camera */
@@ -326,6 +328,14 @@ static float glyph(int kind, float u, float v)
         const float left[8] = { -hx, -0.5f * s, 0, 0, 0, s, -hx, 0.5f * s };
         const float right[8] = { 0, 0, hx, -0.5f * s, hx, 0.5f * s, 0, s };
         return fminf2(sd_face(u, v, top), fminf2(sd_face(u, v, left), sd_face(u, v, right)));
+    }
+    case LM_DOCKICON_CCTV: {                            /* a surveillance camera: a tilted body with a lens, on an arm from its plate */
+        float d = sd_line(u, v, -0.24f, -0.18f, 0.14f, -0.04f, 0.13f);
+        d = fminf2(d, sd_line(u, v, 0.2f, -0.02f, 0.29f, 0.015f, 0.085f));
+        d = sd_sub(d, sd_circle(u, v, 0.27f, 0.008f, 0.04f));
+        d = fminf2(d, sd_line(u, v, -0.1f, 0.0f, -0.1f, 0.22f, 0.04f));
+        d = fminf2(d, sd_line(u, v, -0.1f, 0.22f, -0.27f, 0.22f, 0.04f));
+        return fminf2(d, sd_box(u, v, -0.3f, 0.22f, 0.04f, 0.13f, 0.02f));
     }
     case LM_DOCKICON_CHESS: {                           /* a pawn: a ball, a collar, a cone and a foot (the chess game) */
         float d = sd_circle(u, v, 0.0f, -0.215f, 0.115f);

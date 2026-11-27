@@ -24,6 +24,7 @@
 #   make build/blocks-test  the block world (client/blocks.c, the picture client/blocksview.c): tests, --bench, --shot, --info
 #   make mellagui-smart  build/mellagui-smart (client/mellagui-smart.c, the devices of a Smart Life / Tuya account)
 #   make mellagui-bluetooth  build/mellagui-bluetooth (client/mellagui-bluetooth.c, the Bluetooth devices window)
+#   make mellagui-cctv  build/mellagui-cctv  (client/mellagui-cctv.c, the network cameras)
 #   make mellagui-calendar build/mellagui-calendar (client/mellagui-calendar.c, the calendar of the panel's clock)
 #   make mellagui-record build/mellagui-record (client/mellagui-record.c, the screen recorder: MP4 of JPEG pictures)
 #   make mellagui-run  build/mellagui-run    (client/mellagui-run.c, the Run dialog)
@@ -75,9 +76,9 @@ CLIENT_COMMON_SRCS := src/wire.c src/protocol.c src/log.c src/loop.c src/font.c 
 CLIENT_COMMON_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(CLIENT_COMMON_SRCS))
 
 TARGETS := $(BUILD)/mellagui $(BUILD)/mellagui-term $(BUILD)/mellagui-calc $(BUILD)/keymap-test $(BUILD)/logind-test $(BUILD)/gl-test $(BUILD)/screenoff-test \
-           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-desktop $(BUILD)/mellagui-archive $(BUILD)/mellagui-shot $(BUILD)/mellagui-paint $(BUILD)/mellagui-solitaire $(BUILD)/mellagui-tetris $(BUILD)/mellagui-chess $(BUILD)/mellagui-blocks $(BUILD)/chess-test $(BUILD)/chessai-test $(BUILD)/blocks-test $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-smart $(BUILD)/mellagui-gadget $(BUILD)/fuzz-server $(BUILD)/hwprobe $(BUILD)/mellagui-greetd $(BUILD)/mellagui-greeter
+           $(BUILD)/mellagui-run $(BUILD)/mellagui-settings $(BUILD)/mellagui-monitor $(BUILD)/mellagui-view $(BUILD)/mellagui-notify $(BUILD)/mellagui-edit $(BUILD)/mellagui-files $(BUILD)/mellagui-matrix $(BUILD)/mellagui-cam $(BUILD)/mellagui-record $(BUILD)/mellagui-calendar $(BUILD)/mellagui-quick $(BUILD)/mellagui-timer $(BUILD)/mellagui-keys $(BUILD)/mellagui-top $(BUILD)/mellagui-du $(BUILD)/mellagui-status $(BUILD)/mellagui-notes $(BUILD)/mellagui-desktop $(BUILD)/mellagui-archive $(BUILD)/mellagui-shot $(BUILD)/mellagui-paint $(BUILD)/mellagui-solitaire $(BUILD)/mellagui-tetris $(BUILD)/mellagui-chess $(BUILD)/mellagui-blocks $(BUILD)/chess-test $(BUILD)/chessai-test $(BUILD)/blocks-test $(BUILD)/mellagui-bluetooth $(BUILD)/mellagui-cctv $(BUILD)/mellagui-smart $(BUILD)/mellagui-gadget $(BUILD)/fuzz-server $(BUILD)/hwprobe $(BUILD)/mellagui-greetd $(BUILD)/mellagui-greeter
 
-.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-desktop mellagui-archive mellagui-shot mellagui-paint mellagui-solitaire mellagui-tetris mellagui-chess mellagui-blocks mellagui-bluetooth mellagui-smart mellagui-gadget asan test run clean fuzz fuzz-run hwprobe
+.PHONY: all mellagui mellagui-term mellagui-calc mellagui-run mellagui-settings mellagui-monitor mellagui-view mellagui-notify mellagui-edit mellagui-files mellagui-matrix mellagui-cam mellagui-record mellagui-calendar mellagui-quick mellagui-timer mellagui-keys mellagui-top mellagui-du mellagui-status mellagui-notes mellagui-desktop mellagui-archive mellagui-shot mellagui-paint mellagui-solitaire mellagui-tetris mellagui-chess mellagui-blocks mellagui-bluetooth mellagui-cctv mellagui-smart mellagui-gadget asan test run clean fuzz fuzz-run hwprobe
 all: $(TARGETS)
 
 mellagui: $(BUILD)/mellagui
@@ -163,6 +164,10 @@ $(BUILD)/mellagui-keys: $(BUILD)/client/mellagui-keys.o $(BUILD)/src/wlc.o $(BUI
 $(BUILD)/mellagui-bluetooth: $(BUILD)/client/mellagui-bluetooth.o $(BUILD)/client/btctl.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(BUILD)/mellagui-cctv: $(BUILD)/client/mellagui-cctv.o $(BUILD)/client/dvrip.o $(BUILD)/client/json.o $(BUILD)/client/ffpipe.o $(BUILD)/src/md5.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) -pthread
 
 $(BUILD)/mellagui-smart: $(BUILD)/client/mellagui-smart.o $(BUILD)/client/tuya.o $(BUILD)/client/smartsched.o $(BUILD)/client/smartscene.o $(BUILD)/client/wltext.o $(BUILD)/client/wlclip.o $(BUILD)/client/tuyalan.o $(BUILD)/client/smartfav.o $(BUILD)/src/smartsun.o $(BUILD)/client/json.o $(BUILD)/client/qr.o $(BUILD)/src/aes.o $(BUILD)/src/md5.o $(BUILD)/src/sha256.o $(BUILD)/src/wlc.o $(BUILD)/client/wlwin.o $(CLIENT_COMMON_OBJS)
 	@mkdir -p $(dir $@)

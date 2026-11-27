@@ -39,6 +39,7 @@ enum lm_dockicon {
     LM_DOCKICON_BLOCKS,         /* the tetris game: four blocks in a T */
     LM_DOCKICON_CHESS,          /* the chess game: a pawn */
     LM_DOCKICON_CUBE,           /* the blocks game: a cube seen from a corner, its three faces apart */
+    LM_DOCKICON_CCTV,           /* the network cameras: a surveillance camera on its arm */
     LM_DOCKICON_COUNT
 };
 

@@ -19152,7 +19152,7 @@ class TestDefaultConfigHasEveryProgram(Base):
         both = '\n'.join(sections['dock-apps'] + sections['launcher-apps'])
         for prog in ('mellagui-files', 'mellagui-edit', 'mellagui-calc', 'mellagui-cam', 'mellagui-record', 'mellagui-top', 'mellagui-du', 'mellagui-monitor',
                      'mellagui-keys', 'mellagui-notes', 'mellagui-bluetooth', 'mellagui-shot', 'mellagui-timer', 'mellagui-smart', 'mellagui-archive',
-                     'mellagui-paint', 'mellagui-solitaire', 'mellagui-tetris', 'mellagui-chess', 'mellagui-blocks', '@terminal', '@view', '@run', '@settings'):
+                     'mellagui-paint', 'mellagui-solitaire', 'mellagui-tetris', 'mellagui-chess', 'mellagui-blocks', 'mellagui-cctv', '@terminal', '@view', '@run', '@settings'):
             self.assertIn(prog, both, prog + ' is in neither list')
 
 
@@ -33346,6 +33346,161 @@ class TestDesktop(Base):
         self.assertTrue(os.path.exists(outside), 'the original is still there')
         st, items = self.state(lambda s, i: 'from_away.txt' in i)
         self.assertIn('from_away.txt', items)
+
+
+class TestCctv(Base):
+    """client/mellagui-cctv.c (+ dvrip.c) against tests/fake_dvrip.py: a stand-in camera whose small stream is red and big stream blue.
+    The window through its dump (MELLAGUI_CCTV_DUMP) and the compositor's picture. Needs ffmpeg."""
+    EXE = os.environ.get('MELLAGUI_CCTV_BIN') or os.path.join(ROOT, 'build', 'mellagui-cctv')
+    RAIL = 52
+
+    def setUp(self):
+        super().setUp()
+        if not os.path.exists(self.EXE):
+            self.skipTest('mellagui-cctv not built')
+        if not shutil.which('ffmpeg'):
+            self.skipTest('needs ffmpeg')
+        self.dir = tempfile.mkdtemp(prefix='cctv-', dir=tmp)
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        for name, color, size in (('sub', 'red', '352x264'), ('main', 'blue', '640x480')):
+            subprocess.run(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=%s:s=%s:r=10:d=2' % (color, size), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                            '-g', '10', '-bf', '0', '-x264-params', 'aud=1:repeat-headers=1', '-f', 'h264', os.path.join(self.dir, name + '.h264')], check=True, timeout=30)
+            with open(os.path.join(self.dir, name + '.size'), 'w') as f:
+                f.write(size.replace('x', ' '))
+
+    def camera(self, password):
+        log = os.path.join(self.dir, 'camera-%d.log' % len(os.listdir(self.dir)))
+        out = open(log, 'w')
+        p = subprocess.Popen([sys.executable, os.path.join(ROOT, 'tests', 'fake_dvrip.py'), self.dir, '--password', password], stdout=out, stderr=subprocess.STDOUT)
+        out.close()
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        for _ in range(200):
+            with open(log) as f:
+                m = re.search(r'port (\d+)', f.read())
+            if m:
+                return int(m[1]), log
+            time.sleep(0.05)
+        self.fail('the stand-in camera did not start')
+
+    def lines(self, log, start):
+        with open(log) as f:
+            return [l for l in f.read().splitlines() if l.startswith(start)]
+
+    def start(self, conf):
+        for w in ctl.windows()['windows']:
+            self.assertNotEqual(w['app_id'], 'mellagui.cctv', 'a window of an earlier test is still open')
+        path = os.path.join(self.dir, 'cctv.conf')
+        with open(path, 'w') as f:
+            f.write(conf)
+        os.chmod(path, 0o600)
+        self.dump = os.path.join(self.dir, 'dump')
+        p = subprocess.Popen([self.EXE, '--size', '700x360'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             env=dict(os.environ, MELLAGUI_CCTV_CONF=path, MELLAGUI_CCTV_DUMP=self.dump))
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        self.win = wait_for_window('mellagui.cctv')
+        self.assertIsNotNone(self.win, 'the window did not appear')
+        return p
+
+    def state(self):
+        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}}
+        try:
+            with open(self.dump) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return st
+        for l in lines:
+            f = l.split()
+            if f[0] == 'state':
+                st.update(x.split('=') for x in f[1:])
+            elif f[0] == 'cam':
+                st['cam'][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'msg':
+                st['msg'][int(f[1])] = ' '.join(f[2:])
+            else:
+                st[f[0]][int(f[1])] = tuple(int(v) for v in f[2:])
+        return st
+
+    def wait(self, cond, what, timeout=15.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            st = self.state()
+            try:
+                if cond(st):
+                    return st
+            except KeyError:
+                pass
+            time.sleep(0.05)
+        self.fail('%s: %r' % (what, self.state()))
+
+    def screen(self, st, i):
+        """The middle of camera i's picture on the screen."""
+        w = next(w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cctv')
+        x, y, pw, ph = st['pic'][i]
+        return w['x'] + self.RAIL + x + pw // 2, w['y'] + y + ph // 2
+
+    def color_at(self, xy):
+        ctl.abs(0, 0)
+        ctl.sync()
+        return ctl.dump(os.path.join(self.dir, 'screen.ppm')).px(*xy)
+
+    def test_live_pictures_one_alone_and_back(self):
+        port, log = self.camera('sala')
+        p = self.start('Yard 127.0.0.1:%d admin sala\nDoor 127.0.0.1:%d admin sala\n' % (port, port))
+        st = self.wait(lambda s: all(s['cam'][i]['state'] == 'live' and int(s['cam'][i]['frames']) > 5 for i in (0, 1)), 'both live')
+        self.assertEqual([st['cam'][i]['src'] for i in (0, 1)], ['352x264'] * 2)
+        time.sleep(0.2)
+        r, g, b = self.color_at(self.screen(st, 0))
+        self.assertTrue(r > 200 and g < 60 and b < 60, (r, g, b))
+        self.assertEqual(sorted(self.lines(log, 'claim')), ['claim Extra1'] * 2)
+        ctl.click(*self.screen(st, 0))
+        st = self.wait(lambda s: s['view'] == '0' and s['cam'][0]['src'] == '640x480' and s['cam'][0]['state'] == 'live' and s['cam'][0]['stream'] == '2', 'the big stream')
+        self.assertEqual(st['cam'][1]['state'], 'idle')
+        time.sleep(0.2)
+        r, g, b = self.color_at(self.screen(st, 0))
+        self.assertTrue(b > 200 and r < 60, (r, g, b))
+        ctl.tap(1)                                                          # Esc
+        st = self.wait(lambda s: s['view'] == '-1' and all(s['cam'][i]['state'] == 'live' and s['cam'][i]['stream'] == '1' for i in (0, 1)), 'both again')
+        self.wait(lambda s: len(self.lines(log, 'keepalive')) >= 1, 'keep alive')
+        ctl.key(29, True)
+        ctl.tap(16)                                                         # Ctrl+Q
+        ctl.key(29, False)
+        self.assertEqual(p.wait(timeout=8), 0)
+
+    def test_a_refused_login_is_not_tried_again_by_itself(self):
+        port, log = self.camera('sala')
+        self.start('Yard 127.0.0.1:%d admin wrong\n' % port)
+        st = self.wait(lambda s: s['cam'][0]['state'] == 'refused', 'refused')
+        self.assertIn('wrong password', st['msg'][0])
+        time.sleep(3.0)
+        ctl.click(*self.screen(st, 0))                                      # looking at it alone asks nothing either
+        time.sleep(0.5)
+        ctl.tap(1)
+        time.sleep(0.5)
+        self.assertEqual(len(self.lines(log, 'login')), 1)
+        ctl.tap(19)                                                         # R
+        self.wait(lambda s: len(self.lines(log, 'login')) == 2 and s['cam'][0]['state'] == 'refused', 'asked once more')
+        time.sleep(1.0)
+        self.assertEqual(len(self.lines(log, 'login')), 2)
+
+    def test_a_lost_connection_is_made_again(self):
+        port, log = self.camera('')
+        self.start('Yard 127.0.0.1:%d admin -\n' % port)
+        self.wait(lambda s: s['cam'][0]['state'] == 'live' and int(s['cam'][0]['frames']) > 3, 'live')
+        open(os.path.join(self.dir, 'drop'), 'w').close()
+        st = self.wait(lambda s: s['cam'][0]['state'] == 'retry', 'noticed')
+        before = int(st['cam'][0]['frames'])
+        self.wait(lambda s: s['cam'][0]['state'] == 'live' and int(s['cam'][0]['frames']) > before + 3, 'back')
+        self.assertEqual(len(self.lines(log, 'login admin ok')), 2)
+
+    def test_selftest_and_list_do_not_show_passwords(self):
+        self.assertEqual(subprocess.run([self.EXE, '--selftest'], capture_output=True, timeout=20).returncode, 0)
+        path = os.path.join(self.dir, 'cctv.conf')
+        with open(path, 'w') as f:
+            f.write('Yard 10.0.0.1 admin topsecret\n')
+        r = subprocess.run([self.EXE, '--config', path, '--list'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('password set', r.stdout)
+        self.assertNotIn('topsecret', r.stdout + r.stderr)
 
 
 if __name__ == '__main__':

@@ -17,7 +17,7 @@ static const struct entry table[] = {
       "'active' marks the layout in use right now, ^ moves a layout up in the order. At least one layout stays ticked and at most four can be." },
     { "@Screen magnifier", NULL, "Screen magnifier",
       "Zooms the screen round the pointer so that small things can be read. The point under the pointer stays where it is, so nothing has to be scrolled: "
-      "move the pointer to bring another part of the screen under it. Super+= zooms in (and switches it on), Super+- zooms out (and off at the end)." },
+      "move the pointer to bring another part of the screen under it. The magnifying glass in the panel switches it on and off (a right click on it chooses the zoom), Super+= zooms in (and switches it on), Super+- zooms out (and off at the end)." },
     { "magnifier", NULL, "Magnify the screen", "Switches the magnifier on or off. Screenshots and recordings are not magnified." },
     { "magnifier-zoom", NULL, "Zoom", "How much the screen is magnified, from 125 % to 800 %. The keys Super+= and Super+- step through 125, 150, 200, 300, 400, 600 and 800 %." },
     { "@Microphone", NULL, "Microphone", "The input that programs record from: pick one, set how loud it is, or mute it. It applies at once." },
@@ -29,7 +29,8 @@ static const struct entry table[] = {
     { "sticky", NULL, "Sticky keys",
       "Tap Shift, Ctrl, Alt, AltGr or Super once and it stays pressed for the next key, so a shortcut can be typed one key at a time - handy with one "
       "hand or a keyboard that is hard to press.\n"
-      "Pressing Shift five times in a row switches this on and off. The panel shows 'Sticky' while a modifier is waiting." },
+      "Pressing Shift five times in a row switches this on and off, and so does the key button in the panel.\n"
+      "A modifier that waits shows as a see-through key near the top of the screen; its name is bold red while it is locked (tapped twice)." },
     { "repeat-delay", NULL, "Repeat delay",
       "How long a key has to be held down before it starts to repeat, in milliseconds. A smaller number repeats sooner; the change applies to programs "
       "at once." },

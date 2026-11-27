@@ -37,7 +37,7 @@
     X("panel", "height", panel_height, 32, 20, 64, "height of the top panel") \
     X("panel", "workspace-width", panel_ws_width, 24, 16, 80, "one workspace cell") \
     X("panel", "layout-width", panel_layout_width, 36, 24, 100, "the keyboard layout indicator") \
-    X("panel", "sticky-width", panel_sticky_width, 84, 50, 160, "the Sticky indicator") \
+    X("panel", "sticky-width", panel_sticky_width, 36, 28, 160, "the sticky keys button") \
     X("panel", "caps-width", panel_caps_width, 48, 30, 120, "the Caps indicator") \
     X("panel", "task-max-width", panel_task_max_width, 160, 60, 400, "widest taskbar entry") \
     X("panel", "task-gap", panel_task_gap, 2, 0, 16, "space between taskbar entries") \

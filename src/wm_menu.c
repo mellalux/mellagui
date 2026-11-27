@@ -239,6 +239,44 @@ static void dockitem_menu_activate(struct lm_wm *wm, int which)
     }
 }
 
+/* Right click on the panel's magnifying glass: Off and the zoom levels, the one in use marked. The menu opens under the pointer, below the panel. */
+void magnifier_menu_open(struct lm_wm *wm)
+{
+    static const int steps[] = MAG_STEPS;
+    enum { N = sizeof(steps) / sizeof(steps[0]) };
+    _Static_assert(N + 1 <= LM_MENU_MAX, "the magnifier's menu is too long");
+    static char names[N][24];
+    const char *labels[N + 1];
+    int now = wm->srv->config.magnifier ? wm->srv->config.magnifier_zoom : 100;
+    labels[0] = now == 100 ? "Off  \u2022" : "Off";
+    for (int i = 0; i < N; i++) {
+        snprintf(names[i], sizeof(names[i]), "%d %%%s", steps[i], steps[i] == now ? "  \u2022" : "");
+        labels[i + 1] = names[i];
+    }
+    if (!wm->srv->seat)
+        return;
+    double px = 0, py = 0;
+    lm_seat_pointer_position(wm->srv->seat, &px, &py);
+    struct lm_output *o = lm_output_nearest(wm->srv, px, py);
+    int w, h;
+    if (!o || !menu_fill(wm, 4, "Magnifier", labels, NULL, N + 1, &w, &h))
+        return;
+    menu_place(wm, (int)px - w / 2, o->y, w, h, o);
+}
+
+static void magnifier_menu_activate(struct lm_wm *wm, int which)
+{
+    static const int steps[] = MAG_STEPS;
+    if (!wm->srv->settings)
+        return;
+    if (which > 0) {
+        char v[16];
+        snprintf(v, sizeof(v), "%d", steps[which - 1]);
+        lm_settings_set(wm->srv->settings, "magnifier-zoom", v);
+    }
+    lm_settings_set(wm->srv->settings, "magnifier", which > 0 ? "1" : "0");
+}
+
 /* An entry was chosen: whoever asked for the menu gets it. */
 void menu_activate(struct lm_wm *wm, int which)
 {
@@ -252,6 +290,8 @@ void menu_activate(struct lm_wm *wm, int which)
         launcher_field_clip(wm, which);
     else if (owner == 3)
         window_menu_activate(wm, which);
+    else if (owner == 4)
+        magnifier_menu_activate(wm, which);
     else
         lm_menu_chosen(wm->srv, which);
 }

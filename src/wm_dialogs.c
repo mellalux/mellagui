@@ -591,6 +591,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
             lm_wm_quick_toggle(wm, &pick->rect);
         if (pk == LM_PICK_PANEL_STICKY && pick->kind == LM_PICK_PANEL_STICKY && wm->srv->input)
             lm_input_set_sticky(wm->srv->input, !lm_input_sticky(wm->srv->input));
+        if (pk == LM_PICK_PANEL_MAGNIFIER && pick->kind == LM_PICK_PANEL_MAGNIFIER && wm->srv->settings)
+            lm_settings_set(wm->srv->settings, "magnifier", wm->srv->config.magnifier ? "0" : "1");
         if (pk == LM_PICK_PANEL_TRAY && pick->kind == LM_PICK_PANEL_TRAY && pick->index == pi)
             lm_tray_click(wm->srv->tray, pi, button);               /* pressed and let go on the same item */
         if (pk == LM_PICK_PANEL_POWER && pick->kind == LM_PICK_PANEL_POWER) {
@@ -702,8 +704,13 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         return true;
     case LM_PICK_PANEL_LAYOUT:
     case LM_PICK_PANEL_STICKY:
+    case LM_PICK_PANEL_MAGNIFIER:
     case LM_PICK_PANEL_OSK:
     case LM_PICK_PANEL_QUICK:
+        if (button == BTN_RIGHT && pick->kind == LM_PICK_PANEL_MAGNIFIER) {
+            magnifier_menu_open(wm);                        /* the zoom levels */
+            return true;
+        }
         if (button == BTN_LEFT || (button == BTN_RIGHT && pick->kind == LM_PICK_PANEL_LAYOUT)) {
             wm->press_panel_kind = pick->kind;
             wm->press_panel_ws = button == BTN_RIGHT ? -1 : 1;     /* layout direction, see the release code */

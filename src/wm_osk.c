@@ -135,6 +135,7 @@ void osk_damage(struct lm_wm *wm)
     if (osk_geo(wm, &g))
         damage_rect(wm, &g.card);
     damage_panels(wm);
+    modkeys_damage(wm);                                         /* (they keep above the keyboard) */
 }
 
 void osk_info(const struct lm_wm *wm, const struct lm_osk_geo *g, struct lm_osk_info *oi)
@@ -410,6 +411,8 @@ size_t lm_wm_tray_describe(struct lm_wm *wm, char *buf, size_t size)
             snprintf(ic, sizeof(ic), "%dx%d", pi.tray[i].icon->width, pi.tray[i].icon->height);
         n += (size_t)snprintf(buf + n, size - n, "item %d x=%d y=%d w=%d h=%d icon=%s text=%s\n", pi.tray[i].id, pi.tray[i].rect.x,
                               pi.tray[i].rect.y, pi.tray[i].rect.w, pi.tray[i].rect.h, ic, pi.tray[i].text);
+        if ((pi.tray[i].color >> 24) && n < size)
+            n += (size_t)snprintf(buf + n, size - n, "color %d #%06x\n", pi.tray[i].id, pi.tray[i].color & 0xffffffu);
     }
     return n < size ? n : size - 1;
 }

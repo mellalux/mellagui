@@ -75,6 +75,8 @@
 #define PANEL_STICKY_W (lm_metrics.panel_sticky_width)
 #define PANEL_QUICK_W 36                            /* the quick settings button (not a configurable size) */
 #define PANEL_OSK_W 36                              /* the on-screen keyboard button (not a configurable size) */
+#define PANEL_MAG_W 36                              /* the magnifier button (not a configurable size) */
+#define MAG_STEPS { 125, 150, 200, 300, 400, 600, 800 }     /* the magnifier's zoom levels: the keys and the button's menu */
 #define PANEL_CAPS_W (lm_metrics.panel_caps_width)
 #define SW_MAX_WINDOWS 32
 #define GADGET_W (lm_metrics.gadget_width)                /* default size (5 entries of 1 line; taller cards give the entries more lines) */
@@ -290,7 +292,8 @@ struct lm_wm {
     uint32_t hover_bits;
     int hover_panel_ws;         /* -1 none */
     bool hover_launcher;
-    bool hover_power, hover_layout, hover_sticky, hover_osk, hover_quick;
+    bool hover_power, hover_layout, hover_sticky, hover_magnifier, hover_osk, hover_quick;
+    struct lm_rect modkeys_rect;    /* where the sticky keys' keys were last damaged (empty = none show) */
     int hover_tray;             /* id of the tray item under the pointer, 0 = none */
     bool osk_pin;               /* the keyboard is the number pad of the lock screen (a PIN) */
     bool lock_kbd_hover;        /* the pointer is on the lock screen's keyboard button */
@@ -308,7 +311,7 @@ struct lm_wm {
     int osk_press_x, osk_press_y;
     struct lm_osk_place osk_start;   /* the place when the drag began */
     uint32_t osk_down_code, osk_down_mods;   /* what was pressed for the held key: its code and the latched modifiers pressed with it */
-    bool menu_open;             /* a menu is showing in the card menu_rect: the dock icon's (owner 0, for dock item menu_dock_item) or a program's (owner 1) */
+    bool menu_open;             /* a menu is showing in the card menu_rect: the dock icon's (owner 0, for dock item menu_dock_item) or a program's (owner 1); 2 a launcher field's, 3 a window's, 4 the magnifier's */
     struct lm_window *menu_window;      /* owner 3: the window whose title bar / taskbar button was right-clicked */
     int menu_owner, menu_dock_item, menu_sel, menu_n;
     struct lm_rect menu_rect;
@@ -575,6 +578,9 @@ void launcher_edge_tick(void *data);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);
 void damage_panels(struct lm_wm *wm);
+/* wm_modkeys.c: the keys sticky keys show on the screen. */
+bool modkeys_info(const struct lm_wm *wm, struct lm_modkeys_info *mi);     /* false = none to show */
+void modkeys_damage(struct lm_wm *wm);                  /* what they covered before and what they cover now */
 /* wm_places.c: where the own programs' windows were the last time (--windows-file). */
 void places_load(struct lm_wm *wm);
 bool places_find(struct lm_wm *wm, const struct lm_window *w, struct lm_rect *r, bool *maximized);
@@ -606,6 +612,7 @@ void menu_damage(struct lm_wm *wm);
 void menu_info(const struct lm_wm *wm, struct lm_menu_info *mi);
 void menu_set(struct lm_wm *wm, bool open);
 void window_menu_activate(struct lm_wm *wm, int which);
+void magnifier_menu_open(struct lm_wm *wm);
 void window_menu_open(struct lm_wm *wm, struct lm_window *w);
 void note_dismiss(struct lm_wm *wm, int id);
 bool note_rects(const struct lm_wm *wm, struct lm_rect *r);

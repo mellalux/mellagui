@@ -134,7 +134,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
  *   zwp_pointer_constraints_v1    1    pointerconstraints.c (lock / confine the pointer to a surface)
  *   mellagui_settings_v1             1    settings.c (MellaGUI private: read/change the user settings)
  *   mellagui_capture_v1              1    capture.c  (MellaGUI private: the screen into a wl_shm buffer, for mellagui-record)
- *   mellagui_tray_v1                 1    tray.c     (MellaGUI private: icons / buttons of programs in the top bar)
+ *   mellagui_tray_v1                 2    tray.c     (MellaGUI private: icons / buttons of programs in the top bar)
  *   mellagui_menu_v1                 1    menu.c     (MellaGUI private: a menu at the pointer, e.g. the actions of a text field)
  */
 #define LM_WL_COMPOSITOR_VERSION            4
@@ -154,7 +154,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 #define LM_ZWP_POINTER_CONSTRAINTS_V1_VERSION 1
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 #define LM_MELLAGUI_CAPTURE_V1_VERSION         1
-#define LM_MELLAGUI_TRAY_V1_VERSION            1
+#define LM_MELLAGUI_TRAY_V1_VERSION            2
 #define LM_MELLAGUI_MENU_V1_VERSION            2
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
@@ -699,6 +699,7 @@ enum {
     LM_MELLAGUI_TRAY_ITEM_V1_REQ_DESTROY = 0,  /* "" the item leaves the bar */
     LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_ICON = 1, /* "?o" wl_shm buffer (ARGB8888 / XRGB8888, at most 64x64; copied at once, then released); null = no icon */
     LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TEXT = 2, /* "s" label right of the icon, at most 31 bytes */
+    LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_COLOR = 3,/* "u" version 2: the colour of the button itself, 0xAARRGGBB (the alpha only says that there is one); 0 = the bar's own */
     LM_MELLAGUI_TRAY_ITEM_V1_EVT_SIZE = 0,     /* "i" the icon edge in pixels the bar wants (sent when the item is created) */
     LM_MELLAGUI_TRAY_ITEM_V1_EVT_CLICKED = 1,  /* "u" evdev button (272 left, 273 right, 274 middle): pressed and let go on the item */
 };

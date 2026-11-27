@@ -211,9 +211,9 @@ switches the keyboard layout, Ctrl+Alt+F1..F12 still switches the console).
 Keyboard layouts and sticky keys: `--layouts us,ee,de,fi` (the default; up to four, the first is active at start; also `us,ee`
 etc.) selects what you can switch between with Super+Space, or with the panel indicator (left click next, right click previous).
 Layouts: `us`, `ee` (Estonian: ü õ ö ä, AltGr+f = š, AltGr+z = ž), `de`, `fi`; no dead keys. With anything but a lone `us`
-the right Alt key is AltGr (third/fourth level, `AltGr+e` = €). `--sticky` (or the panel's *Sticky* button, or pressing Shift five
+the right Alt key is AltGr (third/fourth level, `AltGr+e` = €). `--sticky` (or the panel's key button, or pressing Shift five
 times in a row) turns on sticky keys: tapping Shift/Ctrl/Alt/AltGr/Super applies it to the next key press only, tapping it twice
-locks it, a third tap unlocks. The button shows the latched (`Sh`) or locked (`SH`) modifiers. Each change beeps (latch, lock, unlock, sticky on/off; the tones are
+locks it, a third tap unlocks. Every latched or locked modifier shows as a see-through key (CTRL, SHIFT, ALT, ALTGR, SUPER) near the top of the screen; the name is bold red while it is locked. A keyboard's Fn key cannot be made sticky: most keyboards handle it themselves and the computer never sees it. Next to the key button are the on-screen keyboard and a magnifying glass that switches the screen magnifier on and off (right click: the zoom). Each change beeps (latch, lock, unlock, sticky on/off; the tones are
 synthesised and piped to `aplay`, so it needs alsa-utils and a sound card; `--no-sound` silences it).
 
 Settings panel: Super+I or *MellaGUI* → *Settings* opens `mellagui-settings` (Tab / Shift+Tab, Enter or Space, Left/Right on sliders, Esc).

@@ -897,6 +897,14 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             return;
     }
 
+    memset(&it, 0, sizeof(it));
+    if (modkeys_info(wm, &it.u.modkeys) && (!clip || lm_rect_overlaps(&it.u.modkeys.rect, clip))) {   /* sticky keys' keys: under the menus, never on the keyboard */
+        it.kind = LM_SCENE_MODKEYS;
+        it.output = lm_output_primary(wm->srv);
+        if (!fn(&it, data))
+            return;
+    }
+
     if (wm->menu_open && !lm_lock_active(wm->srv->lock) && (!clip || lm_rect_overlaps(&wm->menu_rect, clip))) {    /* a menu: above the dialogs */
         memset(&it, 0, sizeof(it));
         it.kind = LM_SCENE_MENU;

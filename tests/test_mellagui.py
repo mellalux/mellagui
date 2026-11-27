@@ -2501,8 +2501,9 @@ def type_text(text):
 
 class TestKeyboard(Base):
     """Keyboard layouts (XKB groups) and sticky keys."""
-    LAYOUT_BTN = (742, 14)          # panel indicator on the 1024 px wide test output
-    STICKY_BTN = (806, 14)
+    LAYOUT_BTN = (706, 14)          # panel indicator on the 1024 px wide test output
+    STICKY_BTN = (746, 14)          # ... then the sticky keys, the on-screen keyboard and the magnifier side by side
+    MAGNIFIER_BTN = (826, 14)
 
     def setUp(self):
         super().setUp()
@@ -2719,6 +2720,62 @@ class TestKeyboard(Base):
         self.assertEqual(ctl.kbd()['sticky'], 0)
         ctl.abs(900, 500)
 
+    def test_panel_magnifier_button_toggles(self):
+        def setting():
+            ctl.cmd('setting magnifier')
+            return ctl.last.split(' ', 1)[1]
+        self.addCleanup(lambda: ctl.cmd('settings magnifier 0'))
+        ctl.click(*self.MAGNIFIER_BTN)
+        self.assertEqual(setting(), '1')
+        ctl.click(*self.MAGNIFIER_BTN)                   # the point under the pointer stays where it is: the button can be clicked again
+        self.assertEqual(setting(), '0')
+        ctl.abs(900, 500)
+
+    def test_right_click_on_the_magnifier_chooses_the_zoom(self):
+        def setting(key):
+            ctl.cmd('setting ' + key)
+            return ctl.last.split(' ', 1)[1]
+        self.addCleanup(lambda: (ctl.cmd('settings magnifier 0'), ctl.cmd('settings magnifier-zoom 200')))
+
+        def choose(label):
+            ctl.click(*self.MAGNIFIER_BTN, code=273)
+            lines = ctl.cmd('dockmenu')
+            head = lines[0]
+            self.assertIn('open=1', head)
+            self.assertIn('owner=4', head)
+            entry = [ln for ln in lines if ln.startswith('entry ') and '"%s' % label in ln][0]
+            at = dict(f.split('=') for f in entry.split('"')[-1].split())
+            ctl.click(int(at['x']) + 20, int(at['y']) + int(at['h']) // 2)
+            return lines
+        choose('300 %')
+        self.assertEqual((setting('magnifier'), setting('magnifier-zoom')), ('1', '300'))
+        ctl.cmd('settings magnifier 0')
+        ctl.abs(900, 500)
+
+    def test_waiting_modifiers_show_as_keys_on_the_screen(self):
+        ctl.abs(900, 300)
+
+        def row(name):
+            ctl.sync()
+            shot = ctl.dump(os.path.join(tmp, name + '.ppm'))
+            return shot, [shot.px(x, y) for y in range(56, 156, 4) for x in range(160, 864, 4)]
+
+        def red(pixels):
+            return sum(1 for r, g, b in (((p >> 16) & 255, (p >> 8) & 255, p & 255) if isinstance(p, int) else p[:3] for p in pixels)
+                       if r > 140 and g < 90 and b < 90)
+        _, empty = row('mod0')
+        ctl.cmd('sticky 1')
+        _, on = row('mod1')
+        self.assertEqual(on, empty, 'nothing shows while no modifier waits')
+        ctl.tap(KEY_LEFTCTRL)
+        _, latched = row('mod2')
+        self.assertNotEqual(latched, empty)
+        ctl.tap(KEY_LEFTCTRL)
+        shot, _ = row('mod3')
+        self.assertGreater(red([shot.px(x, y) for y in range(60, 148) for x in range(448, 576)]), 15, 'a locked modifier has a red name')
+        ctl.tap(KEY_LEFTCTRL)
+        self.assertEqual(row('mod4')[1], empty, 'the key goes away with its modifier')
+
     def test_panel_shows_layout_and_sticky(self):
         ctl.abs(900, 500)
         ctl.sync()
@@ -2727,11 +2784,11 @@ class TestKeyboard(Base):
         ctl.cmd('sticky 1')
         ctl.sync()
         after = ctl.dump(os.path.join(tmp, 'kbd1.ppm'))
-        sticky_before = [before.px(x, 16) for x in range(789, 864, 3)]
-        sticky_after = [after.px(x, 16) for x in range(789, 864, 3)]
+        sticky_before = [before.px(x, 16) for x in range(729, 764, 3)]
+        sticky_after = [after.px(x, 16) for x in range(729, 764, 3)]
         self.assertNotEqual(sticky_before, sticky_after, 'sticky button looks the same when enabled')
-        layout_before = [before.px(x, 16) for x in range(746, 778, 2)]
-        layout_after = [after.px(x, 16) for x in range(746, 778, 2)]
+        layout_before = [before.px(x, 16) for x in range(690, 722, 2)]
+        layout_after = [after.px(x, 16) for x in range(690, 722, 2)]
         self.assertNotEqual(layout_before, layout_after, 'layout indicator did not change')
 
 
@@ -11376,9 +11433,13 @@ class TestStatus(Base):
         while True:
             lines = c.cmd('tray')
             its = []
+            colours = {ln.split()[1]: ln.split()[2] for ln in lines[1:] if ln.startswith('color ')}
             for ln in lines[1:]:
+                if not ln.startswith('item '):
+                    continue
                 head, _, text = ln.partition(' text=')                           # (the text may hold spaces)
-                its.append(dict(kv.split('=', 1) for kv in head.split()[2:] if '=' in kv) | {'id': head.split()[1], 'text': text})
+                its.append(dict(kv.split('=', 1) for kv in head.split()[2:] if '=' in kv) | {'id': head.split()[1], 'text': text,
+                                                                                             'color': colours.get(head.split()[1])})
             if want is None or (len(its) >= want and all(i['icon'] != '-' for i in its)) or time.time() > end:
                 return its
             time.sleep(0.1)
@@ -11419,6 +11480,7 @@ class TestStatus(Base):
         texts = sorted(i['text'] for i in its)
         self.assertEqual(texts, ['56%', 'Home'])
         self.assertTrue(all(i['icon'] != '-' for i in its), its)                   # both have a picture
+        self.assertEqual({i['text']: i['color'] for i in its}, {'56%': None, 'Home': '#3f9a5e'})     # the network is on: a green button
 
     def test_a_click_on_the_battery_lists_it_with_the_time_left(self):
         c = self.start('b')
@@ -11480,7 +11542,11 @@ class TestStatus(Base):
         end = time.time() + 5
         while time.time() < end and any(i['text'] == 'Home' for i in self.items(c)):
             time.sleep(0.1)
+        end = time.time() + 5
+        while time.time() < end and any(i['text'] == '' and i['color'] for i in self.items(c)):
+            time.sleep(0.1)
         net = [i for i in self.items(c) if i['text'] == ''][0]                      # the button stays, without a name
+        self.assertIsNone(net['color'], 'the radio is off: the bar\'s own button')
         self.click_item(c, net)
         self.assertIn('Turn Wi-Fi on', [x[0] for x in self.entries(c)])
 
@@ -24582,6 +24648,14 @@ class TestBluetooth(Base):
         self.assertTrue(its)
         return max(its, key=lambda i: int(i['x']))                          # (the first button made is the rightmost; the bell comes later, to its left)
 
+    def test_the_button_is_blue_only_while_the_radio_is_on(self):
+        c = self.start('colour')
+        self.wait(lambda: self.button(c).get('color') == '#1c7ed6', 'a blue button while the radio is on')
+        off = self.start('colour-off', powered=False)
+        self.wait(lambda: self.button(off)['icon'] != '-', 'the button of a radio that is off')
+        time.sleep(0.3)
+        self.assertIsNone(self.button(off)['color'])
+
     def open_menu(self, c):
         it = self.button(c)
         c.click(int(it['x']) + 5, int(it['y']) + 5)
@@ -28371,8 +28445,9 @@ class TestMagnifier(Base):
         left = self.shot(c, 'mg6b')
         c.cmd('settings magnifier 0')
         plain = self.shot(c, 'mg6c')
-        same = sum(1 for y in range(0, 500, 7) for x in range(0, 800, 7) if left.px(x, y) == plain.px(x, y))
-        self.assertEqual(same, len(range(0, 500, 7)) * len(range(0, 800, 7)), 'the first output kept its magnified picture')
+        rows = range(35, 500, 7)                                              # below the panel: its magnifier button shows that it is on
+        same = sum(1 for y in rows for x in range(0, 800, 7) if left.px(x, y) == plain.px(x, y))
+        self.assertEqual(same, len(rows) * len(range(0, 800, 7)), 'the first output kept its magnified picture')
 
     def test_the_gl_renderer_shows_the_same_picture(self):
         if not os.path.exists(os.path.join(ROOT, 'build', 'gl-test')) or subprocess.run([os.path.join(ROOT, 'build', 'gl-test')], capture_output=True, timeout=60).returncode == 77:

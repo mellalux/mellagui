@@ -301,6 +301,7 @@ enum lm_pick_kind {
     LM_PICK_OSK_GRIP,       /* its right / bottom margin (`edges` = LM_EDGE_RIGHT / LM_EDGE_BOTTOM, both in the corner): drag to resize it */
     LM_PICK_PANEL_LAYOUT,   /* keyboard layout indicator: left click = next layout, right click = previous */
     LM_PICK_PANEL_STICKY,   /* sticky keys toggle */
+    LM_PICK_PANEL_MAGNIFIER,/* the panel's magnifying glass: the screen magnifier on / off, right click = the menu of zoom levels */
     LM_PICK_PANEL_WORKSPACE,/* `index` = workspace */
     LM_PICK_PANEL_TASK,     /* taskbar button of `window` */
     LM_PICK_PANEL_TRAY,     /* an icon / button a program put into the bar (tray.h): `index` = the item's id */
@@ -431,9 +432,9 @@ struct lm_panel_info {
     bool about_open;                /* the About dialog is open: the logo button shows it */
     struct lm_rect caps;            /* Caps / Num Lock indicator; zero width while no lock is on */
     char caps_text[8];              /* "CAPS", "NUM" or "CAPS+N" */
-    struct lm_rect osk;             /* the on-screen keyboard button, left of the layout indicator */
+    struct lm_rect osk;             /* the on-screen keyboard button, between the sticky keys and the magnifier */
     bool hover_osk;
-    struct lm_rect quick;               /* the quick settings button, left of the keyboard button */
+    struct lm_rect quick;               /* the quick settings button, left of the layout indicator */
     bool hover_quick, quick_open;
     bool osk_open;                  /* the keyboard is showing: the button is lit */
     struct lm_rect layout;          /* keyboard layout indicator (with `layout_badges`: the box round all the badges) */
@@ -441,10 +442,11 @@ struct lm_panel_info {
     char layout_text[8];            /* "US", "EE" ... */
     int nbadges;                    /* setting layout-badges: 1 = `layout` shows the flag of the layout in use (badge[0]), else 0 = the round badge with letters */
     struct { struct lm_rect rect; char text[8]; char label[24]; bool active, hover; } badge[1];   /* label: written right of the flag (setting layout-label), "" = none */
-    struct lm_rect sticky;          /* sticky keys toggle */
+    struct lm_rect sticky;          /* sticky keys toggle: a keycap (the waiting modifiers are LM_SCENE_MODKEYS) */
     bool hover_sticky;
     bool sticky_on;
-    char sticky_text[24];           /* "Sticky", or the latched (Sh) / locked (SH) modifiers */
+    struct lm_rect magnifier;       /* the screen magnifier's button, right of the keyboard button */
+    bool hover_magnifier, magnifier_on;
     struct lm_rect power;           /* the round power button, the rightmost one (right of the clock); a circle in this square */
     bool hover_power;
     bool power_open;                /* the session dialog is open: the button shows it */
@@ -465,6 +467,7 @@ struct lm_panel_info {
         int id;                     /* LM_PICK_PANEL_TRAY index */
         const struct lm_texture *icon;  /* premultiplied ARGB, NULL = none; valid only during the callback */
         const char *text;           /* "" = none; valid only during the callback */
+        uint32_t color;             /* the program's colour for the button (alpha 0 = the bar's own) */
         bool hover;
     } tray[LM_PANEL_MAX_TRAY];
 };
@@ -691,6 +694,7 @@ enum lm_scene_kind {
     LM_SCENE_PANEL_SHADOW,          /* the soft shadow the top panel throws on what is below it (one per output, painted before the panel) */
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_DOCK,                  /* the dock (above the panel, below the menu) */
+    LM_SCENE_MODKEYS,               /* sticky keys: a see-through key for every latched / locked modifier (near the top, under the menus) */
     LM_SCENE_MENU,              /* the dock's right-click menu (above the dock) */
     LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
     LM_SCENE_POWER,                 /* the session dialog (above windows, popups and notifications) */
@@ -701,6 +705,17 @@ enum lm_scene_kind {
     LM_SCENE_OVERVIEW,              /* the desktop overview: dimmed output, workspace strip, frames and labels (its window pictures are LM_SCENE_GHOST items right after it) */
     LM_SCENE_SWITCHER,              /* the Alt+Tab window list (above everything but the lock screen) */
     LM_SCENE_LOCK,                  /* the lock screen: while locked it is the ONLY item (one per output) */
+};
+
+#define LM_MODKEYS_MAX 5            /* Ctrl, Shift, Alt, AltGr, Super */
+struct lm_modkeys_info {
+    struct lm_rect rect;            /* round all the keys */
+    int n;
+    struct {
+        struct lm_rect rect;
+        char label[8];              /* "CTRL" ... */
+        bool locked;                /* locked by a second tap (else: latched for the next key) */
+    } key[LM_MODKEYS_MAX];
 };
 
 #define LM_OVERVIEW_MAX 16
@@ -745,6 +760,7 @@ struct lm_scene_item {
         struct lm_overview_info overview; /* LM_SCENE_OVERVIEW */
         struct lm_dock_info dock;   /* LM_SCENE_DOCK */
         struct lm_osk_info osk;     /* LM_SCENE_OSK */
+        struct lm_modkeys_info modkeys; /* LM_SCENE_MODKEYS */
         struct lm_power_info power; /* LM_SCENE_POWER */
         struct lm_menu_info menu; /* LM_SCENE_MENU */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */

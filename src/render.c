@@ -2102,7 +2102,10 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     for (int i = 0; i < p->ntray; i++) {                 /* programs' icons: a button with the icon and / or a label */
         const struct lm_rect *r = &p->tray[i].rect;
         const struct lm_texture *ic = p->tray[i].icon;
-        paint_drop(c, r, btn_radius(LM_MIN(r->w, r->h) / 2), p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN);
+        uint32_t own = p->tray[i].color, tbg = p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN;
+        if (own >> 24)                                      /* the program's own colour (something it stands for is on) */
+            tbg = p->tray[i].hover ? mix_rgb(own & 0xffffffu, 0xffffffu, 55) : own & 0xffffffu;
+        paint_drop(c, r, btn_radius(LM_MIN(r->w, r->h) / 2), tbg);
         int x = r->x + 6, tw = p->tray[i].text[0] ? lm_font_text_width(p->tray[i].text) : 0;
         if (ic && !tw)
             x = r->x + (r->w - ic->width) / 2;
@@ -2112,7 +2115,7 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
             x += ic->width + 4;
         }
         if (tw)
-            draw_text(c, r, x, r->y + (r->h - LM_FONT_H) / 2, p->tray[i].text, COL_PANEL_TEXT);
+            draw_text(c, r, x, r->y + (r->h - LM_FONT_H) / 2, p->tray[i].text, own >> 24 ? lm_theme.on_colour : COL_PANEL_TEXT);
     }
     if (p->caps.w > 0) {
         paint_drop(c, &p->caps, btn_radius(LM_MIN(p->caps.w, p->caps.h) / 2), COL_PANEL_DANGER);
@@ -2153,7 +2156,24 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     if (p->sticky_on && p->hover_sticky)
         sbg = lm_theme.sticky_hot;
     paint_drop(c, &p->sticky, btn_radius(LM_MIN(p->sticky.w, p->sticky.h) / 2), sbg);
-    draw_text_centered(c, &p->sticky, p->sticky_text, p->sticky_on ? lm_theme.ink : COL_PANEL_TEXT);
+    {                                                   /* one key of a keyboard: its sides and, a little higher, the face with the Shift arrow */
+        int cx = p->sticky.x + p->sticky.w / 2, cy = p->sticky.y + p->sticky.h / 2;
+        struct lm_rect body = lm_rect_make(cx - 10, cy - 10, 20, 20);
+        fill_round(c, &body, 5, 0xff000000u | (p->sticky_on ? lm_theme.ink : mix_rgb(lm_theme.on_colour, sbg, 120)));
+        struct lm_rect face = lm_rect_make(cx - 7, cy - 8, 14, 13);
+        fill_round(c, &face, 3, 0xff000000u | lm_theme.on_colour);
+        paint_shape(c, (float)cx, (float)cy - 1.5f, 5.0f, SHAPE_UP, lm_theme.ink, 255);
+    }
+    {                                                   /* the screen magnifier: a magnifying glass, the button white while the screen is magnified */
+        uint32_t mbg = p->magnifier_on ? lm_theme.on_colour : p->hover_magnifier ? mix_rgb(panel_palette[3], 0xffffffu, 55) : panel_palette[3];
+        uint32_t mfg = p->magnifier_on ? panel_palette[3] : lm_theme.on_colour;
+        paint_drop(c, &p->magnifier, btn_radius(LM_MIN(p->magnifier.w, p->magnifier.h) / 2), mbg);
+        float cx = (float)p->magnifier.x + (float)p->magnifier.w / 2.0f - 2.0f, cy = (float)p->magnifier.y + (float)p->magnifier.h / 2.0f - 2.0f;
+        for (int i = 0; i <= 8; i++)                    /* the handle: discs close together make a line with round ends */
+            paint_shape(c, cx + 4.0f + (float)i * 0.65f, cy + 4.0f + (float)i * 0.65f, 1.7f, SHAPE_DISC, mfg, 255);
+        paint_shape(c, cx, cy, 7.0f, SHAPE_DISC, mfg, 255);
+        paint_shape(c, cx, cy, 4.8f, SHAPE_DISC, mbg, 255);
+    }
     {                                                   /* the on-screen keyboard: a teal button with a little keyboard, white while it is showing */
         uint32_t obg = p->osk_open ? lm_theme.on_colour : p->hover_osk ? mix_rgb(panel_palette[4], 0xffffffu, 55) : panel_palette[4];
         uint32_t ofg = p->osk_open ? panel_palette[4] : lm_theme.on_colour;
@@ -2270,6 +2290,24 @@ static void paint_osk(const struct paint_ctx *c, const struct lm_osk_info *oi)
             bold.x++;
             draw_text_centered(c, &bold, t, fg);
         }
+    }
+}
+
+/* The keys of sticky keys: white, three quarters see-through, with a thin dark rim that shows them on a white window. The name of a latched
+ * modifier is white with a dark shadow, of a locked one bold red with a white one (readable on dark and light alike). */
+static void paint_modkeys(const struct paint_ctx *c, const struct lm_modkeys_info *mi)
+{
+    for (int i = 0; i < mi->n; i++) {
+        const struct lm_rect *r = &mi->key[i].rect;
+        int rad = btn_radius(22);
+        fill_round(c, r, rad, ALPHA(0x40u, lm_theme.glass));
+        stroke_round(c, r, rad, ALPHA(0x60u, lm_theme.glass_shadow));
+        bool locked = mi->key[i].locked;
+        const char *t = mi->key[i].label;
+        int w = 2 * (locked ? lm_font_text_width_bold(t) : lm_font_text_width(t));       /* twice the size of the other texts */
+        int x = r->x + (r->w - w) / 2, y = r->y + (r->h - 2 * LM_FONT_H) / 2;
+        draw_text_scaled(c, x + 2, y + 2, t, locked ? -2 : 2, locked ? lm_theme.on_colour : lm_theme.glass_shadow);
+        draw_text_scaled(c, x, y, t, locked ? -2 : 2, locked ? lm_theme.danger : lm_theme.glass_text);   /* (a negative scale = bold) */
     }
 }
 
@@ -2641,6 +2679,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_OSK:
         if (item->output == c->out)
             paint_osk(c, &item->u.osk);
+        break;
+    case LM_SCENE_MODKEYS:
+        if (item->output == c->out)
+            paint_modkeys(c, &item->u.modkeys);
         break;
     case LM_SCENE_SWITCHER:
         paint_switcher(c, &item->u.switcher);

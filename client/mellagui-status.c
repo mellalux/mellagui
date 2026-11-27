@@ -619,9 +619,10 @@ static void draw_battery(uint32_t *px, int s, int pct, bool charging)
     }
 }
 
-/* Wi-Fi: a dot and three arcs, as many lit as the signal says; `slash` = off. */
-static void draw_wifi(uint32_t *px, int s, int signal, bool slash)
+/* Wi-Fi: a dot and three arcs, as many lit as the signal says; `slash` = off. `on` = the button is coloured, the picture is made for that. */
+static void draw_wifi(uint32_t *px, int s, int signal, bool slash, bool on)
 {
+    uint32_t bright = on ? lm_theme.on_colour : lm_theme.text, faint = on ? lm_theme.on_colour : lm_theme.text_dim;
     memset(px, 0, (size_t)s * (size_t)s * 4);
     float fs = (float)s, cx = fs * 0.5f, cy = fs * 0.84f;
     int lit = signal < 0 ? 0 : signal >= 70 ? 3 : signal >= 45 ? 2 : signal >= 20 ? 1 : 0;
@@ -633,12 +634,12 @@ static void draw_wifi(uint32_t *px, int s, int signal, bool slash)
             float fx = (float)x + 0.5f, fy = (float)y + 0.5f, dx = fx - cx, dy = fy - cy, d = hypotf(dx, dy);
             float ang = atan2f(-dy, dx);                        /* 90 degrees = straight up */
             bool in_fan = ang > (float)M_PI / 4.0f && ang < 3.0f * (float)M_PI / 4.0f;
-            blend(&px[y * s + x], lm_theme.text, clamp01(fs * 0.085f + 0.5f - d), 1.0f);       /* the dot */
+            blend(&px[y * s + x], bright, clamp01(fs * 0.085f + 0.5f - d), 1.0f);       /* the dot */
             for (int a = 0; a < 3; a++) {
                 if (!in_fan)
                     continue;
                 float cov = clamp01(width / 2 + 0.5f - fabsf(d - radius[a]));
-                blend(&px[y * s + x], a < lit ? lm_theme.text : lm_theme.text_dim, cov, a < lit ? 1.0f : 0.35f);
+                blend(&px[y * s + x], a < lit ? bright : faint, cov, a < lit ? 1.0f : 0.35f);
             }
         }
     if (slash) {                                                /* a red slash across */
@@ -653,8 +654,8 @@ static void draw_wifi(uint32_t *px, int s, int signal, bool slash)
     }
 }
 
-/* Bluetooth: the rune (a vertical stroke with two arrowheads); blue (the palette's icon-bluetooth) while the radio is on, dim while it is off, a green dot while
- * something is connected. */
+/* Bluetooth: the rune (a vertical stroke with two arrowheads); white (on the blue button) while the radio is on, dim while it is off, a green dot in a white
+ * ring while something is connected. */
 static void draw_bluetooth(uint32_t *px, int s, bool powered, bool connected)
 {
     memset(px, 0, (size_t)s * (size_t)s * 4);
@@ -668,9 +669,12 @@ static void draw_bluetooth(uint32_t *px, int s, bool powered, bool connected)
                 float dx = bx - ax, dy = by - ay, t = clamp01(((fx - ax) * dx + (fy - ay) * dy) / (dx * dx + dy * dy));
                 best = fminf(best, hypotf(fx - (ax + t * dx), fy - (ay + t * dy)));
             }
-            blend(&px[y * s + x], powered ? lm_theme.icon_bluetooth : lm_theme.text_dim, clamp01(width / 2 + 0.5f - best), powered ? 1.0f : 0.55f);       /* blue while the radio is on */
-            if (connected)
-                blend(&px[y * s + x], lm_theme.ok, clamp01(fs * 0.13f + 0.5f - hypotf(fx - fs * 0.84f, fy - fs * 0.84f)), 1.0f);
+            blend(&px[y * s + x], powered ? lm_theme.on_colour : lm_theme.text_dim, clamp01(width / 2 + 0.5f - best), powered ? 1.0f : 0.55f);
+            if (connected) {
+                float d = hypotf(fx - fs * 0.83f, fy - fs * 0.83f);
+                blend(&px[y * s + x], lm_theme.on_colour, clamp01(fs * 0.17f + 0.5f - d), 1.0f);
+                blend(&px[y * s + x], lm_theme.ok, clamp01(fs * 0.12f + 0.5f - d), 1.0f);
+            }
         }
 }
 
@@ -709,7 +713,7 @@ static void draw_bell(uint32_t *px, int s, bool unread, bool dnd)
     }
 }
 
-/* Ethernet: a plug (a body with a notch and a cable). */
+/* Ethernet: a plug (a body with a notch and a cable), white: its button is coloured. */
 static void draw_ethernet(uint32_t *px, int s)
 {
     memset(px, 0, (size_t)s * (size_t)s * 4);
@@ -719,10 +723,10 @@ static void draw_ethernet(uint32_t *px, int s)
             float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
             float outer = cov_box(fx, fy, fs * 0.16f, fs * 0.18f, fs * 0.84f, fs * 0.66f, fs * 0.08f);
             float inner = cov_box(fx, fy, fs * 0.16f + line, fs * 0.18f + line, fs * 0.84f - line, fs * 0.66f - line, 0.5f);
-            blend(&px[y * s + x], lm_theme.text, clamp01(outer - inner), 1.0f);
+            blend(&px[y * s + x], lm_theme.on_colour, clamp01(outer - inner), 1.0f);
             for (int k = 0; k < 4; k++)                         /* the contacts */
-                blend(&px[y * s + x], lm_theme.text, cov_box(fx, fy, fs * (0.30f + 0.12f * (float)k), fs * 0.30f, fs * (0.30f + 0.12f * (float)k) + line, fs * 0.54f, 0.2f), 1.0f);
-            blend(&px[y * s + x], lm_theme.text, cov_box(fx, fy, fs * 0.46f, fs * 0.66f, fs * 0.54f, fs * 0.88f, 0.2f), 1.0f);        /* the cable */
+                blend(&px[y * s + x], lm_theme.on_colour, cov_box(fx, fy, fs * (0.30f + 0.12f * (float)k), fs * 0.30f, fs * (0.30f + 0.12f * (float)k) + line, fs * 0.54f, 0.2f), 1.0f);
+            blend(&px[y * s + x], lm_theme.on_colour, cov_box(fx, fy, fs * 0.46f, fs * 0.66f, fs * 0.54f, fs * 0.88f, 0.2f), 1.0f);        /* the cable */
         }
 }
 
@@ -737,6 +741,7 @@ struct tray_item {
     size_t map_size;
     bool clicked;
     char text[32];
+    uint32_t color;                     /* the button's colour as the compositor knows it (0 = the bar's own) */
     uint64_t icon_key;                  /* what the icon shows now (to redraw only on a change) */
     int which;
 };
@@ -744,6 +749,7 @@ struct tray_item {
 struct app {
     struct wlwin win;
     uint32_t tray, settings, menu_global;
+    uint32_t tray_ver;                  /* 2: a button can have a colour */
     struct tray_item item[ITEM_COUNT];
     bool want_battery, want_network, want_bluetooth;
     struct btinfo bt;
@@ -863,6 +869,22 @@ static void item_set(struct app *a, int which, uint64_t icon_key, const char *te
     }
 }
 
+/* The button's own colour (0 = the bar's); a compositor with the first version of the tray cannot, the white picture then sits on the grey button. */
+static void item_color(struct app *a, int which, uint32_t color)
+{
+    struct tray_item *it = &a->item[which];
+    if (!it->id || a->tray_ver < 2 || it->color == color)
+        return;
+    it->color = color;
+    WLC_SEND(a->win.c, it->id, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_COLOR, { .u = color });
+}
+
+/* The network button is coloured while there is a connection or the Wi-Fi radio is on. */
+static bool net_on(const struct netinfo *n)
+{
+    return n->kind == NET_ETHERNET || n->kind == NET_WIFI || (n->wifi_present && n->wifi_enabled);
+}
+
 static void draw_battery_item(struct app *a, struct tray_item *it)
 {
     const struct battery *b = a->nbats > 0 ? &a->bats[0] : NULL;
@@ -885,9 +907,9 @@ static void draw_network_item(struct app *a, struct tray_item *it)
     if (n->kind == NET_ETHERNET)
         draw_ethernet(it->map, it->size);
     else if (n->kind == NET_WIFI)
-        draw_wifi(it->map, it->size, n->signal, false);
+        draw_wifi(it->map, it->size, n->signal, false, true);
     else
-        draw_wifi(it->map, it->size, -1, n->wifi_present && n->wifi_enabled ? false : true);
+        draw_wifi(it->map, it->size, -1, !net_on(n), net_on(n));
 }
 
 /* The two buttons follow what there is: a battery button only while there is a battery, a network button while nmcli runs. */
@@ -919,6 +941,7 @@ static void items_update(struct app *a)
             snprintf(t, sizeof(t), "Ethernet");
         uint64_t key = (uint64_t)n->kind * 1000 + (uint64_t)(n->signal / 10) * 10 + (n->wifi_enabled ? 1 : 0) + (n->wifi_present ? 2 : 0) + ((uint64_t)lm_theme.text << 32);
         item_set(a, ITEM_NETWORK, key, t, draw_network_item);
+        item_color(a, ITEM_NETWORK, net_on(n) ? 0xff000000u | lm_theme.btn_green : 0);
     }
     bool have_bt = a->want_bluetooth && a->bt.have;
     if (have_bt)
@@ -931,7 +954,8 @@ static void items_update(struct app *a)
             snprintf(t, sizeof(t), "%.12s %d%%", a->bt.first, a->bt.first_battery);        /* the name and the device's own battery */
         else if (a->bt.nconn > 0)
             snprintf(t, sizeof(t), "%.14s", a->bt.first);
-        item_set(a, ITEM_BLUETOOTH, (a->bt.powered ? 2u : 0u) + (a->bt.nconn > 0 ? 1u : 0u) + ((uint64_t)lm_theme.icon_bluetooth << 32), t, draw_bluetooth_item);
+        item_set(a, ITEM_BLUETOOTH, (a->bt.powered ? 2u : 0u) + (a->bt.nconn > 0 ? 1u : 0u) + ((uint64_t)lm_theme.on_colour << 32), t, draw_bluetooth_item);
+        item_color(a, ITEM_BLUETOOTH, a->bt.powered ? 0xff000000u | lm_theme.icon_bluetooth : 0);
     }
     bool have_bell = a->settings && (a->unread > 0 || a->dnd);          /* the bell is there while there is something to read or DND is on */
     if (have_bell)
@@ -1345,10 +1369,9 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
-    (void)ver;
     struct app *a = w->data;
     if (!strcmp(iface, "mellagui_tray_v1"))
-        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, 1, settings_event, a);
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 2u), settings_event, a);
     else if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
 }
@@ -1623,7 +1646,7 @@ static int selftest(void)
     for (int i = 0; i < 22 * 22; i++)
         lit += (px[i] >> 24) > 128;
     CHECK(lit > 60, "battery icon is empty (%d)", lit);
-    draw_wifi(px, 22, 60, false);
+    draw_wifi(px, 22, 60, false, true);
     lit = 0;
     for (int i = 0; i < 22 * 22; i++)
         lit += (px[i] >> 24) > 128;

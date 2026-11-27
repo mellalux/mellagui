@@ -28,6 +28,7 @@ struct item {
     struct lm_texture icon;
     bool has_icon;
     char text[LM_TRAY_TEXT];
+    uint32_t color;                     /* alpha 0 = the bar's own button */
 };
 
 struct lm_tray {
@@ -124,10 +125,21 @@ static void item_req_set_text(struct lm_resource *res, const union lm_arg *args)
         changed(it->tray);
 }
 
+static void item_req_set_color(struct lm_resource *res, const union lm_arg *args)
+{
+    struct item *it = res->data;
+    if (!it || it->color == args[0].u)
+        return;
+    it->color = args[0].u;
+    if (it->shown && it->tray)
+        changed(it->tray);
+}
+
 static const lm_request_fn item_handlers[] = {
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_DESTROY] = item_req_destroy,
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_ICON] = item_req_set_icon,
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TEXT] = item_req_set_text,
+    [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_COLOR] = item_req_set_color,
 };
 
 /* ---- the global ------------------------------------------------------------------------------------------------------- */
@@ -268,6 +280,7 @@ bool lm_tray_get(const struct lm_tray *t, int i, struct lm_tray_view *out)
         out->id = it->id;
         out->icon = it->has_icon && it->icon.pixels ? &it->icon : NULL;
         out->text = it->text;
+        out->color = it->color;
         return true;
     }
     return false;

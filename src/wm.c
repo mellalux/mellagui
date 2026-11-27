@@ -128,7 +128,14 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
     p->power = lm_rect_make(p->bar.x + p->bar.w - PANEL_POWER_D - 4, y, PANEL_POWER_D, PANEL_POWER_D);
     int clock_w = LM_MAX(PANEL_CLOCK_MIN_W, lm_font_text_width(wm->clock_text) + 8);
     p->clock = lm_rect_make(p->power.x - 4 - clock_w, y, clock_w, h);
-    p->sticky = lm_rect_make(p->clock.x - 8 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);         /* (the Run dialog is Super+R and the launcher's Run button) */
+    /* sticky keys, on-screen keyboard and magnifier side by side, left of the clock */
+    p->magnifier = lm_rect_make(p->clock.x - 8 - PANEL_MAG_W, y, PANEL_MAG_W, h);
+    p->hover_magnifier = wm->hover_magnifier;
+    p->magnifier_on = wm->srv->config.magnifier;
+    p->osk = lm_rect_make(p->magnifier.x - 4 - PANEL_OSK_W, y, PANEL_OSK_W, h);
+    p->hover_osk = wm->hover_osk;
+    p->osk_open = wm->osk_open;
+    p->sticky = lm_rect_make(p->osk.x - 4 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
     int nb = layout_badge_count(wm);
     p->nbadges = nb;
     if (nb > 0) {                                       /* the flag of the layout in use; with a label it is as wide as flag + text need */
@@ -153,10 +160,7 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
         p->badge[0].hover = wm->hover_layout;
     } else
         p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
-    p->osk = lm_rect_make(p->layout.x - 4 - PANEL_OSK_W, y, PANEL_OSK_W, h);
-    p->hover_osk = wm->hover_osk;
-    p->osk_open = wm->osk_open;
-    p->quick = lm_rect_make(p->osk.x - 4 - PANEL_QUICK_W, y, PANEL_QUICK_W, h);
+    p->quick = lm_rect_make(p->layout.x - 4 - PANEL_QUICK_W, y, PANEL_QUICK_W, h);
     p->hover_quick = wm->hover_quick;
     {
         struct lm_window *qw = quick_window((struct lm_wm *)wm);
@@ -191,6 +195,7 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
             p->tray[k].id = v.id;
             p->tray[k].icon = v.icon;
             p->tray[k].text = v.text;
+            p->tray[k].color = v.color;
             p->tray[k].hover = wm->hover_tray == v.id;
             right -= bw + 4;
             title_end = p->tray[k].rect.x - 4;
@@ -200,28 +205,12 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
     p->hover_layout = wm->hover_layout;
     p->hover_sticky = wm->hover_sticky;
     snprintf(p->layout_text, sizeof(p->layout_text), "us");
-    snprintf(p->sticky_text, sizeof(p->sticky_text), "Sticky");
     if (wm->srv->input) {
         const char *id = lm_input_layout_id(wm->srv->input, lm_input_layout(wm->srv->input));
         for (size_t i = 0; i < sizeof(p->layout_text) - 1 && id[i]; i++)
             p->layout_text[i] = (char)(id[i] >= 'a' && id[i] <= 'z' ? id[i] - 32 : id[i]);
         p->layout_text[strnlen(id, sizeof(p->layout_text) - 1)] = 0;
         p->sticky_on = lm_input_sticky(wm->srv->input);
-        uint32_t lat = lm_input_latched(wm->srv->input), lck = lm_input_sticky_locked(wm->srv->input);
-        static const struct { uint32_t bit; const char *lo, *up; } names[] = {
-            { LM_MOD_SHIFT, "Sh", "SH" }, { LM_MOD_CTRL, "Ct", "CT" }, { LM_MOD_ALT, "Al", "AL" },
-            { LM_MOD_ALTGR, "Gr", "GR" }, { LM_MOD_SUPER, "Su", "SU" },
-        };
-        char txt[24] = "";
-        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-            if (!((lat | lck) & names[i].bit))
-                continue;
-            if (txt[0])
-                strncat(txt, "+", sizeof(txt) - strlen(txt) - 1);
-            strncat(txt, (lck & names[i].bit) ? names[i].up : names[i].lo, sizeof(txt) - strlen(txt) - 1);
-        }
-        if (p->sticky_on && txt[0])
-            snprintf(p->sticky_text, sizeof(p->sticky_text), "%s", txt);
     }
     p->current_workspace = wm->workspace;
     struct lm_window *w;
@@ -1598,6 +1587,8 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
             }
             if (lm_rect_contains(&pi.sticky, ix, iy))
                 out->kind = LM_PICK_PANEL_STICKY;
+            if (lm_rect_contains(&pi.magnifier, ix, iy))
+                out->kind = LM_PICK_PANEL_MAGNIFIER;
             for (int i = 0; i < pi.ntray; i++)
                 if (lm_rect_contains(&pi.tray[i].rect, ix, iy)) {
                     out->kind = LM_PICK_PANEL_TRAY;
@@ -1647,7 +1638,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
-    bool about_btn = false, launcher = false, power_btn = false, layout_btn = false, sticky_btn = false, osk_btn = false, quick_btn = false;
+    bool about_btn = false, launcher = false, power_btn = false, layout_btn = false, sticky_btn = false, magnifier_btn = false, osk_btn = false, quick_btn = false;
     int power_item = -1, dm_item = -1;
     struct lm_window *task = NULL;
     int tray_id = 0;
@@ -1672,6 +1663,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     case LM_PICK_MENU_ITEM: dm_item = pick->index; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_LAYOUT: layout_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_STICKY: sticky_btn = true; shape = LM_CURSOR_POINTER; break;
+    case LM_PICK_PANEL_MAGNIFIER: magnifier_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_OSK: osk_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_PANEL_QUICK: quick_btn = true; shape = LM_CURSOR_POINTER; break;
     case LM_PICK_OSK_KEY: shape = LM_CURSOR_POINTER; break;
@@ -1755,10 +1747,11 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     }
     if (pws != wm->hover_panel_ws || launcher != wm->hover_launcher || power_btn != wm->hover_power ||
         task != wm->hover_task || layout_btn != wm->hover_layout ||
-        sticky_btn != wm->hover_sticky || osk_btn != wm->hover_osk || quick_btn != wm->hover_quick || tray_id != wm->hover_tray) {
+        sticky_btn != wm->hover_sticky || magnifier_btn != wm->hover_magnifier || osk_btn != wm->hover_osk || quick_btn != wm->hover_quick || tray_id != wm->hover_tray) {
         wm->hover_tray = tray_id;
         wm->hover_quick = quick_btn;
         wm->hover_osk = osk_btn;
+        wm->hover_magnifier = magnifier_btn;
         wm->hover_layout = layout_btn;
         wm->hover_sticky = sticky_btn;
         wm->hover_power = power_btn;
@@ -2074,6 +2067,7 @@ static void cycle_focus(struct lm_wm *wm, bool backwards)
 void lm_wm_keyboard_state_changed(struct lm_wm *wm)
 {
     damage_panels(wm);
+    modkeys_damage(wm);
 }
 
 void lm_wm_lock_shield_changed(struct lm_wm *wm)
@@ -2151,7 +2145,7 @@ static bool run_keybind(struct lm_wm *wm, const struct lm_keybind *kb, bool pres
     case LM_ACT_QUICK: lm_wm_quick_toggle(wm, NULL); break;
     case LM_ACT_MAGNIFY_IN:
     case LM_ACT_MAGNIFY_OUT: {                                          /* the magnifier: Super+= zooms in (switching it on), Super+- out (off at the end) */
-        static const int steps[] = { 125, 150, 200, 300, 400, 600, 800 };
+        static const int steps[] = MAG_STEPS;
         int cur = wm->srv->config.magnifier ? wm->srv->config.magnifier_zoom : 100, next = cur, count = (int)(sizeof(steps) / sizeof(steps[0]));
         if (kb->action == LM_ACT_MAGNIFY_IN) {
             next = steps[count - 1];

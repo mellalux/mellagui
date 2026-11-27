@@ -1254,6 +1254,17 @@ static void paint_menu(const struct paint_ctx *c, const struct lm_menu_info *mi)
     }
 }
 
+/* The tooltip of a panel button: a small card like the menu's, the first line bright, what follows dim. */
+static void paint_tooltip(const struct paint_ctx *c, const struct lm_tooltip_info *ti)
+{
+    fill_round(c, &ti->rect, 8, 0xff000000u | lm_theme.border);
+    struct lm_rect in = lm_rect_make(ti->rect.x + 1, ti->rect.y + 1, ti->rect.w - 2, ti->rect.h - 2);
+    fill_round(c, &in, 7, 0xf5000000u | COL_PANEL);
+    struct lm_rect text = lm_rect_make(ti->rect.x + LM_TOOLTIP_PAD, ti->rect.y + 5, ti->rect.w - 2 * LM_TOOLTIP_PAD, ti->n * LM_FONT_H);
+    for (int i = 0; i < ti->n; i++)
+        draw_text(c, &text, text.x, text.y + i * LM_FONT_H, ti->line[i], i ? COL_PANEL_DIM : COL_PANEL_TEXT);
+}
+
 /* The session dialog: the output dimmed, a rounded card with a title and two round buttons with their icons and names. */
 static void paint_power(const struct paint_ctx *c, const struct lm_power_info *pw)
 {
@@ -2776,6 +2787,10 @@ static bool scene_cb(const struct lm_scene_item *item, void *data)
     case LM_SCENE_DOCK:
         if (item->output == c->out)
             paint_dock(c, &item->u.dock);
+        break;
+    case LM_SCENE_TOOLTIP:
+        if (item->output == c->out)
+            paint_tooltip(c, &item->u.tooltip);
         break;
     case LM_SCENE_MENU:
         if (item->output == c->out)

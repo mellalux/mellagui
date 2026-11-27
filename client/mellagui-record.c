@@ -573,6 +573,8 @@ static void tray_start(struct app *a)
     WLC_SEND(a->win.c, a->tray, LM_MELLAGUI_TRAY_V1_REQ_CREATE_ITEM, { .n = a->tray_item });
     if (a->tray_ver >= 3)                       /* (its place in the user's order of the panel) */
         WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_NAME, { .s = "record" });
+    if (a->tray_ver >= 4)
+        WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TOOLTIP, { .s = "Recording the screen\nClick: stop" });
     a->tray_phase = -1;
     a->tray_sec = UINT64_MAX;
 }
@@ -1030,7 +1032,7 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
     if (!strcmp(iface, "mellagui_capture_v1"))
         a->capture = wlc_bind(w->c, w->registry, name, &lm_mellagui_capture_v1_interface, 1, capture_event, a);
     else if (!strcmp(iface, "mellagui_tray_v1"))
-        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 3u), settings_event, a);
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 4u), settings_event, a);
     else if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
 }

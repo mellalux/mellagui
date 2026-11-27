@@ -373,6 +373,8 @@ void dialog_drag_motion(struct lm_wm *wm)
 bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t time_ms,
                           uint32_t button, bool pressed)
 {
+    if (pressed)
+        tooltip_dismiss(wm);
     if (!pressed && wm->dlg_drag && button == BTN_LEFT) {        /* a carried dialog is put down where it is */
         wm->dlg_drag = 0;
         return true;

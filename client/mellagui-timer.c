@@ -86,6 +86,7 @@ struct app {
     int hover;
     double px, py;
     char tray_text[32];
+    char tray_tip[96];                  /* the item's tooltip as sent */
     bool had_tray_click;
     int tray_hold;                      /* the clock the bar's item paused (-1 = none): the item stays so that a click can continue it */
 };
@@ -613,6 +614,22 @@ static void tray_update(struct app *a, int64_t now)
         if (a->tray_ver >= 3)                   /* (its place in the user's order of the panel) */
             WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_NAME, { .s = "timer" });
         a->tray_text[0] = 0;
+        a->tray_tip[0] = 0;
+    }
+    if (a->tray_ver >= 4) {                             /* what the item stands for and what a click on it does (not the time: the label has it) */
+        char tip[96];
+        if (a->ring >= 0 && a->duty)
+            snprintf(tip, sizeof(tip), "Alarm\nClick: dismiss or snooze");
+        else if (run < 0)
+            snprintf(tip, sizeof(tip), "%s\nClick: menu", a->snooze >= 0 ? "Snoozed alarm" : "Next alarm");
+        else
+            snprintf(tip, sizeof(tip), "%s%s\nClick: %s", run == M_POMODORO ? (a->phase == P_WORK ? "Pomodoro: work" : "Pomodoro: rest") :
+                     run == M_TIMER ? "Timer" : "Stopwatch", paused ? " (paused)" : "", paused ? "continue" : "pause");
+        if (strcmp(tip, a->tray_tip)) {
+            snprintf(a->tray_tip, sizeof(a->tray_tip), "%s", tip);
+            WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TOOLTIP, { .s = a->tray_tip });
+            wlc_flush(a->win.c);
+        }
     }
     char t[24], text[32];
     if (atext[0] && (a->ring >= 0 || run < 0)) {
@@ -1165,7 +1182,7 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
     if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, NULL, a);
     else if (!strcmp(iface, "mellagui_tray_v1"))
-        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 3u), NULL, a);
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 4u), NULL, a);
 }
 
 /* ---- self test ------------------------------------------------------------------------------------------------------------- */

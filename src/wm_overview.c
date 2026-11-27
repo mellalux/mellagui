@@ -905,6 +905,17 @@ void lm_wm_scene_for_each(struct lm_wm *wm, const struct lm_rect *clip, lm_scene
             return;
     }
 
+    memset(&it, 0, sizeof(it));
+    {
+        struct lm_output *to = NULL;
+        if (tooltip_info(wm, &it.u.tooltip, &to) && (!clip || lm_rect_overlaps(&it.u.tooltip.rect, clip))) {
+            it.kind = LM_SCENE_TOOLTIP;
+            it.output = to;
+            if (!fn(&it, data))
+                return;
+        }
+    }
+
     if (wm->menu_open && !lm_lock_active(wm->srv->lock) && (!clip || lm_rect_overlaps(&wm->menu_rect, clip))) {    /* a menu: above the dialogs */
         memset(&it, 0, sizeof(it));
         it.kind = LM_SCENE_MENU;

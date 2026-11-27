@@ -111,7 +111,7 @@ REQ = {
     'zwp_locked_pointer_v1': {'destroy': 0, 'set_cursor_position_hint': 1, 'set_region': 2},
     'zwp_confined_pointer_v1': {'destroy': 0, 'set_region': 1},
     'mellagui_tray_v1': {'destroy': 0, 'create_item': 1},
-    'mellagui_tray_item_v1': {'destroy': 0, 'set_icon': 1, 'set_text': 2},
+    'mellagui_tray_item_v1': {'destroy': 0, 'set_icon': 1, 'set_text': 2, 'set_color': 3, 'set_name': 4, 'set_tooltip': 5},
     'zwp_linux_dmabuf_v1': {'destroy': 0, 'create_params': 1, 'get_default_feedback': 2, 'get_surface_feedback': 3},
     'zwp_linux_buffer_params_v1': {'destroy': 0, 'add': 1, 'create': 2, 'create_immed': 3},
     'zwp_linux_dmabuf_feedback_v1': {'destroy': 0},

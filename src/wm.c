@@ -665,6 +665,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     wm->anim_timer = lm_loop_add_timer(srv->loop, anim_tick, wm);
     panel_drag_init(wm);
+    tooltip_init(wm);
     wm->refit = lm_loop_add_idle(srv->loop, refit_idle, wm);
     if (wm->clock_timer)
         lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
@@ -692,6 +693,8 @@ void lm_wm_destroy(struct lm_wm *wm)
         lm_timer_destroy(wm->clock_timer);
     if (wm->pdrag.timer)
         lm_timer_destroy(wm->pdrag.timer);
+    if (wm->tip.timer)
+        lm_timer_destroy(wm->tip.timer);
     for (int i = 0; i < ANIM_MAX; i++)
         if (wm->anim[i].used)
             free(wm->anim[i].ghost.px);
@@ -1615,8 +1618,10 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     launcher_drag_motion(wm);
     launcher_swipe_motion(wm);
     overview_drag_motion(wm);
-    if (panel_drag_motion(wm))
+    if (panel_drag_motion(wm)) {
+        tooltip_dismiss(wm);
         return;
+    }
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
@@ -1742,6 +1747,7 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
         wm->hover_launcher = launcher;
         damage_panels(wm);
     }
+    tooltip_motion(wm, pick);
     if (wm->srv->seat && wm->grab_kind == GRAB_NONE)
         lm_seat_set_cursor_override(wm->srv->seat, shape);
 }
@@ -2068,6 +2074,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
     }
     wm->lock_kbd_hover = false;
     panel_drag_cancel(wm);
+    tooltip_dismiss(wm);
     if (locked) {
         overview_finish(wm);
         menu_set(wm, false);

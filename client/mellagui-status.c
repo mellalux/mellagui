@@ -741,6 +741,7 @@ struct tray_item {
     size_t map_size;
     bool clicked;
     char text[32];
+    char tip[192];                      /* the tooltip as the compositor knows it */
     uint32_t color;                     /* the button's colour as the compositor knows it (0 = the bar's own) */
     uint64_t icon_key;                  /* what the icon shows now (to redraw only on a change) */
     int which;
@@ -749,7 +750,7 @@ struct tray_item {
 struct app {
     struct wlwin win;
     uint32_t tray, settings, menu_global;
-    uint32_t tray_ver;                  /* 2: a button can have a colour, 3: a name */
+    uint32_t tray_ver;                  /* 2: a button can have a colour, 3: a name, 4: a tooltip */
     struct tray_item item[ITEM_COUNT];
     bool want_battery, want_network, want_bluetooth;
     struct btinfo bt;
@@ -883,6 +884,63 @@ static void item_color(struct app *a, int which, uint32_t color)
     WLC_SEND(a->win.c, it->id, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_COLOR, { .u = color });
 }
 
+/* What the bar says when the pointer rests on the button. */
+static void item_tip(struct app *a, int which, const char *tip)
+{
+    struct tray_item *it = &a->item[which];
+    if (!it->id || a->tray_ver < 4 || !strcmp(it->tip, tip))
+        return;
+    copy(it->tip, sizeof(it->tip), tip);
+    WLC_SEND(a->win.c, it->id, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TOOLTIP, { .s = it->tip });
+}
+
+static void battery_tip(const struct battery *b, char *out, size_t n)
+{
+    char t[32];
+    size_t o = (size_t)snprintf(out, n, "Battery");
+    if (b->percent >= 0 && o < n)
+        o += (size_t)snprintf(out + o, n - o, " %d%%", b->percent);
+    if (o < n)
+        o += (size_t)snprintf(out + o, n - o, ", %s", b->status);
+    if (b->minutes >= 0 && o < n) {
+        fmt_minutes(t, sizeof(t), b->minutes);
+        snprintf(out + o, n - o, "\n%s %s", t, bat_charging(b) ? "until full" : "left");
+    }
+}
+
+static void network_tip(const struct netinfo *n, char *out, size_t size)
+{
+    if (n->kind == NET_WIFI)
+        snprintf(out, size, "Wi-Fi: %.40s (%d%%)%s%s", n->ssid, n->signal, n->ip[0] ? "\n" : "", n->ip);
+    else if (n->kind == NET_ETHERNET)
+        snprintf(out, size, "Ethernet connected%s%s", n->ip[0] ? "\n" : "", n->ip);
+    else if (n->wifi_present && !n->wifi_enabled)
+        snprintf(out, size, "Wi-Fi is off");
+    else
+        snprintf(out, size, "Not connected");
+}
+
+static void bluetooth_tip(const struct btinfo *bt, char *out, size_t n)
+{
+    if (!bt->powered) {
+        snprintf(out, n, "Bluetooth is off");
+        return;
+    }
+    size_t o = (size_t)snprintf(out, n, "Bluetooth is on");
+    int shown = 0;
+    for (int i = 0; i < bt->n && shown < 3 && o < n; i++) {
+        const struct btdev *d = &bt->dev[i];
+        if (!d->connected)
+            continue;
+        o += (size_t)snprintf(out + o, n - o, "\n%.40s", d->name);
+        if (d->battery >= 0 && o < n)
+            o += (size_t)snprintf(out + o, n - o, " (%d%%)", d->battery);
+        shown++;
+    }
+    if (!shown && o < n)
+        snprintf(out + o, n - o, "\nNo device connected");
+}
+
 /* The network button is coloured while there is a connection or the Wi-Fi radio is on. */
 static bool net_on(const struct netinfo *n)
 {
@@ -930,6 +988,9 @@ static void items_update(struct app *a)
         if (b->percent >= 0)
             snprintf(t, sizeof(t), "%d%%", b->percent);
         item_set(a, ITEM_BATTERY, (uint64_t)(b->percent + 2) * 4 + (bat_charging(b) ? 1 : 0) + ((uint64_t)lm_theme.text << 32), t, draw_battery_item);
+        char tip[192];
+        battery_tip(b, tip, sizeof(tip));
+        item_tip(a, ITEM_BATTERY, tip);
     }
     bool have_net = a->want_network && a->net.have_nm;
     if (have_net)
@@ -946,6 +1007,9 @@ static void items_update(struct app *a)
         uint64_t key = (uint64_t)n->kind * 1000 + (uint64_t)(n->signal / 10) * 10 + (n->wifi_enabled ? 1 : 0) + (n->wifi_present ? 2 : 0) + ((uint64_t)lm_theme.text << 32);
         item_set(a, ITEM_NETWORK, key, t, draw_network_item);
         item_color(a, ITEM_NETWORK, net_on(n) ? 0xff000000u | lm_theme.btn_green : 0);
+        char tip[192];
+        network_tip(n, tip, sizeof(tip));
+        item_tip(a, ITEM_NETWORK, tip);
     }
     bool have_bt = a->want_bluetooth && a->bt.have;
     if (have_bt)
@@ -960,6 +1024,9 @@ static void items_update(struct app *a)
             snprintf(t, sizeof(t), "%.14s", a->bt.first);
         item_set(a, ITEM_BLUETOOTH, (a->bt.powered ? 2u : 0u) + (a->bt.nconn > 0 ? 1u : 0u) + ((uint64_t)lm_theme.on_colour << 32), t, draw_bluetooth_item);
         item_color(a, ITEM_BLUETOOTH, a->bt.powered ? 0xff000000u | lm_theme.icon_bluetooth : 0);
+        char tip[192];
+        bluetooth_tip(&a->bt, tip, sizeof(tip));
+        item_tip(a, ITEM_BLUETOOTH, tip);
     }
     bool have_bell = a->settings && (a->unread > 0 || a->dnd);          /* the bell is there while there is something to read or DND is on */
     if (have_bell)
@@ -973,6 +1040,12 @@ static void items_update(struct app *a)
         else
             snprintf(t, sizeof(t), "DND");
         item_set(a, ITEM_BELL, (uint64_t)LM_MIN(a->unread, 99) * 4 + (a->dnd ? 2 : 0) + (a->unread > 0 ? 1 : 0) + ((uint64_t)lm_theme.text << 32), t, draw_bell_item);
+        char tip[96];
+        if (a->unread > 0)
+            snprintf(tip, sizeof(tip), "%d unread notification%s%s", a->unread, a->unread == 1 ? "" : "s", a->dnd ? "\nDo not disturb is on" : "");
+        else
+            snprintf(tip, sizeof(tip), "Do not disturb is on");
+        item_tip(a, ITEM_BELL, tip);
     }
 }
 
@@ -1375,7 +1448,7 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 {
     struct app *a = w->data;
     if (!strcmp(iface, "mellagui_tray_v1"))
-        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 3u), settings_event, a);
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 4u), settings_event, a);
     else if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
 }

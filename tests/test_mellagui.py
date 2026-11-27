@@ -14424,6 +14424,74 @@ class TestQuickSettings(Base):
             self.assertFalse(json.load(f)['radio'], 'the Wi-Fi radio was not switched off')
 
 
+class TestPanelTooltips(Base):
+    """The tooltips of the top panel (src/wm_tooltip.c)."""
+
+    @staticmethod
+    def tip(c):
+        lines = c.cmd('tooltip')
+        head = dict(kv.split('=') for kv in lines[0].split()[1:])
+        return {k: int(v) for k, v in head.items()}, [ln[5:] for ln in lines[1:]]
+
+    def hover(self, c, x, y, timeout=3.0):
+        c.cmd('abs %d %d' % (x, y))
+        end = time.time() + timeout
+        while True:
+            head, lines = self.tip(c)
+            if head['shown'] or time.time() > end:
+                return head, lines
+            time.sleep(0.05)
+
+    @staticmethod
+    def button(c, name):
+        for ln in c.cmd('panel'):
+            m = re.match(r'button (\S+) x=(\d+) w=(\d+)', ln)
+            if m and m[1] == name:
+                return int(m[2]) + int(m[3]) // 2
+        raise AssertionError('no button ' + name)
+
+    def test_a_button_says_what_it_is_after_a_rest_and_a_press_takes_it_away(self):
+        p, c, stop = self.private_compositor('mellagui-tip1', '--size', '1024x600')
+        c.cmd('abs %d 16' % self.button(c, 'quick'))
+        self.assertEqual(self.tip(c)[0]['shown'], 0)                                    # not at once
+        head, lines = self.hover(c, self.button(c, 'quick'), 16)
+        self.assertEqual(head['shown'], 1)
+        self.assertEqual(lines, ['Quick settings  (Super+Z)'])
+        self.assertGreater(head['y'], 24)                                               # under the bar
+        c.cmd('abs %d 16' % self.button(c, 'sticky'))
+        head, lines = self.tip(c)
+        self.assertEqual(head['shown'], 1)                                              # the neighbour's shows at once
+        self.assertEqual(lines, ['Sticky keys: off'])
+        head, lines = self.hover(c, self.button(c, 'power'), 16)
+        self.assertIn('shut down', lines[0])
+        self.assertLessEqual(head['x'] + head['w'], 1024)                               # kept on the screen
+        head, lines = self.hover(c, self.button(c, 'clock'), 16)
+        self.assertEqual(lines[1], 'Click: calendar')
+        c.cmd('button 272 1')
+        self.assertEqual(self.tip(c)[0]['shown'], 0)
+        c.cmd('button 272 0')
+        time.sleep(0.9)
+        self.assertEqual(self.tip(c)[0]['shown'], 0)                                    # not again while the pointer stays
+        c.cmd('abs 500 300')
+        self.assertEqual(self.tip(c)[0]['shown'], 0)
+
+    def test_a_programs_item_shows_the_words_it_gave(self):
+        cl = self.client()
+        wl = cl.wl
+        tray = wl.bind('mellagui_tray_v1')
+        it = wl.new_id('mellagui_tray_item_v1')
+        wl.request(tray, 'create_item', it)
+        wl.request(it, 'set_text', 'abc')
+        wl.roundtrip()
+        item = TestTray.items()[0]
+        x, y = item['x'] + item['w'] // 2, item['y'] + item['h'] // 2
+        self.assertEqual(self.hover(ctl, x, y)[1], ['abc'])                             # nothing said: the label
+        wl.request(it, 'set_tooltip', 'First line\nSecond line')
+        wl.roundtrip()
+        self.assertEqual(self.tip(ctl)[1], ['First line', 'Second line'])
+        ctl.cmd('abs 500 300')
+
+
 class TestTray(Base):
     """The panel's tray (src/tray.c): programs put icons / labels into the top bar through mellagui_tray_v1."""
 

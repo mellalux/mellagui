@@ -30,6 +30,7 @@ struct item {
     char text[LM_TRAY_TEXT];
     uint32_t color;                     /* alpha 0 = the bar's own button */
     char name[16];                      /* "" = not said */
+    char tooltip[LM_TRAY_TOOLTIP];
 };
 
 struct lm_tray {
@@ -147,12 +148,30 @@ static void item_req_set_name(struct lm_resource *res, const union lm_arg *args)
         changed(it->tray);
 }
 
+static void item_req_set_tooltip(struct lm_resource *res, const union lm_arg *args)
+{
+    struct item *it = res->data;
+    if (!it)
+        return;
+    char text[LM_TRAY_TOOLTIP];
+    snprintf(text, sizeof(text), "%s", args[0].s ? args[0].s : "");
+    for (char *p = text; *p; p++)
+        if ((unsigned char)*p < 0x20 && *p != '\n')
+            *p = ' ';
+    if (!strcmp(text, it->tooltip))
+        return;
+    memcpy(it->tooltip, text, sizeof(it->tooltip));
+    if (it->shown && it->tray)
+        changed(it->tray);
+}
+
 static const lm_request_fn item_handlers[] = {
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_DESTROY] = item_req_destroy,
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_ICON] = item_req_set_icon,
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TEXT] = item_req_set_text,
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_COLOR] = item_req_set_color,
     [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_NAME] = item_req_set_name,
+    [LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TOOLTIP] = item_req_set_tooltip,
 };
 
 /* ---- the global ------------------------------------------------------------------------------------------------------- */
@@ -295,6 +314,7 @@ bool lm_tray_get(const struct lm_tray *t, int i, struct lm_tray_view *out)
         out->text = it->text;
         out->color = it->color;
         out->name = it->name;
+        out->tooltip = it->tooltip;
         return true;
     }
     return false;

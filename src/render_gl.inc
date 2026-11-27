@@ -33,7 +33,7 @@ struct gl_out {
     unsigned bg_tex;
     bool bg_ok;
     struct gl_chrome frame[GL_MAX_FRAMES];
-    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk, overview, modkeys;
+    struct gl_chrome panel, shadow, lock, card, switcher, power, about, launcher, dock, menu, osk, overview, modkeys, tooltip;
     struct gl_chrome notify[LM_NOTIFY_MAX];
     struct gl_chrome lpage[4];          /* the launcher's pages: the icons of a page without the card, so a page can slide over the card (slot = page % 4) */
     struct gl_chrome lov[5];            /* the launcher's small pieces: the lit cell, the drop pill, the cell outline, the origin's dimming, the icon in the hand */
@@ -93,7 +93,7 @@ static void gl_chromes_free(struct lm_renderer *r, struct gl_out *go)
     for (int i = 0; i < GL_MAX_FRAMES; i++)
         gl_chrome_free(r, &go->frame[i]);
     struct gl_chrome *all[] = { &go->panel, &go->shadow, &go->about, &go->launcher, &go->lock, &go->card, &go->switcher, &go->power,
-                                &go->dock, &go->menu, &go->osk, &go->overview, &go->modkeys };
+                                &go->dock, &go->menu, &go->osk, &go->overview, &go->modkeys, &go->tooltip };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
         gl_chrome_free(r, all[i]);
     for (int i = 0; i < 5; i++)
@@ -226,6 +226,7 @@ static void gl_do_power(const struct paint_ctx *c, const void *it) { paint_power
 static void gl_do_menu(const struct paint_ctx *c, const void *it) { paint_menu(c, it); }
 static void gl_do_dock(const struct paint_ctx *c, const void *it) { paint_dock(c, it); }
 static void gl_do_osk(const struct paint_ctx *c, const void *it) { paint_osk(c, it); }
+static void gl_do_tooltip(const struct paint_ctx *c, const void *it) { paint_tooltip(c, it); }
 static void gl_do_modkeys(const struct paint_ctx *c, const void *it) { paint_modkeys(c, it); }
 static void gl_do_notify(const struct paint_ctx *c, const void *it) { paint_notify(c, it); }
 static void gl_do_overview(const struct paint_ctx *c, const void *it) { paint_overview_ui(c, it); }
@@ -792,6 +793,19 @@ static bool gl_scene_cb(const struct lm_scene_item *item, void *data)
             gl_chrome_free(p->r, &own);
         break;
     }
+    case LM_SCENE_TOOLTIP:
+        if (item->output == p->st->out) {               /* translucent: redrawn only when its words or its place change */
+            const struct lm_tooltip_info *ti = &item->u.tooltip;
+            struct gl_chrome *ch = &p->go->tooltip;
+            uint64_t h = fnv(1469598103934665603ull, ti, sizeof(*ti));
+            if (!ch->tex || ch->hash != h || ch->w != ti->rect.w || ch->h != ti->rect.h) {
+                gl_scratch_alpha(p->r, p->st, ch, &ti->rect, gl_do_tooltip, ti);
+                ch->hash = h;
+            }
+            if (ch->tex)
+                gl_tex_at(p, ch->tex, &ti->rect, false);
+        }
+        break;
     case LM_SCENE_MENU:
         if (item->output == p->st->out) {               /* rounded and a little translucent: redrawn only when it changes */
             const struct lm_menu_info *mi = &item->u.menu;

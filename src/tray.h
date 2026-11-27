@@ -13,6 +13,8 @@
  *   item.set_color(argb)  version 2: the button is painted in this colour, its label in the colour for text on colours; alpha 0 = the
  *                         bar's own button (mellagui-status: Wi-Fi and Bluetooth while they are on)
  *   item.set_name(s)      version 3: what the button is (a-z 0-9 - _, at most 15): the user's order of the panel's buttons remembers it by that
+ *   item.set_tooltip(s)   version 4: the words of the tooltip that shows when the pointer rests on the button (at most 191 bytes, up to
+ *                         LM_TOOLTIP_LINES lines split by \n); "" = the bar's own words for the item's name
  *   item.destroy          the item goes; so does one whose client disconnects
  *   event clicked(button) the button was pressed and let go on the item (272 left, 273 right, 274 middle)
  *
@@ -32,6 +34,7 @@
 #define LM_TRAY_PER_CLIENT 4
 #define LM_TRAY_MAX_ICON 64
 #define LM_TRAY_TEXT 32
+#define LM_TRAY_TOOLTIP 192
 
 struct lm_tray;
 
@@ -42,6 +45,7 @@ struct lm_tray_view {
     const char *text;                   /* "" = none */
     uint32_t color;                     /* the button's colour, 0xAARRGGBB; alpha 0 = the bar's own */
     const char *name;                   /* "" = the program did not say what it is */
+    const char *tooltip;                /* "" = the program gave none */
 };
 
 struct lm_tray *lm_tray_create(struct lm_server *srv);

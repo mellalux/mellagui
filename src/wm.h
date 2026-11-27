@@ -426,6 +426,8 @@ static inline int lm_panel_clock_text_width(const char *text, int button_h)
 
 /* The control socket's `panel`: the right-hand buttons from left to right. */
 size_t lm_wm_panel_describe(struct lm_wm *wm, char *buf, size_t size);
+/* Control socket `tooltip`: "tooltip shown=0|1 x= y= w= h= n=" and a `line TEXT` line each. */
+size_t lm_wm_tooltip_describe(struct lm_wm *wm, char *buf, size_t size);
 
 #define LM_PANEL_SHADOW 14          /* how far the panel's shadow reaches below it */
 
@@ -494,6 +496,16 @@ struct lm_panel_info {
         uint32_t color;             /* the program's colour for the button (alpha 0 = the bar's own) */
         bool hover;
     } tray[LM_PANEL_MAX_TRAY];
+};
+
+/* The tooltip of the panel button the pointer rests on (wm_tooltip.c): the first line in the bar's text colour, the others dim. */
+#define LM_TOOLTIP_LINES 4
+#define LM_TOOLTIP_LINE 128
+#define LM_TOOLTIP_PAD 10           /* left and right of the text */
+struct lm_tooltip_info {
+    struct lm_rect rect;            /* the card */
+    int n;                          /* lines */
+    char line[LM_TOOLTIP_LINES][LM_TOOLTIP_LINE];
 };
 
 /* A small menu card: the dock icon's right-click menu (the button's name and New window, Close all windows, Change..., Remove from dock) or a
@@ -719,6 +731,7 @@ enum lm_scene_kind {
     LM_SCENE_PANEL,                 /* one per output */
     LM_SCENE_DOCK,                  /* the dock (above the panel, below the menu) */
     LM_SCENE_MODKEYS,               /* sticky keys: a see-through key for every latched / locked modifier (near the top, under the menus) */
+    LM_SCENE_TOOLTIP,               /* the words under the panel button the pointer rests on */
     LM_SCENE_MENU,              /* the dock's right-click menu (above the dock) */
     LM_SCENE_NOTIFY,                /* one notification card (they stack top right, below the panel) */
     LM_SCENE_POWER,                 /* the session dialog (above windows, popups and notifications) */
@@ -787,6 +800,7 @@ struct lm_scene_item {
         struct lm_modkeys_info modkeys; /* LM_SCENE_MODKEYS */
         struct lm_power_info power; /* LM_SCENE_POWER */
         struct lm_menu_info menu; /* LM_SCENE_MENU */
+        struct lm_tooltip_info tooltip; /* LM_SCENE_TOOLTIP */
         struct lm_lock_info lock;   /* LM_SCENE_LOCK */
         struct lm_switcher_info switcher; /* LM_SCENE_SWITCHER */
         struct lm_notify_info notify;   /* LM_SCENE_NOTIFY */

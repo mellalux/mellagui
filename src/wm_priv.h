@@ -301,6 +301,15 @@ struct lm_wm {
     bool hover_power, hover_layout, hover_sticky, hover_magnifier, hover_osk, hover_quick;
     struct lm_rect modkeys_rect;    /* where the sticky keys' keys were last damaged (empty = none show) */
     int hover_tray;             /* id of the tray item under the pointer, 0 = none */
+    struct {                    /* the panel's tooltip (wm_tooltip.c) */
+        int kind;               /* enum lm_pick_kind of the button under the pointer (LM_PICK_PANEL = the Caps / Num lamp), 0 = none */
+        int index;              /* workspace number or tray item id */
+        struct lm_window *win;  /* a taskbar button's window */
+        bool shown;             /* the pointer rested long enough */
+        uint64_t hidden_ms;     /* when a tooltip last went away because the pointer moved on: the next button's shows at once */
+        struct lm_rect rect;    /* where it was last painted (to damage) */
+        struct lm_timer *timer;
+    } tip;
     struct {                    /* wm_panel.c: a panel button held (armed) until it comes loose (on) and is carried */
         struct lm_timer *timer;
         bool armed, on, moved;      /* moved: carried further than a hand trembles */
@@ -592,6 +601,12 @@ void launcher_edge_tick(void *data);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);
 void damage_panels(struct lm_wm *wm);
+/* wm_tooltip.c */
+void tooltip_init(struct lm_wm *wm);
+void tooltip_motion(struct lm_wm *wm, const struct lm_pick *pick);
+void tooltip_dismiss(struct lm_wm *wm);        /* a press, a drag, the lock: gone until the pointer finds another button */
+void tooltip_damage(struct lm_wm *wm);
+bool tooltip_info(struct lm_wm *wm, struct lm_tooltip_info *ti, struct lm_output **out);
 /* wm_panel.c */
 int panel_arrange(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_info *p, const struct panel_widths *pw, int taskbar_x);   /* places the right-hand buttons; where they begin */
 void panel_drag_init(struct lm_wm *wm);

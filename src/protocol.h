@@ -154,7 +154,7 @@ extern const struct lm_interface lm_mellagui_tray_item_v1_interface;
 #define LM_ZWP_POINTER_CONSTRAINTS_V1_VERSION 1
 #define LM_MELLAGUI_SETTINGS_V1_VERSION        1
 #define LM_MELLAGUI_CAPTURE_V1_VERSION         1
-#define LM_MELLAGUI_TRAY_V1_VERSION            3
+#define LM_MELLAGUI_TRAY_V1_VERSION            4
 #define LM_MELLAGUI_MENU_V1_VERSION            2
 
 /* ---- wl_display (version 1) ------------------------------------------------- */
@@ -701,6 +701,7 @@ enum {
     LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TEXT = 2, /* "s" label right of the icon, at most 31 bytes */
     LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_COLOR = 3,/* "u" version 2: the colour of the button itself, 0xAARRGGBB (the alpha only says that there is one); 0 = the bar's own */
     LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_NAME = 4, /* "s" version 3: what the button is ("network"): its place in the user's order of the panel is kept by it */
+    LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_TOOLTIP = 5, /* "s" version 4: what the bar says when the pointer rests on the button (at most 191 bytes, lines split by \n) */
     LM_MELLAGUI_TRAY_ITEM_V1_EVT_SIZE = 0,     /* "i" the icon edge in pixels the bar wants (sent when the item is created) */
     LM_MELLAGUI_TRAY_ITEM_V1_EVT_CLICKED = 1,  /* "u" evdev button (272 left, 273 right, 274 middle): pressed and let go on the item */
 };

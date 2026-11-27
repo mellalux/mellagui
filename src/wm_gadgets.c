@@ -819,4 +819,5 @@ void damage_panels(struct lm_wm *wm)
         damage_rect(wm, &r);
     }
     dock_damage(wm);                                    /* (windows come and go here: the dock's "running" dots) */
+    tooltip_damage(wm);                                 /* (what it says may have changed) */
 }

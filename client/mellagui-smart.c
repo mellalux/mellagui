@@ -3473,13 +3473,22 @@ static int cmd_list(void)
 }
 
 /* The pinned devices with what the desktop card needs, one tab separated line each:
- *   scene ID NAME                          a scene with a button on the card (they come first)
+ *   scene ID NAME [on|off TARGETS]         a scene with a button on the card (they come first); one that only toggles switches also says whether it is
+ *                                          on and which switches those are ("device/code,device/code")
  *   fav ID NAME ONLINE KIND CODE VALUE     KIND switch (VALUE 0 / 1), blind (VALUE the position in per cent, -1 unknown; CODE control) or none */
-static void print_desk_scenes(const struct scene *s, int n)
+static void print_desk_scenes(const struct scene *s, int n, struct tuya_dev *dev, int ndev)
 {
-    for (int i = 0; i < n; i++)
-        if (s[i].desk)
-            printf("scene\t%s\t%s\n", s[i].id, s[i].name);
+    for (int i = 0; i < n; i++) {
+        if (!s[i].desk)
+            continue;
+        printf("scene\t%s\t%s", s[i].id, s[i].name);
+        if (scene_is_toggle(&s[i])) {
+            printf("\t%s\t", scene_is_on(&s[i], dev, ndev) ? "on" : "off");
+            for (int k = 0; k < s[i].n; k++)
+                printf("%s%s/%s", k ? "," : "", s[i].act[k].dev, s[i].act[k].code);
+        }
+        printf("\n");
+    }
 }
 
 static int cmd_favourites(void)
@@ -3490,9 +3499,12 @@ static int cmd_favourites(void)
     int nf = fav_load(ids, FAV_MAX), n = 0;
     static struct scene scene[SCENE_MAX];
     int ns = scene_load(scene, SCENE_MAX);
-    if (!nf) {
+    bool states = false;                        /* a scene button that shows a state needs the devices, pinned or not */
+    for (int i = 0; i < ns; i++)
+        states = states || (scene[i].desk && scene_is_toggle(&scene[i]));
+    if (!nf && !states) {
         printf("favs\t0\n");
-        print_desk_scenes(scene, ns);
+        print_desk_scenes(scene, ns, NULL, 0);
         return 0;
     }
     if (need_login(&s))
@@ -3502,7 +3514,7 @@ static int cmd_favourites(void)
         return 1;
     }
     printf("favs\t%d\n", nf);
-    print_desk_scenes(scene, ns);
+    print_desk_scenes(scene, ns, dev, n);
     for (int f = 0; f < nf; f++)
         for (int i = 0; i < n; i++) {
             struct tuya_dev *d = &dev[i];

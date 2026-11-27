@@ -70,6 +70,7 @@
 #include "about.h"
 #include "dock.h"
 #include "dockicon.h"
+#include "font.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -415,6 +416,13 @@ struct lm_frame_info {
     uint32_t hover;                 /* LM_FRAME_HOVER_* */
     uint32_t pressed;               /* LM_FRAME_HOVER_* bit currently held down, else 0 */
 };
+
+/* The panel's clock is written a quarter bigger than the other texts, unless the bar's buttons (`button_h` high) are too low for it. */
+static inline double lm_panel_clock_scale(int button_h) { return button_h >= 24 ? 1.25 : 1.0; }
+static inline int lm_panel_clock_text_width(const char *text, int button_h)
+{
+    return (int)(lm_font_text_width(text) * lm_panel_clock_scale(button_h) + 0.5);
+}
 
 #define LM_PANEL_SHADOW 14          /* how far the panel's shadow reaches below it */
 

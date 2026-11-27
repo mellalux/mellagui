@@ -6,8 +6,10 @@
  * commands the card sends. The compositor does not talk to the cloud: it asks the program. Every LM_SMART_POLL_MS while the gadget is shown
  * it runs `mellagui-smart --favourites` (asynchronously, lm_proc_run; $MELLAGUI_SMART_BIN replaces the program) and reads its lines
  *     favs <TAB> count                       (a program that does not print this line did not answer)
- *     scene <TAB> id <TAB> name              (the scenes that have a button on the card: they stand above the devices; a click runs
- *                                             `mellagui-smart --scene ID --notify`)
+ *     scene <TAB> id <TAB> name [<TAB> on|off <TAB> device/code,...]
+ *                                            (the scenes that have a button on the card: they stand above the devices; a click runs
+ *                                             `mellagui-smart --scene ID --notify`. One that only toggles switches also says whether it is on and
+ *                                             which switches those are: its button is green while on and grey while off, and follows a click at once)
  *     fav <TAB> id <TAB> name <TAB> online <TAB> switch|blind|vacuum|none <TAB> code <TAB> value [<TAB> battery,dockcode,dockvalue]
  * (a blind's value is its position in per cent, a vacuum's 1 = cleaning; a device with several switches - a power strip - has one `fav` line for each:
  * the same id and name, that switch's code and, as the field after the value, its label "Switch 2" / "USB 1". The card shows such a device as ONE
@@ -28,8 +30,13 @@ struct lm_smart;
 #define LM_SMART_SCENE_H 30             /* a row of them */
 #define LM_SMART_SCENE_MS 1500          /* a pressed one stays lit */
 
+#define LM_SMART_TARGETS 8              /* switches of a toggling scene the card remembers */
+
 struct lm_smart_scene {
     char id[12], name[48];
+    int state;                          /* -1 = the button has none, 0 off, 1 on */
+    int ntarget;
+    struct { char dev[40], code[32]; } target[LM_SMART_TARGETS];
 };
 
 enum lm_smart_kind { LM_SMART_NONE, LM_SMART_SWITCH, LM_SMART_BLIND, LM_SMART_VACUUM };

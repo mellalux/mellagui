@@ -53,6 +53,10 @@ int scene_run(const struct scene *s, struct tuya_dev *dev, int ndev, scene_send_
 /* The same through the cloud with the saved login, for the programs without a window. -1 = nothing at all was sent (not logged in, no
  * network: it may be tried again), else as scene_run(). */
 int scene_run_cloud(const struct scene *s, char *summary, size_t n);
+/* A scene that only turns switches the other way is on or off, like the switches: true for such a scene (its button shows which). */
+bool scene_is_toggle(const struct scene *s);
+/* ... and whether it is on now: one of its switches is (an offline device's does not count). */
+bool scene_is_on(const struct scene *s, struct tuya_dev *dev, int ndev);
 
 int scene_selftest(void);
 

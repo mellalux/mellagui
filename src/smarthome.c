@@ -82,6 +82,20 @@ static void parse(struct lm_smart *s, const char *text)
             struct lm_smart_scene *sc = &ns.scene[ns.nscene++];
             snprintf(sc->id, sizeof(sc->id), "%s", f[1]);
             snprintf(sc->name, sizeof(sc->name), "%s", f[2]);
+            sc->state = k >= 4 && !strcmp(f[3], "on") ? 1 : k >= 4 && !strcmp(f[3], "off") ? 0 : -1;
+            for (char *t = k >= 5 ? f[4] : NULL; t && *t && sc->ntarget < LM_SMART_TARGETS;) {
+                char *next = strchr(t, ',');
+                if (next)
+                    *next++ = 0;
+                char *code = strchr(t, '/');
+                if (code) {
+                    *code++ = 0;
+                    snprintf(sc->target[sc->ntarget].dev, sizeof(sc->target[0].dev), "%s", t);
+                    snprintf(sc->target[sc->ntarget].code, sizeof(sc->target[0].code), "%s", code);
+                    sc->ntarget++;
+                }
+                t = next;
+            }
         }
         if (k < 7 || strcmp(f[0], "fav"))
             continue;
@@ -272,6 +286,40 @@ void lm_smart_open_card(struct lm_smart *s, int index)
     spawn_detached(argv);
 }
 
+/* The switch on the card that a scene's target is, NULL = it is not pinned. */
+static struct lm_smart_item *target_item(struct lm_smart *s, const struct lm_smart_scene *sc, int t)
+{
+    for (int i = 0; i < s->st.n; i++) {
+        struct lm_smart_item *it = &s->st.item[i];
+        if (it->kind == LM_SMART_SWITCH && !strcmp(it->id, sc->target[t].dev) && !strcmp(it->code, sc->target[t].code))
+            return it;
+    }
+    return NULL;
+}
+
+/* After a click the scene buttons agree with the switches on the card at once: on when one of its switches is, off when all of them are on the card and
+ * none is; else it stays as it was until the next poll. */
+static void scenes_follow(struct lm_smart *s)
+{
+    for (int i = 0; i < s->st.nscene; i++) {
+        struct lm_smart_scene *sc = &s->st.scene[i];
+        if (sc->state < 0)
+            continue;
+        int seen = 0, on = 0;
+        for (int t = 0; t < sc->ntarget; t++) {
+            const struct lm_smart_item *it = target_item(s, sc, t);
+            if (it) {
+                seen++;
+                on += it->online && it->on;
+            }
+        }
+        if (on)
+            sc->state = 1;
+        else if (sc->ntarget && seen == sc->ntarget)
+            sc->state = 0;
+    }
+}
+
 void lm_smart_scene_run(struct lm_smart *s, int index)
 {
     if (!s || index < 0 || index >= s->st.nscene)
@@ -281,9 +329,24 @@ void lm_smart_scene_run(struct lm_smart *s, int index)
     char *argv[] = { prog, (char *)"--scene", s->st.scene[index].id, (char *)"--notify", NULL };
     lm_proc_run(s->loop, argv, 60000, NULL, NULL);                  /* what does not go out is said by a notification */
     s->gen++;
-    s->st.ran = index;
-    if (s->unlit)
-        lm_timer_arm_ms(s->unlit, LM_SMART_SCENE_MS, 0);
+    struct lm_smart_scene *sc = &s->st.scene[index];
+    if (sc->state >= 0) {                       /* a toggling one turns its switches the other way: shown at once, the next poll confirms it */
+        int was = sc->state, seen = 0;
+        for (int t = 0; t < sc->ntarget; t++) {
+            struct lm_smart_item *it = target_item(s, sc, t);
+            if (it && it->online) {
+                it->on = !it->on;
+                seen++;
+            }
+        }
+        scenes_follow(s);
+        if (!sc->ntarget || seen != sc->ntarget)
+            sc->state = !was;                   /* (not all of its switches are on the card to go by) */
+    } else {
+        s->st.ran = index;                      /* a one-off: lit for a moment */
+        if (s->unlit)
+            lm_timer_arm_ms(s->unlit, LM_SMART_SCENE_MS, 0);
+    }
     if (s->soon)
         lm_timer_arm_ms(s->soon, 6000, 0);
     notify(s);
@@ -296,6 +359,7 @@ void lm_smart_toggle(struct lm_smart *s, int index)
     struct lm_smart_item *it = &s->st.item[index];
     it->on = !it->on;
     send_set(s, it, it->on ? "true" : "false");
+    scenes_follow(s);
     notify(s);
 }
 

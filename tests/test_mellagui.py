@@ -2501,9 +2501,9 @@ def type_text(text):
 
 class TestKeyboard(Base):
     """Keyboard layouts (XKB groups) and sticky keys."""
-    LAYOUT_BTN = (706, 14)          # panel indicator on the 1024 px wide test output
-    STICKY_BTN = (746, 14)          # ... then the sticky keys, the on-screen keyboard and the magnifier side by side
-    MAGNIFIER_BTN = (826, 14)
+    LAYOUT_BTN = (662, 14)          # panel indicator on the 1024 px wide test output
+    STICKY_BTN = (702, 14)          # ... then the sticky keys, the on-screen keyboard and the magnifier side by side
+    MAGNIFIER_BTN = (782, 14)
 
     def setUp(self):
         super().setUp()
@@ -2784,11 +2784,11 @@ class TestKeyboard(Base):
         ctl.cmd('sticky 1')
         ctl.sync()
         after = ctl.dump(os.path.join(tmp, 'kbd1.ppm'))
-        sticky_before = [before.px(x, 16) for x in range(729, 764, 3)]
-        sticky_after = [after.px(x, 16) for x in range(729, 764, 3)]
+        sticky_before = [before.px(x, 16) for x in range(685, 720, 3)]
+        sticky_after = [after.px(x, 16) for x in range(685, 720, 3)]
         self.assertNotEqual(sticky_before, sticky_after, 'sticky button looks the same when enabled')
-        layout_before = [before.px(x, 16) for x in range(690, 722, 2)]
-        layout_after = [after.px(x, 16) for x in range(690, 722, 2)]
+        layout_before = [before.px(x, 16) for x in range(646, 678, 2)]
+        layout_after = [after.px(x, 16) for x in range(646, 678, 2)]
         self.assertNotEqual(layout_before, layout_after, 'layout indicator did not change')
 
 
@@ -22725,7 +22725,7 @@ class TestCalendar(Base):
         c = self.start('mellagui-cal1')
         k = self.clock(c)
         self.assertRegex(k['text'], r'^\d\d\.\d\d\.\d{4} \d\d:\d\d$')
-        self.assertEqual(k['w'], 136)                               # the width it always had
+        self.assertEqual(k['w'], 180)                               # 16 letters a quarter bigger than 8 px, and 20 px round them
         c.cmd('settings clock-seconds 1')
         k2 = self.clock(c)
         self.assertRegex(k2['text'], r'^\d\d\.\d\d\.\d{4} \d\d:\d\d:\d\d$')
@@ -23733,7 +23733,7 @@ class TestOutputLayout(Base):
         c.cmd('dump %s 1' % os.path.join(tmp, 'lay5-1.ppm'))
         ppm1 = Ppm(os.path.join(tmp, 'lay5-1.ppm'))
         self.assertEqual((ppm1.w, ppm1.h), (400, 300))
-        self.assertEqual(ppm1.px(228, 14), ppm1.px(230, 14))                # a panel row (not the wallpaper gradient; between the Sticky button and the clock, which the crowded 400 px bar leaves empty)
+        self.assertEqual(ppm1.px(178, 14), ppm1.px(180, 14))                # a panel row (not the wallpaper gradient; between the magnifier and the clock, a gap of the crowded 400 px bar)
         self.assertNotEqual(ppm1.px(2, 250), ppm1.px(2, 5))                 # the wallpaper below the panel differs from the panel
         c.cmd('gadget-rect')
         gx = int(c.last.split()[1])
@@ -31698,6 +31698,41 @@ class TestSmartGadget(Base):
         while time.time() < end and not any(l.startswith('plug1 ') for l in self.logged()):
             time.sleep(0.1)
         self.assertIn('plug1 switch_1 false', self.logged())
+
+    def test_a_toggling_scene_button_shows_whether_it_is_on(self):
+        os.environ['FAKE_SMART_SCENES'] = 's1=Lamp|plug1/switch_1;s2=Away'
+        self.addCleanup(os.environ.pop, 'FAKE_SMART_SCENES', None)
+        c = self.start('mellagui-sg-toggle', devices=[self.DEVICES[0]])
+        c.cmd('settings smart 1')
+
+        def look():
+            head, lines, items = self.items(c)
+            states = [re.match(r'scene \d \S+ state=(-?\d)', l).group(1) for l in lines if l.startswith('scene ')]
+            return states, items[0]['on']
+
+        def pixel(name):
+            time.sleep(0.3)
+            x, y, w, h = self.card(c)
+            return c.dump(os.path.join(tmp, name + '.ppm')).px(x + 8 + 20, y + 26 + 4 + 15)      # the left part of the first button, beside its name
+        self.assertEqual(look(), (['1', '-1'], '1'))                      # the lamp is on, and so is its scene; the other one has no state
+        time.sleep(0.5)
+        lit = pixel('sg-toggle-on')
+        self.assertGreater(lit[1], lit[0] + 20, 'green while on')
+        x, y, w, h = self.card(c)
+        c.click(x + 8 + 20, y + 26 + 4 + 15)
+        c.abs(100, 700)
+        end = time.time() + 3
+        while time.time() < end and look() != (['0', '-1'], '0'):
+            time.sleep(0.1)
+        self.assertEqual(look(), (['0', '-1'], '0'))                      # off at once, the check box too
+        self.assertIn('--scene s1 --notify', self.logged())
+        dark = pixel('sg-toggle-off')
+        self.assertLess(abs(dark[1] - dark[0]), 20, 'grey while off')
+        c.click(x + w - 34, y + 26 + 4 + 34 + 17)                         # the lamp's own check box: the scene follows
+        end = time.time() + 3
+        while time.time() < end and look() != (['1', '-1'], '1'):
+            time.sleep(0.1)
+        self.assertEqual(look(), (['1', '-1'], '1'))
 
     def test_a_blind_that_can_be_positioned_has_a_slider_on_a_second_line(self):
         devs = [{'id': 'blind1', 'name': 'Blind', 'online': True, 'kind': 'blind', 'code': 'control', 'value': 60, 'extra': '1'},

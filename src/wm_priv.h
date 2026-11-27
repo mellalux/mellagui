@@ -62,7 +62,8 @@
 #define RESIZE_CORNER (lm_metrics.resize_corner)
 #define DOUBLE_CLICK_MS (lm_metrics.double_click_ms)
 #define PANEL_WS_W (lm_metrics.panel_ws_width)
-#define PANEL_CLOCK_MIN_W 136                   /* "DD.MM.YYYY HH:MM" = 16 glyphs; longer texts (seconds, a weekday ...) make it wider */
+#define PANEL_CLOCK_MIN_W 72                    /* the clock's white button is as wide as its text needs, a short one ("17:53") at least this */
+#define PANEL_CLOCK_PAD 20                      /* ... the text and this much round it */
 #define PANEL_POWER_D (LM_PANEL_HEIGHT - 4)     /* the round power button's diameter: as tall as the other buttons */
 #define POWER_CARD_W 264                        /* the session dialog */
 #define POWER_CARD_H 268                        /* (the card grows downwards: the upper row stays where it was) */

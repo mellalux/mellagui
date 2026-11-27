@@ -219,6 +219,27 @@ int scene_run(const struct scene *s, struct tuya_dev *dev, int ndev, scene_send_
     return failed;
 }
 
+bool scene_is_toggle(const struct scene *s)
+{
+    for (int i = 0; i < s->n; i++)
+        if (strcmp(s->act[i].value, "toggle"))
+            return false;
+    return s->n > 0;
+}
+
+bool scene_is_on(const struct scene *s, struct tuya_dev *dev, int ndev)
+{
+    for (int i = 0; i < s->n; i++)
+        for (int k = 0; k < ndev; k++) {
+            if (strcmp(dev[k].id, s->act[i].dev) || !dev[k].online)
+                continue;
+            const struct tuya_dp *dp = tuya_find_dp(&dev[k], s->act[i].code);
+            if (dp && dp->has && dp->type == TUYA_BOOL && dp->b)
+                return true;
+        }
+    return false;
+}
+
 static bool cloud_send(void *ud, const char *dev, const char *code, const char *json, char *err, size_t errsz)
 {
     return tuya_command(ud, dev, code, json, err, errsz);
@@ -305,6 +326,13 @@ int scene_selftest(void)
     scene_run(&t, dev, 1, test_send, NULL, sum, sizeof(sum));
     scene_run(&t, dev, 1, test_send, NULL, sum, sizeof(sum));
     CHECK(!strcmp(g_log, "d1 switch_1 true;d1 switch_1 false;"), "toggle goes the other way each time");
+    CHECK(scene_is_toggle(&t) && !scene_is_toggle(&s[0]), "which scenes are toggles");
+    CHECK(!scene_is_on(&t, dev, 1), "off while its switch is off");
+    dev[0].dp[0].b = true;
+    CHECK(scene_is_on(&t, dev, 1), "on while its switch is on");
+    dev[0].online = false;
+    CHECK(!scene_is_on(&t, dev, 1), "an offline switch does not count");
+    dev[0].online = true;
     scene_act_remove(&s[0], "d1", "switch_1");
     CHECK(s[0].n == 4 && scene_act_find(&s[0], "d1", "switch_1") < 0 && scene_act_find(&s[0], "d1", "control") == 0, "removing an action");
 #undef CHECK

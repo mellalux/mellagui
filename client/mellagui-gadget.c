@@ -154,7 +154,7 @@ static void dump_state(struct app *a)
         const struct lm_smart_state *ms = lm_smart_state(a->smart);
         fprintf(f, "smart visible=1 ready=%d n=%d note=%s\n", ms->ready ? 1 : 0, ms->n, ms->note[0] ? ms->note : "-");
         for (int i = 0; i < ms->nscene; i++)
-            fprintf(f, "scene %d %s name=%s ran=%d\n", i, ms->scene[i].id, ms->scene[i].name, ms->ran == i);
+            fprintf(f, "scene %d %s state=%d name=%s ran=%d\n", i, ms->scene[i].id, ms->scene[i].state, ms->scene[i].name, ms->ran == i);
         for (int i = 0; i < ms->n; i++)
             fprintf(f, "item %d %s kind=%s online=%d on=%d percent=%d battery=%d dock=%s group=%d label=%s\n", i, ms->item[i].name,
                     ms->item[i].kind == LM_SMART_SWITCH ? "switch" : ms->item[i].kind == LM_SMART_BLIND ? "blind" : ms->item[i].kind == LM_SMART_VACUUM ? "vacuum" : "none",
@@ -971,7 +971,8 @@ static void paint_smart(struct app *a)
         struct lm_rect r = lm_rect_make(l.scene[i].x, l.scene[i].y, l.scene[i].w, l.scene[i].h);
         if (r.w <= 0)
             continue;
-        card_button(w, r, st->ran == i ? lm_theme.btn_green : lm_theme.btn_teal);
+        int on = st->scene[i].state;                                /* a toggling scene is like Wi-Fi in the bar: coloured while on, grey while off */
+        card_button(w, r, on > 0 || (on < 0 && st->ran == i) ? lm_theme.btn_green : on == 0 ? lm_theme.btn_slate : lm_theme.btn_teal);
         int tw = lm_font_text_width(st->scene[i].name), room = r.w - 12;
         text_fit(w, r.x + (tw < room ? (r.w - tw) / 2 : 6), r.y + (r.h - LM_FONT_H) / 2, st->scene[i].name, room, lm_theme.on_colour);
     }

@@ -126,7 +126,7 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
         x += PANEL_WS_W + 2;
     }
     p->power = lm_rect_make(p->bar.x + p->bar.w - PANEL_POWER_D - 4, y, PANEL_POWER_D, PANEL_POWER_D);
-    int clock_w = LM_MAX(PANEL_CLOCK_MIN_W, lm_font_text_width(wm->clock_text) + 8);
+    int clock_w = LM_MAX(PANEL_CLOCK_MIN_W, lm_panel_clock_text_width(wm->clock_text, h) + PANEL_CLOCK_PAD);
     p->clock = lm_rect_make(p->power.x - 4 - clock_w, y, clock_w, h);
     /* sticky keys, on-screen keyboard and magnifier side by side, left of the clock */
     p->magnifier = lm_rect_make(p->clock.x - 8 - PANEL_MAG_W, y, PANEL_MAG_W, h);

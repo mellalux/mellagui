@@ -394,6 +394,33 @@ static inline void put_px(const struct paint_ctx *c, int x, int y, uint32_t colo
 
 /* One character of a label, its pen at (x, y = top of the line) in logical pixels, cut to `lim`; returns how far the pen moves
  * (logical). The picture is rasterised at the output's scale: the shell's text is as sharp at 2x as at 1x. */
+static void blit_glyph(const struct paint_ctx *c, const struct lm_rect *lim, int x, int y, const struct lm_font_glyph *g, uint32_t color)
+{
+    struct lm_rect area, pl;
+    if (!lm_rect_intersect(lim, &c->clip, &area))
+        return;
+    pl = prect(c, &area);
+    int px = sround((double)(x - c->ox) * c->s), py = sround((double)(y - c->oy) * c->s);
+    int gx = px - g->left;
+    if (gx + g->w <= pl.x || gx >= pl.x + pl.w)
+        return;
+    int x0 = LM_MAX(gx, pl.x), x1 = LM_MIN(gx + g->w, pl.x + pl.w);
+    struct paint_ctx pc;
+    pview(c, &pc);
+    for (int row = 0; row < g->h; row++) {
+        int ry = py + row;
+        if (ry < pl.y || ry >= pl.y + pl.h)
+            continue;
+        uint32_t *dst = fb_row(&pc, ry);
+        const uint8_t *src = g->px + (size_t)row * (size_t)g->w - gx;
+        for (int xx = x0; xx < x1; xx++) {
+            unsigned a = src[xx];
+            if (a)
+                dst[xx] = lm_font_mix(dst[xx], color, a);
+        }
+    }
+}
+
 static int draw_label_glyph(const struct paint_ctx *c, const struct lm_rect *lim, int x, int y, uint32_t cp, int scale, uint32_t color)
 {
     int sc = scale < 0 ? -scale : scale;
@@ -403,31 +430,8 @@ static int draw_label_glyph(const struct paint_ctx *c, const struct lm_rect *lim
         lm_font_label_styled(cp, sc, bold, &g);
     else
         lm_font_label_scaled(cp, (double)sc * c->s, bold, &g);
-    int advance = lm_font_advance_styled(cp, bold) * sc;
-    struct lm_rect area, pl;
-    if (!lm_rect_intersect(lim, &c->clip, &area))
-        return advance;
-    pl = prect(c, &area);
-    int px = sround((double)(x - c->ox) * c->s), py = sround((double)(y - c->oy) * c->s);
-    int gx = px - g.left;
-    if (gx + g.w <= pl.x || gx >= pl.x + pl.w)
-        return advance;
-    int x0 = LM_MAX(gx, pl.x), x1 = LM_MIN(gx + g.w, pl.x + pl.w);
-    struct paint_ctx pc;
-    pview(c, &pc);
-    for (int row = 0; row < g.h; row++) {
-        int ry = py + row;
-        if (ry < pl.y || ry >= pl.y + pl.h)
-            continue;
-        uint32_t *dst = fb_row(&pc, ry);
-        const uint8_t *src = g.px + (size_t)row * (size_t)g.w - gx;
-        for (int xx = x0; xx < x1; xx++) {
-            unsigned a = src[xx];
-            if (a)
-                dst[xx] = lm_font_mix(dst[xx], color, a);
-        }
-    }
-    return advance;
+    blit_glyph(c, lim, x, y, &g, color);
+    return lm_font_advance_styled(cp, bold) * sc;
 }
 
 static void draw_text_w(const struct paint_ctx *c, const struct lm_rect *area, int x, int y,
@@ -451,6 +455,22 @@ static void draw_text(const struct paint_ctx *c, const struct lm_rect *area, int
                       const char *text, uint32_t color)
 {
     draw_text_w(c, area, x, y, text, color, false);
+}
+
+/* A label at any size `k` times the normal one (the panel's clock). */
+static void draw_text_sized(const struct paint_ctx *c, const struct lm_rect *lim, int x, int y, const char *text, double k, uint32_t color)
+{
+    double pen = (double)x;
+    size_t len = strlen(text);
+    for (size_t i = 0; i < len;) {
+        int used;
+        uint32_t cp = lm_utf8_decode(text + i, (int)(len - i), &used);
+        i += used > 0 ? (size_t)used : 1;
+        struct lm_font_glyph g;
+        lm_font_label_scaled(cp, k * c->s, false, &g);
+        blit_glyph(c, lim, (int)(pen + 0.5), y, &g, color);
+        pen += lm_font_advance(cp) * k;
+    }
 }
 
 /* The bold weight (titles of cards); with the bitmap font it is the same picture. */
@@ -2207,7 +2227,13 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
             fill_round(c, &k2, 1, 0xff000000u | qfg);                              /* ... and the knob itself */
         }
     }
-    draw_text_centered(c, &p->clock, p->clock_text, COL_PANEL_TEXT);
+    {                                                   /* the date and the time: dark on a white button, a little bigger than the other texts */
+        paint_drop(c, &p->clock, btn_radius(LM_MIN(p->clock.w, p->clock.h) / 2), lm_theme.on_colour);
+        double k = lm_panel_clock_scale(p->clock.h);
+        int tw = lm_panel_clock_text_width(p->clock_text, p->clock.h);
+        draw_text_sized(c, &p->clock, p->clock.x + (p->clock.w - tw) / 2, p->clock.y + (p->clock.h - (int)(LM_FONT_H * k + 0.5)) / 2, p->clock_text, k,
+                        lm_theme.ink);
+    }
     {                                                   /* the round power button: a disc with the power symbol */
         float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;
         float R = (float)p->power.w / 2.0f;

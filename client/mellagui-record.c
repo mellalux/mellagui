@@ -87,6 +87,7 @@ struct button {
 struct app {
     struct wlwin win;
     uint32_t capture, settings, tray;
+    uint32_t tray_ver;
     struct output outs[MAX_OUTPUTS];
     int nouts;
     bool listed;
@@ -466,6 +467,8 @@ static void tray_start(struct app *a)
         return;
     a->tray_item = wlc_alloc(a->win.c, &lm_mellagui_tray_item_v1_interface, tray_item_event, a);
     WLC_SEND(a->win.c, a->tray, LM_MELLAGUI_TRAY_V1_REQ_CREATE_ITEM, { .n = a->tray_item });
+    if (a->tray_ver >= 3)                       /* (its place in the user's order of the panel) */
+        WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_NAME, { .s = "record" });
     a->tray_phase = -1;
     a->tray_sec = UINT64_MAX;
 }
@@ -916,12 +919,11 @@ static void settings_event(struct wlc *c, uint32_t id, uint32_t op, const union 
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
-    (void)ver;
     struct app *a = w->data;
     if (!strcmp(iface, "mellagui_capture_v1"))
         a->capture = wlc_bind(w->c, w->registry, name, &lm_mellagui_capture_v1_interface, 1, capture_event, a);
     else if (!strcmp(iface, "mellagui_tray_v1"))
-        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, 1, settings_event, a);
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 3u), settings_event, a);
     else if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
 }

@@ -250,6 +250,11 @@ struct wm_overview {
     int drag_i;                         /* ... this one; the pointer is wm->drag_x / drag_y */
 };
 
+#define PANEL_KEYS_MAX 24
+#define PANEL_KEY_LEN 16
+struct panel_keys { int n; char k[PANEL_KEYS_MAX][PANEL_KEY_LEN]; };      /* names of panel buttons, left to right */
+struct panel_widths { int caps, quick, layout, sticky, osk, magnifier, clock, power; };
+
 struct lm_wm {
     struct lm_server *srv;
     struct wm_anim anim[ANIM_MAX];
@@ -296,6 +301,14 @@ struct lm_wm {
     bool hover_power, hover_layout, hover_sticky, hover_magnifier, hover_osk, hover_quick;
     struct lm_rect modkeys_rect;    /* where the sticky keys' keys were last damaged (empty = none show) */
     int hover_tray;             /* id of the tray item under the pointer, 0 = none */
+    struct {                    /* wm_panel.c: a panel button held (armed) until it comes loose (on) and is carried */
+        struct lm_timer *timer;
+        bool armed, on, moved;      /* moved: carried further than a hand trembles */
+        struct lm_output *output;
+        char key[PANEL_KEY_LEN];
+        int tray_id, press_x, press_y, grab_dx;
+        struct panel_keys order;
+    } pdrag;
     bool osk_pin;               /* the keyboard is the number pad of the lock screen (a PIN) */
     bool lock_kbd_hover;        /* the pointer is on the lock screen's keyboard button */
     bool osk_open;              /* the on-screen keyboard is showing on the primary output */
@@ -579,6 +592,13 @@ void launcher_edge_tick(void *data);
 bool launcher_drop_zone(const struct lm_wm *wm, struct lm_output *o, struct lm_rect *zone, struct lm_rect *marker, int *pos);
 bool settings_present(struct lm_wm *wm);
 void damage_panels(struct lm_wm *wm);
+/* wm_panel.c */
+int panel_arrange(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_info *p, const struct panel_widths *pw, int taskbar_x);   /* places the right-hand buttons; where they begin */
+void panel_drag_init(struct lm_wm *wm);
+void panel_press(struct lm_wm *wm);                 /* the left button went down on the panel */
+bool panel_release(struct lm_wm *wm);               /* ... and up: true = a carried button was put down (that is no click) */
+bool panel_drag_motion(struct lm_wm *wm);           /* true = a button is being carried */
+void panel_drag_cancel(struct lm_wm *wm);
 /* wm_modkeys.c: the keys sticky keys show on the screen. */
 bool modkeys_info(const struct lm_wm *wm, struct lm_modkeys_info *mi);     /* false = none to show */
 void modkeys_damage(struct lm_wm *wm);                  /* what they covered before and what they cover now */

@@ -424,9 +424,20 @@ static inline int lm_panel_clock_text_width(const char *text, int button_h)
     return (int)(lm_font_text_width(text) * lm_panel_clock_scale(button_h) + 0.5);
 }
 
+/* The control socket's `panel`: the right-hand buttons from left to right. */
+size_t lm_wm_panel_describe(struct lm_wm *wm, char *buf, size_t size);
+
 #define LM_PANEL_SHADOW 14          /* how far the panel's shadow reaches below it */
 
 struct lm_texture;
+
+/* The right-hand buttons of the panel (wm_panel.c): their order can be changed by carrying one. */
+enum lm_panel_item { LM_PANEL_ITEM_NONE, LM_PANEL_ITEM_CAPS, LM_PANEL_ITEM_QUICK, LM_PANEL_ITEM_LAYOUT, LM_PANEL_ITEM_STICKY, LM_PANEL_ITEM_OSK,
+                     LM_PANEL_ITEM_MAGNIFIER, LM_PANEL_ITEM_CLOCK, LM_PANEL_ITEM_POWER, LM_PANEL_ITEM_TRAY };
+
+#define PANEL_FLAG_LEFT 10          /* the white layout button: room left of the flag, between flag and text, and right of the text */
+#define PANEL_FLAG_GAP 6
+#define PANEL_FLAG_RIGHT 14
 
 struct lm_panel_info {
     struct lm_output *output;
@@ -445,10 +456,14 @@ struct lm_panel_info {
     struct lm_rect quick;               /* the quick settings button, left of the layout indicator */
     bool hover_quick, quick_open;
     bool osk_open;                  /* the keyboard is showing: the button is lit */
-    struct lm_rect layout;          /* keyboard layout indicator (with `layout_badges`: the box round all the badges) */
+    struct lm_rect layout;          /* keyboard layout indicator */
+    int layout_style;               /* setting layout-style: 0 the letters, 1 a white button with the flag and the text, 2 the flag as the button with the code on it, 3 the flag as the button */
+    int lift;                       /* enum lm_panel_item of the button that is being carried to another place (0 = none) ... */
+    int lift_tray;                  /* ... which of tray[] it is */
+    struct lm_rect lift_gap;        /* ... and the place kept for it */
     bool hover_layout;
     char layout_text[8];            /* "US", "EE" ... */
-    int nbadges;                    /* setting layout-badges: 1 = `layout` shows the flag of the layout in use (badge[0]), else 0 = the round badge with letters */
+    int nbadges;                    /* 1 = `layout` shows the flag of the layout in use (badge[0]; layout_style > 0), else 0 = the letters */
     struct { struct lm_rect rect; char text[8]; char label[24]; bool active, hover; } badge[1];   /* label: written right of the flag (setting layout-label), "" = none */
     struct lm_rect sticky;          /* sticky keys toggle: a keycap (the waiting modifiers are LM_SCENE_MODKEYS) */
     bool hover_sticky;
@@ -475,6 +490,7 @@ struct lm_panel_info {
         int id;                     /* LM_PICK_PANEL_TRAY index */
         const struct lm_texture *icon;  /* premultiplied ARGB, NULL = none; valid only during the callback */
         const char *text;           /* "" = none; valid only during the callback */
+        const char *name;           /* what the program calls the button ("network"), "" = nothing; valid only during the callback */
         uint32_t color;             /* the program's colour for the button (alpha 0 = the bar's own) */
         bool hover;
     } tray[LM_PANEL_MAX_TRAY];

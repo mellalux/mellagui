@@ -183,7 +183,8 @@ struct lm_config {
     bool osk_avoid;             /* windows keep out of the on-screen keyboard's way (settings: osk-avoid; default true) */
     bool lock_wallpaper;        /* the lock screen shows the wallpaper, blurred and dimmed, behind the clock (settings: lock-wallpaper; default true; plain dark without a wallpaper) */
     int layout_label;           /* next to each flag in the panel: 0 nothing, 1 the short code (US), 2 the language (settings: layout-label none|code|name) */
-    bool layout_badges;         /* the panel shows a badge for every enabled keyboard layout, a click picks one (settings: layout-badges; default false = one badge, a click cycles) */
+    int layout_style;           /* how the panel shows the keyboard layout (settings: layout-style): 0 letters, 1 a button with flag and text, 2 the flag with the code, 3 the flag */
+    char panel_order[200];      /* the right-hand buttons of the panel from left to right (settings: panel-order, wm_panel.c); empty = the built-in order */
     const char *settings_cmd;   /* command for Super+I (default "mellagui-settings") */
     const char *conf_path;      /* the mellagui.conf that is read (--config, default per user), NULL = none (settings: config-file) */
     const char *settings_path;  /* file the settings panel saves to (--settings); NULL = nothing is saved */

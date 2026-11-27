@@ -2792,6 +2792,183 @@ class TestKeyboard(Base):
         self.assertNotEqual(layout_before, layout_after, 'layout indicator did not change')
 
 
+class TestPanelOrder(Base):
+    """The panel's right-hand buttons: carried to another place after a long press, and the styles of the keyboard layout's button."""
+
+    def start(self, tag, *args):
+        p, c, stop = self.private_compositor('mellagui-po-' + tag, '--config', 'none', *args)
+        c.sync()
+        return c
+
+    @staticmethod
+    def panel(c):
+        lines = c.cmd('panel')
+        head = dict(kv.split('=', 1) for kv in lines[0].split()[1:])
+        buttons = {}
+        for ln in lines[1:]:
+            m = re.match(r'button (\S+) x=(-?\d+) w=(\d+)$', ln)
+            if m:
+                buttons[m[1]] = (int(m[2]), int(m[3]))
+        return head, [k for k, v in sorted(buttons.items(), key=lambda kv: kv[1])], buttons
+
+    def middle(self, c, key):
+        x, w = self.panel(c)[2][key]
+        return x + w // 2
+
+    def hold(self, c, key):
+        c.abs(self.middle(c, key), 14)
+        c.button(272, True)
+        time.sleep(1.3)
+
+    DEFAULT = ['quick', 'layout', 'sticky', 'osk', 'magnifier', 'clock', 'power']
+
+    def test_a_long_press_carries_a_button_to_another_place(self):
+        path = os.path.join(tmp, 'po-settings.conf')
+        if os.path.exists(path):
+            os.unlink(path)
+        c = self.start('a', '--settings', path)
+        self.assertEqual(self.panel(c)[1], self.DEFAULT)
+        before = self.panel(c)[2]
+        self.hold(c, 'magnifier')
+        self.assertEqual(self.panel(c)[0]['dragging'], 'magnifier')
+        c.abs(self.middle(c, 'sticky') - 4, 14)                             # past the middle of the sticky keys' button
+        c.sync()
+        self.assertEqual(self.panel(c)[1], ['quick', 'layout', 'magnifier', 'sticky', 'osk', 'clock', 'power'])      # the others made room
+        c.abs(self.panel(c)[2]['quick'][0], 14)                             # ... and on to the far left
+        c.sync()
+        c.button(272, False)
+        c.sync()
+        head, order, buttons = self.panel(c)
+        self.assertEqual((head['dragging'], order), ('-', ['magnifier', 'quick', 'layout', 'sticky', 'osk', 'clock', 'power']))
+        self.assertEqual(head['order'], 'caps,magnifier,quick,layout,sticky,osk,clock,power')
+        c.cmd('setting magnifier')
+        self.assertEqual(c.last.split(' ', 1)[1], '0', 'putting a button down is no click')
+        c.click(self.middle(c, 'magnifier'), 14)                            # a short press at the new place is one
+        c.cmd('setting magnifier')
+        self.assertEqual(c.last.split(' ', 1)[1], '1')
+        c.cmd('settings magnifier 0')
+        time.sleep(0.6)
+        with open(path) as f:
+            self.assertIn('panel-order=caps,magnifier,quick,layout,sticky,osk,clock,power', f.read().split('\n'))
+        c2 = self.start('a2', '--settings', path)
+        self.assertEqual(self.panel(c2)[1][:2], ['magnifier', 'quick'])
+        c2.cmd('settings panel-order caps')
+        self.assertEqual(self.panel(c2)[1], self.DEFAULT)
+        self.assertEqual(sum(w for x, w in before.values()), sum(w for x, w in self.panel(c2)[2].values()))
+
+    def test_a_slow_click_is_still_a_click(self):
+        c = self.start('slow')
+        c.abs(self.middle(c, 'magnifier'), 14)
+        c.button(272, True)
+        time.sleep(0.6)                                                     # an unhurried click: nothing comes loose
+        self.assertEqual(self.panel(c)[0]['dragging'], '-')
+        c.button(272, False)
+        c.cmd('setting magnifier')
+        self.assertEqual(c.last.split(' ', 1)[1], '1')
+        self.hold(c, 'magnifier')                                           # held until it is loose, but let go where it was: a click too
+        c.abs(self.middle(c, 'magnifier') + 3, 15)
+        self.assertEqual(self.panel(c)[0]['dragging'], 'magnifier')
+        c.button(272, False)
+        c.sync()
+        c.cmd('setting magnifier')
+        self.assertEqual(c.last.split(' ', 1)[1], '0')
+        self.assertEqual((self.panel(c)[1], self.panel(c)[0]['order'], self.panel(c)[0]['dragging']), (self.DEFAULT, '-', '-'))
+
+    def test_the_clock_and_the_power_button_move_too_and_esc_puts_a_button_back(self):
+        c = self.start('b')
+        self.hold(c, 'clock')
+        c.abs(self.panel(c)[2]['quick'][0], 14)
+        c.sync()
+        self.assertEqual(self.panel(c)[1][0], 'clock')
+        c.tap(KEY_ESC)
+        c.sync()
+        c.button(272, False)
+        c.sync()
+        self.assertEqual((self.panel(c)[1], self.panel(c)[0]['order']), (self.DEFAULT, '-'))
+        self.hold(c, 'power')
+        c.abs(self.panel(c)[2]['quick'][0], 14)
+        c.sync()
+        c.button(272, False)
+        c.sync()
+        self.assertEqual(self.panel(c)[1][0], 'power')
+
+    def test_a_press_that_moves_at_once_carries_nothing(self):
+        c = self.start('c')
+        c.abs(self.middle(c, 'osk'), 14)
+        c.button(272, True)
+        c.abs(self.middle(c, 'osk') - 60, 14)
+        time.sleep(1.3)
+        self.assertEqual(self.panel(c)[0]['dragging'], '-')
+        c.button(272, False)
+        c.sync()
+        self.assertEqual(self.panel(c)[1], self.DEFAULT)
+
+    def test_a_programs_button_is_carried_in_among_the_others_and_stays_there(self):
+        holder = TestStatus()                                               # (its fake battery and nmcli; the bar's two buttons)
+        d, env = holder.setup_files('po-tray')
+        p, c, stop = self.private_compositor('mellagui-po-tray', '--config', 'none', '--size', '1280x600', env=env)
+        end = time.time() + 6
+        while time.time() < end and not {'battery', 'network'} <= set(self.panel(c)[2]):
+            time.sleep(0.1)
+        order = self.panel(c)[1]
+        self.assertEqual(order[-7:], self.DEFAULT)
+        self.assertEqual(sorted(order[:-7]), ['battery', 'network'])
+        self.hold(c, 'network')
+        c.abs(self.middle(c, 'magnifier') + 4, 14)                          # past the magnifier's middle
+        c.sync()
+        c.button(272, False)
+        c.sync()
+        head, order, buttons = self.panel(c)
+        self.assertEqual(order[-3:], ['network', 'clock', 'power'])
+        self.assertIn('network,clock', head['order'])
+        self.assertEqual(c.cmd('dockmenu')[0].split()[1], 'open=0', 'putting it down did not click it')
+        c.click(self.middle(c, 'network'), 14)                              # and a click on it in its new place opens its menu
+        end = time.time() + 5
+        while time.time() < end and 'open=1' not in c.cmd('dockmenu')[0]:
+            time.sleep(0.1)
+        self.assertIn('open=1', c.cmd('dockmenu')[0])
+
+    def test_the_layout_button_has_styles(self):
+        c = self.start('d', '--layouts', 'ee,us')
+
+        def look(name):
+            time.sleep(0.2)
+            c.abs(500, 300)
+            c.sync()
+            x, w = self.panel(c)[2]['layout']
+            shot = c.dump(os.path.join(tmp, 'po-%s.ppm' % name))
+            return w, shot.px(x + w // 2, 8), shot.px(x + 4, 16), (x, w)
+        self.assertEqual(look('letters')[0], 36)
+        c.cmd('settings layout-style flag')
+        w, top, side, _ = look('flag')
+        self.assertEqual(w, 44)
+        self.assertGreater(top[2], top[0] + 60, 'the blue stripe of the Estonian flag')
+        self.assertLess(max(side), 90, 'its black stripe')
+        c.cmd('settings layout-style flag-code')
+        w, top, side, (x, w2) = look('flagcode')
+        self.assertEqual(w, 44)
+        shot = c.dump(os.path.join(tmp, 'po-flagcode.ppm'))
+        self.assertTrue(any(min(shot.px(x + i, y)) > 230 for i in range(12, 32) for y in range(9, 22)), 'white letters on the black stripe')
+        c.cmd('settings layout-style button')
+        c.cmd('settings layout-label none')
+        w0, _, side, _ = look('button')
+        self.assertGreater(min(side), 150, 'a white button')
+        c.cmd('settings layout-label code')
+        w1 = look('buttoncode')[0]
+        self.assertGreater(w1, w0)
+        self.assertEqual(w1, 10 + 22 + 6 + 16 + 14)
+        c.click(self.middle(c, 'layout'), 14)
+        c.cmd('kbd')
+        self.assertIn('layout=us', c.last)
+        c.cmd('setting layout-badges')
+        self.assertEqual(c.last.split(' ', 1)[1], '1')
+        c.cmd('settings layout-badges 0')
+        c.cmd('setting layout-style')
+        self.assertEqual(c.last.split(' ', 1)[1], 'letters')
+        with self.assertRaises(RuntimeError):
+            c.cmd('settings layout-style round')
+
+
 def wait_for_window(app_id, timeout=5.0):
     end = time.time() + timeout
     while time.time() < end:
@@ -8516,7 +8693,7 @@ esac
             return sum(ppm.px(x0 + 20 + i, y0 + 80) [1] for i in range(40))           # the sidebar's tab column, dimmed while the card is up
         before = lum('help0.ppm')
         ctl.abs(x0 + 300, y0 + 400)
-        ctl.click(x0 + 588, y0 + 232)                                                 # the "?" of the sticky keys box
+        ctl.click(x0 + 588, y0 + 288)                                                 # the "?" of the repeat delay slider
         time.sleep(0.3)
         self.assertLess(lum('help1.ppm'), before * 0.7, 'the card did not open (the page is not dimmed)')
         self.assertEqual(settings()['sticky'], '0', 'the click went through to the checkbox')
@@ -8524,7 +8701,7 @@ esac
         time.sleep(0.3)
         self.assertGreater(lum('help2.ppm'), before * 0.9)
         self.assertEqual(p.poll(), None)
-        ctl.click(x0 + 588, y0 + 232)                                                 # open again and click outside the card: closes it too
+        ctl.click(x0 + 588, y0 + 288)                                                 # open again and click outside the card: closes it too
         time.sleep(0.3)
         self.assertLess(lum('help3.ppm'), before * 0.7)
         ctl.click(x0 + 5, y0 + 5)
@@ -8818,7 +8995,7 @@ esac
                 time.sleep(0.03)
             self.fail('no help card in the dump')
         ctl.abs(x0 + 300, y0 + 400)
-        ctl.click(x0 + 588, y0 + 232)                                                 # the "?" of the sticky keys box
+        ctl.click(x0 + 588, y0 + 288)                                                 # the "?" of the repeat delay slider
         cx, cy, cw, ch = card()
         home = card_window(ctl, 'mellagui.settings')
         self.assertEqual(carry_card(ctl, 'mellagui.settings', x0 + cx + 300, y0 + cy + 14, -16, -12), (-16, -12))          # by its title
@@ -8827,7 +9004,7 @@ esac
         time.sleep(0.3)
         self.assertIsNone(p.poll())
         os.unlink(dump)
-        ctl.click(x0 + 588, y0 + 232)                                                 # and opens in the middle again
+        ctl.click(x0 + 588, y0 + 288)                                                 # and opens in the middle again
         again = card_window(ctl, 'mellagui.settings')
         self.assertEqual((again['x'], again['y']), (home['x'], home['y']))
         ctl.tap(KEY_ESC)

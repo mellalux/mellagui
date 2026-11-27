@@ -64,6 +64,7 @@ struct alarm {
 struct app {
     struct wlwin win;
     uint32_t settings, tray, tray_item;
+    uint32_t tray_ver;
     struct alarm alarms[MAX_ALARMS];
     int nalarms, asel;                  /* the alarms; the one the window edits */
     int ring;                           /* the alarm that rings now, -1 = none */
@@ -609,6 +610,8 @@ static void tray_update(struct app *a, int64_t now)
     if (!a->tray_item) {
         a->tray_item = wlc_alloc(a->win.c, &lm_mellagui_tray_item_v1_interface, tray_item_event, a);
         WLC_SEND(a->win.c, a->tray, LM_MELLAGUI_TRAY_V1_REQ_CREATE_ITEM, { .n = a->tray_item });
+        if (a->tray_ver >= 3)                   /* (its place in the user's order of the panel) */
+            WLC_SEND(a->win.c, a->tray_item, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_NAME, { .s = "timer" });
         a->tray_text[0] = 0;
     }
     char t[24], text[32];
@@ -1158,12 +1161,11 @@ static void open_menu(struct app *a, int kind, const char *entries)
 
 static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint32_t ver)
 {
-    (void)ver;
     struct app *a = w->data;
     if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, NULL, a);
     else if (!strcmp(iface, "mellagui_tray_v1"))
-        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, 1, NULL, a);
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 3u), NULL, a);
 }
 
 /* ---- self test ------------------------------------------------------------------------------------------------------------- */

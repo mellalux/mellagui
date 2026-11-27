@@ -272,6 +272,16 @@ static void ctl_command(struct ctl_client *c, char *line)
         }
         free(text);
         ctl_reply(c, "ok\n");
+    } else if (!strcmp(cmd, "panel")) {                              /* the panel's right-hand buttons, left to right */
+        if (!srv->wm) { ctl_reply(c, "err no wm\n"); return; }
+        char text[1600], *p = text, *nl;
+        lm_wm_panel_describe(srv->wm, text, sizeof(text));
+        while ((nl = strchr(p, '\n'))) {
+            *nl = 0;
+            ctl_reply(c, "%s\n", p);
+            p = nl + 1;
+        }
+        ctl_reply(c, "ok\n");
     } else if (!strcmp(cmd, "kbd")) {
         if (!srv->input) { ctl_reply(c, "err no input\n"); return; }
         ctl_reply(c, "ok layout=%s slot=%d sticky=%d latched=%u slocked=%u locks=%u sound=%s sounds=%u\n",

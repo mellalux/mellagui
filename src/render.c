@@ -671,6 +671,7 @@ static void draw_line(const struct paint_ctx *c, int x0, int y0, int x1, int y1,
 
 static uint32_t mix_rgb(uint32_t a, uint32_t b, int t);
 static void paint_drop(const struct paint_ctx *c, const struct lm_rect *r, int radius, uint32_t rgb);
+static void stroke_round(const struct paint_ctx *c, const struct lm_rect *rect, int radius, uint32_t argb);
 static int btn_radius(int r);
 static void paint_round_button(const struct paint_ctx *c, float cx, float cy, float R, uint32_t rgb, uint32_t alpha);
 
@@ -2082,6 +2083,209 @@ static bool paint_flag(const struct paint_ctx *c, const struct lm_rect *box, con
     return true;
 }
 
+/* The flag of layout `id` filling a whole button: its stripes cut to the button's shape, with the dark rim, the light from below and the glint of the
+ * other buttons (a drop of water in the flag's colours). Pixel by pixel at the screen's own size. */
+static void paint_flag_drop(const struct paint_ctx *c, const struct lm_rect *r, int radius, const struct lm_flag_rect *fr, int n, bool hover)
+{
+    struct lm_rect area;
+    if (!lm_rect_intersect(r, &c->clip, &area))
+        return;
+    struct paint_ctx pc;
+    pview(c, &pc);
+    struct lm_rect pr = prect(c, r), pl = prect(c, &area);
+    float s = (float)c->s, rr = (float)plen(c, LM_MIN(radius, LM_MIN(r->w, r->h) / 2)), w = (float)pr.w, h = (float)pr.h;
+    for (int y = LM_MAX(pr.y, pl.y); y < LM_MIN(pr.y + pr.h, pl.y + pl.h); y++) {
+        uint32_t *dst = fb_row(&pc, y);
+        float py = (float)(y - pr.y) + 0.5f, t = py / h;
+        for (int x = LM_MAX(pr.x, pl.x); x < LM_MIN(pr.x + pr.w, pl.x + pl.w); x++) {
+            float px = (float)(x - pr.x) + 0.5f;
+            float qx = fmaxf(fmaxf(rr - px, px - (w - rr)), 0.0f), qy = fmaxf(fmaxf(rr - py, py - (h - rr)), 0.0f);
+            float inside = qx > 0.0f && qy > 0.0f ? rr - hypotf(qx, qy) : fminf(fminf(px, w - px), fminf(py, h - py));       /* distance to the edge */
+            float cov = LM_CLAMP(inside + 0.5f, 0.0f, 1.0f);
+            if (cov <= 0.0f)
+                continue;
+            int sum[3] = { 0, 0, 0 };
+            for (int k = 0; k < 4; k++) {                       /* four samples: the thin stripes stay even */
+                float fx = (px + (k & 1 ? 0.25f : -0.25f)) / w * LM_FLAG_W, fy = (py + (k & 2 ? 0.25f : -0.25f)) / h * LM_FLAG_H;
+                uint32_t col = 0;
+                for (int i = 0; i < n; i++)
+                    if (fx >= (float)fr[i].x && fx < (float)(fr[i].x + fr[i].w) && fy >= (float)fr[i].y && fy < (float)(fr[i].y + fr[i].h))
+                        col = fr[i].rgb;
+                sum[0] += (col >> 16) & 255;
+                sum[1] += (col >> 8) & 255;
+                sum[2] += col & 255;
+            }
+            uint32_t col = (uint32_t)((sum[0] / 4) << 16 | (sum[1] / 4) << 8 | sum[2] / 4);
+            if (inside < 1.2f * s)
+                col = mix_rgb(col, 0x000000u, 90);
+            else if (t > 0.5f)
+                col = mix_rgb(col, 0xffffffu, (int)((t - 0.5f) * 90.0f));
+            else
+                col = mix_rgb(col, 0x000000u, (int)((0.5f - t) * 40.0f));
+            if (py >= 2.0f * s && py < 5.0f * s && px >= 7.0f * s && px < 19.0f * s)
+                col = mix_rgb(col, 0xffffffu, 200);
+            if (hover)
+                col = mix_rgb(col, 0xffffffu, 45);
+            dst[x] = lm_font_mix(dst[x], col, (unsigned)(cov * 255.0f + 0.5f));
+        }
+    }
+}
+
+/* The keyboard layout's button, in the style of the setting layout-style (a layout without a flag always shows its letters). */
+static void paint_layout_button(const struct paint_ctx *c, const struct lm_panel_info *p)
+{
+    const struct lm_rect *r = &p->layout;
+    const char *text = p->nbadges > 0 ? p->badge[0].text : p->layout_text;
+    int rad = btn_radius(LM_MIN(r->w, r->h) / 2);
+    struct lm_flag_rect fr[LM_FLAG_MAX];
+    int n = p->layout_style ? lm_flag_rects(text, fr) : 0;
+    if (n && p->layout_style == 1) {                        /* a white button: the flag, and the text beside it */
+        const char *label = p->badge[0].label;
+        paint_drop(c, r, rad, p->hover_layout ? mix_rgb(lm_theme.on_colour, 0x000000u, 22) : lm_theme.on_colour);
+        struct lm_rect fb = lm_rect_make(label[0] ? r->x + PANEL_FLAG_LEFT : r->x + (r->w - LM_FLAG_W) / 2, r->y, LM_FLAG_W, r->h);
+        paint_flag(c, &fb, text, 0, false);
+        if (label[0])
+            draw_text(c, r, fb.x + LM_FLAG_W + PANEL_FLAG_GAP, r->y + (r->h - LM_FONT_H) / 2, label, lm_theme.ink);
+        return;
+    }
+    if (n) {                                                /* the flag is the button, perhaps with the code on it */
+        paint_flag_drop(c, r, rad, fr, n, p->hover_layout);
+        if (p->layout_style == 2) {
+            for (int dy = -1; dy <= 1; dy++)                /* a dark outline: the white letters stand on every stripe */
+                for (int dx = -1; dx <= 1; dx++) {
+                    struct lm_rect o = lm_rect_make(r->x + dx, r->y + dy, r->w, r->h);
+                    draw_text_centered(c, &o, text, 0x101010u);             /* (literals like the flag's own colours: right on every theme) */
+                }
+            draw_text_centered(c, r, text, 0xffffffu);
+        }
+        return;
+    }
+    unsigned h = 0;                                         /* the letters, every layout in its own colour */
+    for (const char *q = text; *q; q++)
+        h = h * 31 + (unsigned char)*q;
+    uint32_t col = panel_palette[(h + 3) % 8];
+    paint_drop(c, r, rad, p->hover_layout ? mix_rgb(col, 0xffffffu, 55) : col);
+    draw_text_centered(c, r, text, lm_theme.ink);
+}
+
+/* One of the panel's right-hand buttons (`k`: which of tray[] for a program's). */
+static void paint_panel_item(const struct paint_ctx *c, const struct lm_panel_info *p, int item, int k)
+{
+    switch (item) {
+    case LM_PANEL_ITEM_TRAY: {                              /* a program's: a button with the icon and / or a label */
+        int i = k;
+        const struct lm_rect *r = &p->tray[i].rect;
+        const struct lm_texture *ic = p->tray[i].icon;
+        uint32_t own = p->tray[i].color, tbg = p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN;
+        if (own >> 24)                                      /* the program's own colour (something it stands for is on) */
+            tbg = p->tray[i].hover ? mix_rgb(own & 0xffffffu, 0xffffffu, 55) : own & 0xffffffu;
+        paint_drop(c, r, btn_radius(LM_MIN(r->w, r->h) / 2), tbg);
+        int x = r->x + 6, tw = p->tray[i].text[0] ? lm_font_text_width(p->tray[i].text) : 0;
+        if (ic && !tw)
+            x = r->x + (r->w - ic->width) / 2;
+        if (ic) {
+            struct lm_rect box = lm_rect_make(x, r->y + (r->h - ic->height) / 2, ic->width, ic->height);
+            blit_tex(c, ic->pixels, ic->width, ic->width, ic->height, &box, 255, false);
+            x += ic->width + 4;
+        }
+        if (tw)
+            draw_text(c, r, x, r->y + (r->h - LM_FONT_H) / 2, p->tray[i].text, own >> 24 ? lm_theme.on_colour : COL_PANEL_TEXT);
+        break;
+    }
+    case LM_PANEL_ITEM_CAPS:
+        if (p->caps.w > 0) {
+            paint_drop(c, &p->caps, btn_radius(LM_MIN(p->caps.w, p->caps.h) / 2), COL_PANEL_DANGER);
+            draw_text_centered(c, &p->caps, p->caps_text, COL_PANEL_TEXT);
+        }
+        break;
+    case LM_PANEL_ITEM_LAYOUT:
+        paint_layout_button(c, p);
+        break;
+    case LM_PANEL_ITEM_STICKY: {
+    uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_sticky ? 30 : 18);
+    if (p->sticky_on && p->hover_sticky)
+        sbg = lm_theme.sticky_hot;
+    paint_drop(c, &p->sticky, btn_radius(LM_MIN(p->sticky.w, p->sticky.h) / 2), sbg);
+    {                                                   /* one key of a keyboard: its sides and, a little higher, the face with the Shift arrow */
+        int cx = p->sticky.x + p->sticky.w / 2, cy = p->sticky.y + p->sticky.h / 2;
+        struct lm_rect body = lm_rect_make(cx - 10, cy - 10, 20, 20);
+        fill_round(c, &body, 5, 0xff000000u | (p->sticky_on ? lm_theme.ink : mix_rgb(lm_theme.on_colour, sbg, 120)));
+        struct lm_rect face = lm_rect_make(cx - 7, cy - 8, 14, 13);
+        fill_round(c, &face, 3, 0xff000000u | lm_theme.on_colour);
+        paint_shape(c, (float)cx, (float)cy - 1.5f, 5.0f, SHAPE_UP, lm_theme.ink, 255);
+    }
+        break;
+    }
+    case LM_PANEL_ITEM_MAGNIFIER:
+    {                                                   /* the screen magnifier: a magnifying glass, the button white while the screen is magnified */
+        uint32_t mbg = p->magnifier_on ? lm_theme.on_colour : p->hover_magnifier ? mix_rgb(panel_palette[3], 0xffffffu, 55) : panel_palette[3];
+        uint32_t mfg = p->magnifier_on ? panel_palette[3] : lm_theme.on_colour;
+        paint_drop(c, &p->magnifier, btn_radius(LM_MIN(p->magnifier.w, p->magnifier.h) / 2), mbg);
+        float cx = (float)p->magnifier.x + (float)p->magnifier.w / 2.0f - 2.0f, cy = (float)p->magnifier.y + (float)p->magnifier.h / 2.0f - 2.0f;
+        for (int i = 0; i <= 8; i++)                    /* the handle: discs close together make a line with round ends */
+            paint_shape(c, cx + 4.0f + (float)i * 0.65f, cy + 4.0f + (float)i * 0.65f, 1.7f, SHAPE_DISC, mfg, 255);
+        paint_shape(c, cx, cy, 7.0f, SHAPE_DISC, mfg, 255);
+        paint_shape(c, cx, cy, 4.8f, SHAPE_DISC, mbg, 255);
+    }
+        break;
+    case LM_PANEL_ITEM_OSK:
+    {                                                   /* the on-screen keyboard: a teal button with a little keyboard, white while it is showing */
+        uint32_t obg = p->osk_open ? lm_theme.on_colour : p->hover_osk ? mix_rgb(panel_palette[4], 0xffffffu, 55) : panel_palette[4];
+        uint32_t ofg = p->osk_open ? panel_palette[4] : lm_theme.on_colour;
+        paint_drop(c, &p->osk, btn_radius(LM_MIN(p->osk.w, p->osk.h) / 2), obg);
+        int cx = p->osk.x + p->osk.w / 2, cy = p->osk.y + p->osk.h / 2, bx = cx - 11, by = cy - 6;
+        struct lm_rect body = lm_rect_make(bx, by, 22, 12);
+        fill_round(c, &body, 3, 0xff000000u | ofg);
+        for (int i = 0; i < 5; i++) {                   /* the keys are holes in the body: two rows and a space bar */
+            struct lm_rect k = lm_rect_make(bx + 3 + i * 4, by + 2, 2, 2);
+            fill_rect(c, &k, obg);
+        }
+        for (int i = 0; i < 4; i++) {
+            struct lm_rect k = lm_rect_make(bx + 5 + i * 4, by + 5, 2, 2);
+            fill_rect(c, &k, obg);
+        }
+        struct lm_rect bar = lm_rect_make(bx + 6, by + 8, 10, 2);
+        fill_rect(c, &bar, obg);
+    }
+        break;
+    case LM_PANEL_ITEM_QUICK:
+    {                                                   /* quick settings: three sliders (lines with knobs); the button is lit while the card shows */
+        uint32_t qbg = p->quick_open ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_quick ? 30 : 18);
+        uint32_t qfg = p->quick_open ? COL_PANEL : COL_PANEL_TEXT;
+        paint_drop(c, &p->quick, btn_radius(LM_MIN(p->quick.w, p->quick.h) / 2), qbg);
+        int cx = p->quick.x + p->quick.w / 2, cy = p->quick.y + p->quick.h / 2;
+        static const int knob[3] = { -4, 3, -1 };
+        for (int i = 0; i < 3; i++) {
+            struct lm_rect line = lm_rect_make(cx - 8, cy - 7 + i * 6, 16, 2);
+            fill_rect(c, &line, qfg);
+            struct lm_rect k = lm_rect_make(cx + knob[i] - 2, cy - 9 + i * 6, 5, 6);
+            fill_round(c, &k, 2, 0xff000000u | qbg);                               /* a gap round the knob ... */
+            struct lm_rect k2 = lm_rect_make(cx + knob[i] - 1, cy - 8 + i * 6, 3, 4);
+            fill_round(c, &k2, 1, 0xff000000u | qfg);                              /* ... and the knob itself */
+        }
+    }
+        break;
+    case LM_PANEL_ITEM_CLOCK:
+    {                                                   /* the date and the time: dark on a white button, a little bigger than the other texts */
+        paint_drop(c, &p->clock, btn_radius(LM_MIN(p->clock.w, p->clock.h) / 2), lm_theme.on_colour);
+        double k = lm_panel_clock_scale(p->clock.h);
+        int tw = lm_panel_clock_text_width(p->clock_text, p->clock.h);
+        draw_text_sized(c, &p->clock, p->clock.x + (p->clock.w - tw) / 2, p->clock.y + (p->clock.h - (int)(LM_FONT_H * k + 0.5)) / 2, p->clock_text, k,
+                        lm_theme.ink);
+    }
+        break;
+    case LM_PANEL_ITEM_POWER:
+    {                                                   /* the round power button: a disc with the power symbol */
+        float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;
+        float R = (float)p->power.w / 2.0f;
+        uint32_t bg = p->power_open ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 45) : p->hover_power ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 25) : COL_PANEL_DANGER;
+        paint_round_button(c, cx, cy, R, bg, 255);                                        /* red: it ends the session */
+        paint_shape(c, cx, cy, R * 0.52f, SHAPE_POWER, lm_theme.on_colour, 255);
+    }
+        break;
+    }
+}
+
 static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p)
 {
     fill_rect(c, &p->bar, COL_PANEL);
@@ -2119,127 +2323,17 @@ static void paint_panel(const struct paint_ctx *c, const struct lm_panel_info *p
     }
     if (!p->ntasks && p->active_title && p->active_title[0])
         draw_text_centered(c, &p->title_area, p->active_title, COL_PANEL_TEXT);
-    for (int i = 0; i < p->ntray; i++) {                 /* programs' icons: a button with the icon and / or a label */
-        const struct lm_rect *r = &p->tray[i].rect;
-        const struct lm_texture *ic = p->tray[i].icon;
-        uint32_t own = p->tray[i].color, tbg = p->tray[i].hover ? COL_PANEL_HOVER : COL_PANEL_BTN;
-        if (own >> 24)                                      /* the program's own colour (something it stands for is on) */
-            tbg = p->tray[i].hover ? mix_rgb(own & 0xffffffu, 0xffffffu, 55) : own & 0xffffffu;
-        paint_drop(c, r, btn_radius(LM_MIN(r->w, r->h) / 2), tbg);
-        int x = r->x + 6, tw = p->tray[i].text[0] ? lm_font_text_width(p->tray[i].text) : 0;
-        if (ic && !tw)
-            x = r->x + (r->w - ic->width) / 2;
-        if (ic) {
-            struct lm_rect box = lm_rect_make(x, r->y + (r->h - ic->height) / 2, ic->width, ic->height);
-            blit_tex(c, ic->pixels, ic->width, ic->width, ic->height, &box, 255, false);
-            x += ic->width + 4;
-        }
-        if (tw)
-            draw_text(c, r, x, r->y + (r->h - LM_FONT_H) / 2, p->tray[i].text, own >> 24 ? lm_theme.on_colour : COL_PANEL_TEXT);
-    }
-    if (p->caps.w > 0) {
-        paint_drop(c, &p->caps, btn_radius(LM_MIN(p->caps.w, p->caps.h) / 2), COL_PANEL_DANGER);
-        draw_text_centered(c, &p->caps, p->caps_text, COL_PANEL_TEXT);
-    }
-    {                                                   /* the keyboard layout: a round badge, every layout in its own colour; with layout-badges one for each layout, the active one bright */
-        int nbadge = p->nbadges > 0 ? p->nbadges : 1;
-        for (int i = 0; i < nbadge; i++) {
-            const struct lm_rect *r = p->nbadges > 0 ? &p->badge[i].rect : &p->layout;
-            const char *text = p->nbadges > 0 ? p->badge[i].text : p->layout_text;
-            bool active = p->nbadges > 0 ? p->badge[i].active : true;
-            bool hover = p->nbadges > 0 ? p->badge[i].hover : p->hover_layout;
-            if (p->nbadges > 0) {                       /* a layout with a flag shows the flag (and its label) instead of the coloured disc */
-                const char *label = p->badge[i].label;
-                struct lm_rect fb = *r;
-                if (label[0]) {
-                    fb.x += 3;
-                    fb.w = LM_FLAG_W + 6;
-                }
-                if (paint_flag(c, &fb, text, active ? 0 : hover ? 90 : 150, active)) {
-                    if (label[0])
-                        draw_text(c, r, fb.x + fb.w + 3, r->y + (r->h - LM_FONT_H) / 2, label, active ? COL_PANEL_TEXT : COL_PANEL_DIM);
-                    continue;
-                }
-            }
-            unsigned h = 0;
-            for (const char *q = text; *q; q++)
-                h = h * 31 + (unsigned char)*q;
-            uint32_t col = panel_palette[(h + 3) % 8];
-            if (hover)
-                col = mix_rgb(col, 0xffffffu, 55);
-            float cx = (float)r->x + (float)r->w / 2.0f, cy = (float)r->y + (float)r->h / 2.0f;
-            paint_round_button(c, cx, cy, (float)LM_MIN(r->w, r->h) / 2.0f, col, active ? 255 : 110);
-            draw_text_centered(c, r, text, active ? lm_theme.ink : COL_PANEL_TEXT);
-        }
-    }
-    uint32_t sbg = p->sticky_on ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_sticky ? 30 : 18);
-    if (p->sticky_on && p->hover_sticky)
-        sbg = lm_theme.sticky_hot;
-    paint_drop(c, &p->sticky, btn_radius(LM_MIN(p->sticky.w, p->sticky.h) / 2), sbg);
-    {                                                   /* one key of a keyboard: its sides and, a little higher, the face with the Shift arrow */
-        int cx = p->sticky.x + p->sticky.w / 2, cy = p->sticky.y + p->sticky.h / 2;
-        struct lm_rect body = lm_rect_make(cx - 10, cy - 10, 20, 20);
-        fill_round(c, &body, 5, 0xff000000u | (p->sticky_on ? lm_theme.ink : mix_rgb(lm_theme.on_colour, sbg, 120)));
-        struct lm_rect face = lm_rect_make(cx - 7, cy - 8, 14, 13);
-        fill_round(c, &face, 3, 0xff000000u | lm_theme.on_colour);
-        paint_shape(c, (float)cx, (float)cy - 1.5f, 5.0f, SHAPE_UP, lm_theme.ink, 255);
-    }
-    {                                                   /* the screen magnifier: a magnifying glass, the button white while the screen is magnified */
-        uint32_t mbg = p->magnifier_on ? lm_theme.on_colour : p->hover_magnifier ? mix_rgb(panel_palette[3], 0xffffffu, 55) : panel_palette[3];
-        uint32_t mfg = p->magnifier_on ? panel_palette[3] : lm_theme.on_colour;
-        paint_drop(c, &p->magnifier, btn_radius(LM_MIN(p->magnifier.w, p->magnifier.h) / 2), mbg);
-        float cx = (float)p->magnifier.x + (float)p->magnifier.w / 2.0f - 2.0f, cy = (float)p->magnifier.y + (float)p->magnifier.h / 2.0f - 2.0f;
-        for (int i = 0; i <= 8; i++)                    /* the handle: discs close together make a line with round ends */
-            paint_shape(c, cx + 4.0f + (float)i * 0.65f, cy + 4.0f + (float)i * 0.65f, 1.7f, SHAPE_DISC, mfg, 255);
-        paint_shape(c, cx, cy, 7.0f, SHAPE_DISC, mfg, 255);
-        paint_shape(c, cx, cy, 4.8f, SHAPE_DISC, mbg, 255);
-    }
-    {                                                   /* the on-screen keyboard: a teal button with a little keyboard, white while it is showing */
-        uint32_t obg = p->osk_open ? lm_theme.on_colour : p->hover_osk ? mix_rgb(panel_palette[4], 0xffffffu, 55) : panel_palette[4];
-        uint32_t ofg = p->osk_open ? panel_palette[4] : lm_theme.on_colour;
-        paint_drop(c, &p->osk, btn_radius(LM_MIN(p->osk.w, p->osk.h) / 2), obg);
-        int cx = p->osk.x + p->osk.w / 2, cy = p->osk.y + p->osk.h / 2, bx = cx - 11, by = cy - 6;
-        struct lm_rect body = lm_rect_make(bx, by, 22, 12);
-        fill_round(c, &body, 3, 0xff000000u | ofg);
-        for (int i = 0; i < 5; i++) {                   /* the keys are holes in the body: two rows and a space bar */
-            struct lm_rect k = lm_rect_make(bx + 3 + i * 4, by + 2, 2, 2);
-            fill_rect(c, &k, obg);
-        }
-        for (int i = 0; i < 4; i++) {
-            struct lm_rect k = lm_rect_make(bx + 5 + i * 4, by + 5, 2, 2);
-            fill_rect(c, &k, obg);
-        }
-        struct lm_rect bar = lm_rect_make(bx + 6, by + 8, 10, 2);
-        fill_rect(c, &bar, obg);
-    }
-    {                                                   /* quick settings: three sliders (lines with knobs); the button is lit while the card shows */
-        uint32_t qbg = p->quick_open ? COL_PANEL_ACCENT : mix_rgb(COL_PANEL_BTN, 0xffffffu, p->hover_quick ? 30 : 18);
-        uint32_t qfg = p->quick_open ? COL_PANEL : COL_PANEL_TEXT;
-        paint_drop(c, &p->quick, btn_radius(LM_MIN(p->quick.w, p->quick.h) / 2), qbg);
-        int cx = p->quick.x + p->quick.w / 2, cy = p->quick.y + p->quick.h / 2;
-        static const int knob[3] = { -4, 3, -1 };
-        for (int i = 0; i < 3; i++) {
-            struct lm_rect line = lm_rect_make(cx - 8, cy - 7 + i * 6, 16, 2);
-            fill_rect(c, &line, qfg);
-            struct lm_rect k = lm_rect_make(cx + knob[i] - 2, cy - 9 + i * 6, 5, 6);
-            fill_round(c, &k, 2, 0xff000000u | qbg);                               /* a gap round the knob ... */
-            struct lm_rect k2 = lm_rect_make(cx + knob[i] - 1, cy - 8 + i * 6, 3, 4);
-            fill_round(c, &k2, 1, 0xff000000u | qfg);                              /* ... and the knob itself */
-        }
-    }
-    {                                                   /* the date and the time: dark on a white button, a little bigger than the other texts */
-        paint_drop(c, &p->clock, btn_radius(LM_MIN(p->clock.w, p->clock.h) / 2), lm_theme.on_colour);
-        double k = lm_panel_clock_scale(p->clock.h);
-        int tw = lm_panel_clock_text_width(p->clock_text, p->clock.h);
-        draw_text_sized(c, &p->clock, p->clock.x + (p->clock.w - tw) / 2, p->clock.y + (p->clock.h - (int)(LM_FONT_H * k + 0.5)) / 2, p->clock_text, k,
-                        lm_theme.ink);
-    }
-    {                                                   /* the round power button: a disc with the power symbol */
-        float cx = (float)p->power.x + (float)p->power.w / 2.0f, cy = (float)p->power.y + (float)p->power.h / 2.0f;
-        float R = (float)p->power.w / 2.0f;
-        uint32_t bg = p->power_open ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 45) : p->hover_power ? mix_rgb(COL_PANEL_DANGER, 0xffffffu, 25) : COL_PANEL_DANGER;
-        paint_round_button(c, cx, cy, R, bg, 255);                                        /* red: it ends the session */
-        paint_shape(c, cx, cy, R * 0.52f, SHAPE_POWER, lm_theme.on_colour, 255);
+    static const int items[] = { LM_PANEL_ITEM_CAPS, LM_PANEL_ITEM_LAYOUT, LM_PANEL_ITEM_STICKY, LM_PANEL_ITEM_MAGNIFIER, LM_PANEL_ITEM_OSK,
+                                 LM_PANEL_ITEM_QUICK, LM_PANEL_ITEM_CLOCK, LM_PANEL_ITEM_POWER };
+    for (int i = 0; i < p->ntray; i++)
+        if (p->lift != LM_PANEL_ITEM_TRAY || p->lift_tray != i)
+            paint_panel_item(c, p, LM_PANEL_ITEM_TRAY, i);
+    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++)
+        if (p->lift != items[i])
+            paint_panel_item(c, p, items[i], 0);
+    if (p->lift) {                                          /* a button in the hand: its place is marked and it goes over everything else */
+        stroke_round(c, &p->lift_gap, btn_radius(LM_MIN(p->lift_gap.w, p->lift_gap.h) / 2), 0xff000000u | COL_PANEL_ACCENT);
+        paint_panel_item(c, p, p->lift, p->lift_tray);
     }
 }
 

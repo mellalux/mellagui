@@ -12,6 +12,7 @@
  *   item.set_text(s)      a label after the icon (at most 31 bytes, control characters become blanks)
  *   item.set_color(argb)  version 2: the button is painted in this colour, its label in the colour for text on colours; alpha 0 = the
  *                         bar's own button (mellagui-status: Wi-Fi and Bluetooth while they are on)
+ *   item.set_name(s)      version 3: what the button is (a-z 0-9 - _, at most 15): the user's order of the panel's buttons remembers it by that
  *   item.destroy          the item goes; so does one whose client disconnects
  *   event clicked(button) the button was pressed and let go on the item (272 left, 273 right, 274 middle)
  *
@@ -40,6 +41,7 @@ struct lm_tray_view {
     const struct lm_texture *icon;      /* premultiplied ARGB; NULL = no icon */
     const char *text;                   /* "" = none */
     uint32_t color;                     /* the button's colour, 0xAARRGGBB; alpha 0 = the bar's own */
+    const char *name;                   /* "" = the program did not say what it is */
 };
 
 struct lm_tray *lm_tray_create(struct lm_server *srv);

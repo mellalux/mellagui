@@ -562,6 +562,8 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
         wm->press_panel_kind = 0;
         if (pw)
             damage_frame(wm, pw);
+        if (panel_release(wm))
+            return true;                                        /* a panel button was carried: no click */
         if (pb && pick->window == pw && bit_for_kind(pick->kind) == pb && pw) {
             switch (pb) {
             case LM_FRAME_HOVER_CLOSE: lm_wm_window_close(pw); break;
@@ -581,7 +583,7 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
                 lm_sound_play(LM_SOUND_DOCK);                       /* (MELLAGUI_SOUND_FORCE: the tests play it on the headless backend, too) */
             dock_activate(wm, pi, button != BTN_MIDDLE);        /* the middle button always starts another instance */
         }
-        if (pk == LM_PICK_PANEL_CLOCK && pick->kind == LM_PICK_PANEL_CLOCK)
+        if (pk == LM_PICK_PANEL_CLOCK && pick->kind == LM_PICK_PANEL_CLOCK && wm->srv->config.cal_enabled)
             lm_wm_calendar_toggle(wm, &pick->rect);
         if (pk == LM_PICK_PANEL_LAYOUT && pick->kind == LM_PICK_PANEL_LAYOUT && wm->srv->input)
             lm_input_cycle_layout(wm->srv->input, pi);
@@ -606,6 +608,10 @@ bool lm_wm_pointer_button(struct lm_wm *wm, const struct lm_pick *pick, uint32_t
     if (!pressed)
         return false;
 
+    if (button == BTN_LEFT && (pick->kind == LM_PICK_PANEL_CLOCK || pick->kind == LM_PICK_PANEL_POWER || pick->kind == LM_PICK_PANEL_LAYOUT ||
+        pick->kind == LM_PICK_PANEL_STICKY || pick->kind == LM_PICK_PANEL_MAGNIFIER || pick->kind == LM_PICK_PANEL_OSK || pick->kind == LM_PICK_PANEL_QUICK ||
+        pick->kind == LM_PICK_PANEL_TRAY))
+        panel_press(wm);                                        /* held long enough it can be carried to another place */
     switch (pick->kind) {
     case LM_PICK_SURFACE:
         if (pick->window && win_is_gadget(pick->window)) {

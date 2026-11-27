@@ -542,15 +542,26 @@ static void build_keyboard(struct app *a, int x, int y, int w)
             y += ROW_H;
         }
     }
-    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "Super+Space or the panel indicator switches layouts.");
+    add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "The panel's button (Super+Space switches too):");
     y += ROW_H;
-    add_check(a, x, y, w, "Show the flag of the layout in use in the panel", "layout-badges", kv_int(a, "layout-badges", 0) != 0);
-    y += ROW_H;
+    const char *style = kv_get(a, "layout-style");
+    if (!*style)
+        style = "letters";
     {
+        static const struct { const char *arg, *text; int w; } looks[] = { { "letters", "Letters", 100 }, { "button", "Button", 96 },
+            { "flag-code", "Flag+code", 122 }, { "flag", "Flag", 76 } };
+        int rx = x;
+        for (int k = 0; k < 4; k++) {
+            add_radio(a, rx, y, looks[k].w, looks[k].text, "layout-style", looks[k].arg, !strcmp(style, looks[k].arg));
+            rx += looks[k].w;
+        }
+    }
+    y += ROW_H;
+    if (!strcmp(style, "button")) {                                  /* only the white button has room for a text beside the flag */
         const char *lab = kv_get(a, "layout-label");
-        add(a, W_LABEL, (struct rect){ x + BOX + 10, y, 100, ROW_H }, "Next to it:");
-        static const struct { const char *arg, *text; int w; } opts[] = { { "none", "Nothing", 100 }, { "code", "Short code", 130 }, { "name", "Language", 120 } };
-        int rx = x + BOX + 10 + 100;
+        add(a, W_LABEL, (struct rect){ x, y, 90, ROW_H }, "Beside it:");
+        static const struct { const char *arg, *text; int w; } opts[] = { { "none", "Nothing", 96 }, { "code", "Code", 76 }, { "name", "Language", 122 } };
+        int rx = x + 100;
         for (int k = 0; k < 3; k++) {
             struct widget *r = add_radio(a, rx, y, opts[k].w, opts[k].text, "layout-label", opts[k].arg, !strcmp(lab[0] ? lab : "none", opts[k].arg));
             (void)r;
@@ -1659,6 +1670,10 @@ static void build_buttons(struct app *a, int x, int y, int w)
         }
     y += ROW_H + 8;
     add(a, W_LABEL, (struct rect){ x, y, w, ROW_H }, "One colour keeps each button's lightness.");
+    y += ROW_H + 8;
+    add(a, W_HEADING, (struct rect){ x, y, w, ROW_H }, "Top panel");
+    y += ROW_H;
+    add_button(a, x, y, 150, "Default order", "panel-reset");
 }
 
 /* ---- the Font part of the Themes page ------------------------------------------------------------------------------------ */
@@ -2793,6 +2808,8 @@ static void activate(struct app *a, int idx)
                 }
             a->focus = -1;
             a->win.redraw = true;
+        } else if (!strcmp(w->key, "panel-reset")) {
+            send_set(a, "panel-order", "");
         } else if (!strcmp(w->key, "launcher-defaults")) {
             send_set(a, "launcher-defaults", "1");
         } else if (!strcmp(w->key, "dock-put")) {

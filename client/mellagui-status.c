@@ -749,7 +749,7 @@ struct tray_item {
 struct app {
     struct wlwin win;
     uint32_t tray, settings, menu_global;
-    uint32_t tray_ver;                  /* 2: a button can have a colour */
+    uint32_t tray_ver;                  /* 2: a button can have a colour, 3: a name */
     struct tray_item item[ITEM_COUNT];
     bool want_battery, want_network, want_bluetooth;
     struct btinfo bt;
@@ -834,6 +834,10 @@ static void item_make(struct app *a, int which)
     it->which = which;
     it->id = wlc_alloc(a->win.c, &lm_mellagui_tray_item_v1_interface, tray_item_event, it);
     WLC_SEND(a->win.c, a->tray, LM_MELLAGUI_TRAY_V1_REQ_CREATE_ITEM, { .n = it->id });
+    if (a->tray_ver >= 3) {
+        static const char *const names[ITEM_COUNT] = { "battery", "network", "bell", "bluetooth" };
+        WLC_SEND(a->win.c, it->id, LM_MELLAGUI_TRAY_ITEM_V1_REQ_SET_NAME, { .s = names[which] });
+    }
     it->icon_key = UINT64_MAX;
 }
 
@@ -1371,7 +1375,7 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 {
     struct app *a = w->data;
     if (!strcmp(iface, "mellagui_tray_v1"))
-        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 2u), settings_event, a);
+        a->tray = wlc_bind(w->c, w->registry, name, &lm_mellagui_tray_v1_interface, a->tray_ver = LM_MIN(ver, 3u), settings_event, a);
     else if (!strcmp(iface, "mellagui_settings_v1"))
         a->settings = wlc_bind(w->c, w->registry, name, &lm_mellagui_settings_v1_interface, 1, settings_event, a);
 }

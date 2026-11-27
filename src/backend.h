@@ -38,6 +38,7 @@
  *   abs <x> <y>        warp the pointer to absolute global pixel position
  *   button <code> <0|1>  e.g. 272 = BTN_LEFT
  *   axis <v|h> <value> <discrete>   scroll (value in px-like units, discrete steps)
+ *   panel              "panel n= dragging= order=" and a "button NAME x= w=" line for each right-hand button of the primary output's panel
  *   kbd                reply "ok layout=<id> slot=<n> sticky=<0|1> latched=<mods> slocked=<mods> sound=<name> sounds=<n>"  (last sticky-key beep, see sound.h)
  *   clip [clear]       (`clear` forgets the history first) one "clip <i> <text>" line per clipboard-history entry (newest first, \\n escaped), then "ok n=<count> gadget=<0|1>"
  *   gadget <0|1>       show / hide the desktop gadget

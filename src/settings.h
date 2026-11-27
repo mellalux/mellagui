@@ -24,6 +24,10 @@
  *   layout-badges   0 | 1                      the panel shows a badge for every enabled keyboard layout and a click picks that one (default 0 = one badge, a click switches to the next; saved)
  *   saver-blank     0 .. 240                   with the screensaver on: the monitors go to sleep (fading out first) that many minutes after the last input, 0 = never (default 15; saved)
  *   lock-wallpaper  0 | 1                      the lock screen shows the wallpaper, blurred and dimmed, behind the clock (default 1; saved; no wallpaper = plain dark)
+ *   layout-style    letters | button | flag-code | flag   the panel's layout button: its letters, a white button with the flag (and the text of
+ *                                              layout-label), the flag as the button with the code on it, the flag as the button (default letters; saved)
+ *   panel-order     name,name,...              the panel's right-hand buttons from left to right (written when one is carried to another place;
+ *                                              empty = the built-in order; saved)
  *   layout-label    none | code | name         with layout-badges: written next to each flag - nothing, the short code (US, EE) or the language (default none; saved)
  *   saver-now       (write only)               1 = start it now (a preview), 0 = end it (saver.h)
  *   resolution      auto | preferred | WxH[@Hz] video mode of the outputs. Applied at once; unless "kept" (resolution-confirm=1)

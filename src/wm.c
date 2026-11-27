@@ -110,7 +110,7 @@ struct lm_rect output_panel_rect(const struct lm_output *o)
 /* 1 when the panel shows the flag of the layout in use (setting layout-badges), else 0 (the round badge with the letters). */
 int layout_badge_count(const struct lm_wm *wm)
 {
-    return wm->srv->config.layout_badges && wm->srv->input && lm_input_layout_count(wm->srv->input) >= 1 ? 1 : 0;
+    return wm->srv->config.layout_style && wm->srv->input && lm_input_layout_count(wm->srv->input) >= 1 ? 1 : 0;
 }
 
 void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_info *p)
@@ -125,42 +125,38 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
         p->workspace[i] = lm_rect_make(x, y, PANEL_WS_W, h);
         x += PANEL_WS_W + 2;
     }
-    p->power = lm_rect_make(p->bar.x + p->bar.w - PANEL_POWER_D - 4, y, PANEL_POWER_D, PANEL_POWER_D);
-    int clock_w = LM_MAX(PANEL_CLOCK_MIN_W, lm_panel_clock_text_width(wm->clock_text, h) + PANEL_CLOCK_PAD);
-    p->clock = lm_rect_make(p->power.x - 4 - clock_w, y, clock_w, h);
-    /* sticky keys, on-screen keyboard and magnifier side by side, left of the clock */
-    p->magnifier = lm_rect_make(p->clock.x - 8 - PANEL_MAG_W, y, PANEL_MAG_W, h);
+    struct panel_widths pw = { .quick = PANEL_QUICK_W, .sticky = PANEL_STICKY_W, .osk = PANEL_OSK_W, .magnifier = PANEL_MAG_W, .power = PANEL_POWER_D,
+                               .layout = PANEL_LAYOUT_W };
+    pw.clock = LM_MAX(PANEL_CLOCK_MIN_W, lm_panel_clock_text_width(wm->clock_text, h) + PANEL_CLOCK_PAD);
     p->hover_magnifier = wm->hover_magnifier;
     p->magnifier_on = wm->srv->config.magnifier;
-    p->osk = lm_rect_make(p->magnifier.x - 4 - PANEL_OSK_W, y, PANEL_OSK_W, h);
     p->hover_osk = wm->hover_osk;
     p->osk_open = wm->osk_open;
-    p->sticky = lm_rect_make(p->osk.x - 4 - PANEL_STICKY_W, y, PANEL_STICKY_W, h);
     int nb = layout_badge_count(wm);
     p->nbadges = nb;
-    if (nb > 0) {                                       /* the flag of the layout in use; with a label it is as wide as flag + text need */
+    p->layout_style = nb ? wm->srv->config.layout_style : 0;
+    if (nb > 0) {                                       /* the flag of the layout in use; a white button is as wide as flag + text need */
         int slot = lm_input_layout(wm->srv->input);
         const char *id = lm_input_layout_id(wm->srv->input, slot);
         for (size_t k = 0; k < sizeof(p->badge[0].text) - 1 && id[k]; k++)
             p->badge[0].text[k] = (char)(id[k] >= 'a' && id[k] <= 'z' ? id[k] - 32 : id[k]);
         p->badge[0].label[0] = 0;
-        if (wm->srv->config.layout_label == 1)
+        if (p->layout_style == 1 && wm->srv->config.layout_label == 1)
             snprintf(p->badge[0].label, sizeof(p->badge[0].label), "%s", p->badge[0].text);
-        else if (wm->srv->config.layout_label == 2) {
+        else if (p->layout_style == 1 && wm->srv->config.layout_label == 2) {
             int li = lm_layout_find(id);
             snprintf(p->badge[0].label, sizeof(p->badge[0].label), "%s", li >= 0 ? lm_layout_name(li) : id);
             char *paren = strstr(p->badge[0].label, " (");          /* "English (US)" -> "English" */
             if (paren)
                 *paren = 0;
         }
-        int bw = p->badge[0].label[0] ? LM_MAX(PANEL_LAYOUT_W, 6 + LM_FLAG_W + 6 + lm_font_text_width(p->badge[0].label)) : PANEL_LAYOUT_W;
-        p->layout = lm_rect_make(p->sticky.x - 4 - bw, y, bw, h);
-        p->badge[0].rect = p->layout;
-        p->badge[0].active = true;
-        p->badge[0].hover = wm->hover_layout;
-    } else
-        p->layout = lm_rect_make(p->sticky.x - 4 - PANEL_LAYOUT_W, y, PANEL_LAYOUT_W, h);
-    p->quick = lm_rect_make(p->layout.x - 4 - PANEL_QUICK_W, y, PANEL_QUICK_W, h);
+        if (p->layout_style >= 2)
+            pw.layout = PANEL_LAYOUT_W + 8;
+        else if (p->badge[0].label[0])
+            pw.layout = LM_MAX(PANEL_LAYOUT_W, PANEL_FLAG_LEFT + LM_FLAG_W + PANEL_FLAG_GAP + lm_font_text_width(p->badge[0].label) + PANEL_FLAG_RIGHT);
+        else
+            pw.layout = PANEL_LAYOUT_W + 4;
+    }
     p->hover_quick = wm->hover_quick;
     {
         struct lm_window *qw = quick_window((struct lm_wm *)wm);
@@ -174,32 +170,13 @@ void panel_info(const struct lm_wm *wm, struct lm_output *o, struct lm_panel_inf
         snprintf(p->caps_text, sizeof(p->caps_text), "CAPS");
     else if (locks & LM_MOD_NUM)
         snprintf(p->caps_text, sizeof(p->caps_text), "NUM");
-    int caps_w = !p->caps_text[0] ? 0 : (locks & LM_MOD_NUM) && (locks & LM_MOD_CAPS) ? PANEL_CAPS_W + 24 : PANEL_CAPS_W;
-    p->caps = lm_rect_make(p->quick.x - (caps_w ? 4 + caps_w : 0), y, caps_w, h);
+    pw.caps = !p->caps_text[0] ? 0 : (locks & LM_MOD_NUM) && (locks & LM_MOD_CAPS) ? PANEL_CAPS_W + 24 : PANEL_CAPS_W;
     int tx = x + 12;
-    int title_end = p->caps.x;
-    if (wm->srv->tray) {                                            /* programs' icons: the first one created is the rightmost */
-        int right = (caps_w ? p->caps.x : p->quick.x) - 4, n = lm_tray_count(wm->srv->tray);
-        for (int i = 0; i < n && p->ntray < LM_PANEL_MAX_TRAY; i++) {
-            struct lm_tray_view v;
-            if (!lm_tray_get(wm->srv->tray, i, &v))
-                break;
-            int iw = v.icon ? v.icon->width : 0, tw = v.text[0] ? lm_font_text_width(v.text) : 0;
-            int bw = 12 + iw + (iw && tw ? 4 : 0) + tw;
-            if (bw < h)
-                bw = h;
-            if (right - bw < tx + 120)                              /* the taskbar keeps some room */
-                break;
-            int k = p->ntray++;
-            p->tray[k].rect = lm_rect_make(right - bw, y, bw, h);
-            p->tray[k].id = v.id;
-            p->tray[k].icon = v.icon;
-            p->tray[k].text = v.text;
-            p->tray[k].color = v.color;
-            p->tray[k].hover = wm->hover_tray == v.id;
-            right -= bw + 4;
-            title_end = p->tray[k].rect.x - 4;
-        }
+    int title_end = panel_arrange(wm, o, p, &pw, tx);          /* the right-hand buttons, in the user's order */
+    if (nb > 0) {
+        p->badge[0].rect = p->layout;
+        p->badge[0].active = true;
+        p->badge[0].hover = wm->hover_layout;
     }
     p->title_area = lm_rect_make(tx, y, title_end - 12 - tx, h);
     p->hover_layout = wm->hover_layout;
@@ -687,6 +664,7 @@ struct lm_wm *lm_wm_create(struct lm_server *srv)
     wm->launcher_shown_page = -1;
     wm->clock_timer = lm_loop_add_timer(srv->loop, clock_tick, wm);
     wm->anim_timer = lm_loop_add_timer(srv->loop, anim_tick, wm);
+    panel_drag_init(wm);
     wm->refit = lm_loop_add_idle(srv->loop, refit_idle, wm);
     if (wm->clock_timer)
         lm_timer_arm_ms(wm->clock_timer, 1000, 1000);
@@ -712,6 +690,8 @@ void lm_wm_destroy(struct lm_wm *wm)
         lm_timer_destroy(wm->launcher_slide_timer);
     if (wm->clock_timer)
         lm_timer_destroy(wm->clock_timer);
+    if (wm->pdrag.timer)
+        lm_timer_destroy(wm->pdrag.timer);
     for (int i = 0; i < ANIM_MAX; i++)
         if (wm->anim[i].used)
             free(wm->anim[i].ghost.px);
@@ -1570,7 +1550,7 @@ void lm_wm_pick(struct lm_wm *wm, double x, double y, struct lm_pick *out)
                 out->kind = LM_PICK_PANEL_LAUNCHER;
                 out->rect = pi.launcher;
             }
-            if (lm_rect_contains(&pi.clock, ix, iy) && wm->srv->config.cal_enabled) {
+            if (lm_rect_contains(&pi.clock, ix, iy)) {
                 out->kind = LM_PICK_PANEL_CLOCK;
                 out->rect = pi.clock;
             }
@@ -1635,6 +1615,8 @@ void lm_wm_pointer_motion(struct lm_wm *wm, const struct lm_pick *pick)
     launcher_drag_motion(wm);
     launcher_swipe_motion(wm);
     overview_drag_motion(wm);
+    if (panel_drag_motion(wm))
+        return;
     struct lm_window *hw = NULL;
     uint32_t bits = 0;
     int pws = -1;
@@ -2085,6 +2067,7 @@ void lm_wm_lock_changed(struct lm_wm *wm, bool locked)
         wm->osk_pin = false;
     }
     wm->lock_kbd_hover = false;
+    panel_drag_cancel(wm);
     if (locked) {
         overview_finish(wm);
         menu_set(wm, false);
@@ -2307,6 +2290,11 @@ bool lm_wm_key(struct lm_wm *wm, uint32_t code, bool pressed, bool repeat, uint3
         }
     }
     mods &= ~(uint32_t)(LM_MOD_CAPS | LM_MOD_NUM);
+    if (wm->pdrag.on && code == KEY_ESC && pressed) {           /* a carried panel button goes back */
+        panel_drag_cancel(wm);
+        wm->capture_release = code;
+        return true;
+    }
     if (wm->capture_release && code == wm->capture_release && !pressed) {
         wm->capture_release = 0;                                /* the release of the key that was just recorded */
         return true;

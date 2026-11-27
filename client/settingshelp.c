@@ -36,13 +36,18 @@ static const struct entry table[] = {
       "at once." },
     { "repeat-rate", NULL, "Repeat rate",
       "How many characters a second a key that is held down repeats once it has started." },
-    { "layout-badges", NULL, "The layout's flag in the panel",
-      "Off: the panel shows a round badge with the letters of the layout in use (US, EE ...).\n"
-      "On: it shows the flag of that country instead (US, Estonia, Germany, Finland), and the text you choose below can stand beside it. A click "
-      "switches to the next layout, a right click goes back one - the same as with the letters." },
-    { "layout-label", NULL, "Text next to the flags",
-      "With flags in the panel, this says what is written beside each one: nothing, the short code of the layout (US, EE, DE, FI) or the name of the "
+    { "layout-style", NULL, "The layout's button in the panel",
+      "How the panel shows the keyboard layout in use.\n"
+      "Letters: the code of the layout (US, EE ...). Button: a white button with the country's flag, and the text you choose below beside it. "
+      "Flag+code: the button is the flag, with the code written on it. Flag: the button is the flag alone.\n"
+      "There are flags for US, Estonia, Germany and Finland. A click switches to the next layout, a right click goes back one." },
+    { "layout-label", NULL, "Text beside the flag",
+      "On the white button, this says what is written beside the flag: nothing, the short code of the layout (US, EE, DE, FI) or the name of the "
       "language (English, Estonian, German, Finnish)." },
+    { "@Top panel", NULL, "Top panel",
+      "The buttons at the right of the top panel can be put in any order: press one and hold it until it comes loose, carry it to its place and let "
+      "go. Esc puts it back while you carry it.\n"
+      "Default order puts all of them back where they were at the start." },
     { "osk-avoid", NULL, "Windows and the on-screen keyboard",
       "While the on-screen keyboard (Super+K, or the Kbd button in the panel) is open, windows are kept out from under it: maximized windows get "
       "shorter and floating windows it would cover are moved up.\n"

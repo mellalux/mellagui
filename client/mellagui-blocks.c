@@ -324,6 +324,8 @@ struct app {
 
 	uint32_t *icon[BL_COUNT];
 	int icon_s;
+	uint32_t *plan_pic[BL_PLAN_COUNT];                      /* the pictures on the cards of the buildings */
+	int plan_pw, plan_ph;
 
 	char msg[160];
 	int64_t msg_ms;
@@ -2583,11 +2585,17 @@ static bool tower_at(const struct app *a, const struct bl_hit *h, int post[3])
 	return false;
 }
 
+/* the height of the picture on a plan's card: less in a low window */
+static int bar_pic_h(const struct app *a)
+{
+	return LM_CLAMP(a->win.bh / 10, 32, 64);
+}
+
 /* the bar of the plans at the bottom of the command view (it takes the hotbar's place) */
 static void bar_rect(const struct app *a, int i, int *x, int *y, int *bw, int *bh)
 {
 	*bw = LM_CLAMP((a->win.bw - 16) / BL_PLAN_COUNT - 4, 40, 150);
-	*bh = 42;
+	*bh = bar_pic_h(a) + 2 * LM_FONT_H + 12;
 	*x = (a->win.bw - (BL_PLAN_COUNT * (*bw + 4) - 4)) / 2 + i * (*bw + 4);
 	*y = a->win.bh - *bh - 12;
 }
@@ -3957,6 +3965,13 @@ static bool panel_on(const struct app *a)
 	return a->panel && wlwin_panes(&a->win);
 }
 
+/* I or the rail's button: the text in its panel, or over the picture */
+static void toggle_panel(struct app *a)
+{
+	a->panel = !a->panel;
+	say(a, !wlwin_panes(&a->win) ? "There are no panels here: the text stays over the picture" : a->panel ? "The text is in its panel (drag it anywhere)" : "The text is over the picture");
+}
+
 /* where the game stands: whether their keep can come back */
 static void goal_theirs(const struct app *a, char *out, size_t n)
 {
@@ -4073,7 +4088,8 @@ static int stock_layout(const struct app *a, int *x, int *y, int *wd, int list[B
 	*wd += 72;
 	*x = a->win.bw - *wd - 8;
 	*y = a->rival == 1 && a->rival_on && bl_mobs_count_raiders(&a->mobs) > 0 ? 100 : 90;       /* (under the line about the raiders) */
-	int fit = (a->win.bh - *y - 84) / (LM_FONT_H + 2);          /* (down to the hotbar or the plans) */
+	int below = a->cmd ? bar_pic_h(a) + 2 * LM_FONT_H + 40 : 84;
+	int fit = (a->win.bh - *y - below) / (LM_FONT_H + 2);       /* (down to the hotbar or the plans) */
 	return n < fit ? n : LM_MAX(fit, 0);
 }
 
@@ -4160,6 +4176,30 @@ static const char *order_text(const struct app *a, const struct bl_mob *m, char 
 }
 
 /* the command view's overlay: what it is, a marker over every worker (the chosen ones green, with what they do), the box being pulled, and the keys */
+static void plan_pics_free(struct app *a)
+{
+	for (int i = 0; i < BL_PLAN_COUNT; i++) {
+		free(a->plan_pic[i]);
+		a->plan_pic[i] = NULL;
+	}
+}
+
+/* the pictures of the buildings, w x h pixels of the buffer each (made again when that size changes) */
+static void plan_pics_for(struct app *a, int w, int h)
+{
+	if (w == a->plan_pw && h == a->plan_ph && a->plan_pic[0])
+		return;
+	plan_pics_free(a);
+	a->plan_pw = w;
+	a->plan_ph = h;
+	for (int i = 0; i < BL_PLAN_COUNT; i++) {
+		struct bl_cell c[BL_SITE_CELLS];
+		a->plan_pic[i] = malloc((size_t)w * (size_t)h * 4);
+		if (a->plan_pic[i])
+			bl_picture(c, bl_plan_shape(i, c), a->plan_pic[i], w, h, (float)h / 4.5f);
+	}
+}
+
 static void paint_cmd(struct app *a, const struct bl_camera *cam)
 {
 	struct wlwin *w = &a->win;
@@ -4259,15 +4299,19 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 			wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius(11), lm_theme.bar);
 			wlwin_round_fill(w, x, y, bw, bh, lm_button_radius(10), lm_theme.background);
 		}
+		const int ph = bar_pic_h(a), sc = wlwin_scale(w), pw = bw - 8;
+		plan_pics_for(a, pw * sc, ph * sc);
+		if (a->plan_pic[i])
+			wlwin_blit_px_over(w, x + 4, y + 4, a->plan_pic[i], pw * sc, ph * sc, pw * sc);
 		snprintf(l, sizeof l, "%d %s", (i + 3) % 10, plan_title(i));
-		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 3, l, 1, lm_theme.text_bright, bw - 6);
+		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + ph + 6, l, 1, lm_theme.text_bright, bw - 6);
 		if (!a->survival)
 			snprintf(l, sizeof l, "free");
 		else
 			plan_cost_text(i, false, l, sizeof l);
 		if (a->survival && lm_font_text_width(l) > bw - 6)
 			plan_cost_text(i, true, l, sizeof l);
-		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 5 + LM_FONT_H, l, 1, plan_affordable(a, i) ? lm_theme.text_dim : lm_theme.caution, bw - 6);
+		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + ph + 8 + LM_FONT_H, l, 1, plan_affordable(a, i) ? lm_theme.text_dim : lm_theme.caution, bw - 6);
 	}
 	if (a->plan >= 0 && a->has_pointer && bar_at(a, a->px, a->py) < 0) {     /* what a click would do, by the pointer */
 		struct bl_site s;
@@ -4316,7 +4360,7 @@ static const char *const HP_WELCOME[] = {
 	"# The window",
 	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In a game the number under a block is how many you have.",
 	"- Ten hearts over the hotbar are your hit points, at the right the weapon in your hand. Your keep's bar is at the top.",
-	"- The panel beside the window holds everything the game says in words. Drag it anywhere while the game is paused or in the command view; I switches between the panel and text over the picture.",
+	"- The panel beside the window holds everything the game says in words. Drag it anywhere while the game is paused or in the command view; I or the panel button at the left switches between the panel and text over the picture.",
 	"# To start",
 	"|Click|Click in the window: the pointer is locked to it and the game goes on. Esc lets the pointer go and pauses.",
 	"|F1|These pages.",
@@ -4461,7 +4505,7 @@ static const char *const HP_KEYS[] = {
 	"# Fighting",
 	"|Q|Next weapon",
 	"|R|Weapons",
-	"|G|How to win",
+	"|G|How to win (in a game)",
 	"# Command view",
 	"|Tab|Command view",
 	"|B, V|Train a worker, a soldier",
@@ -5015,7 +5059,7 @@ static void hero_pose(struct app *a, const struct bl_camera *cam)
 /* ================================================================ the rail ================================================================ */
 
 /* the buttons at the left, as in MellaGUI's other programs; the item's number is its place */
-enum { RB_NEW, RB_OPEN, RB_SAVE, RB_SAVEAS, RB_PLAY, RB_CMD, RB_BLOCKS, RB_SOUND, RB_GOAL, RB_HELP, RB_N };
+enum { RB_NEW, RB_OPEN, RB_SAVE, RB_SAVEAS, RB_PLAY, RB_CMD, RB_BLOCKS, RB_SOUND, RB_PANEL, RB_GOAL, RB_HELP, RB_N };
 
 static void ic_play(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 {
@@ -5066,6 +5110,16 @@ static void ic_flag(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 	wlwin_fill(w, cx + 5, cy - 5, 2, 2, bg);
 }
 
+/* a window with its panel of text at the right */
+static void ic_panel(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+	(void)bg;
+	wlrail_box(w, cx - 8, cy - 7, 17, 15, c);
+	wlwin_fill(w, cx, cy - 7, 2, 15, c);
+	wlwin_fill(w, cx + 3, cy - 3, 4, 2, c);
+	wlwin_fill(w, cx + 3, cy + 1, 4, 2, c);
+}
+
 static void rail_build(const struct app *a, struct wlrail *L)
 {
 	memset(L, 0, sizeof *L);
@@ -5082,6 +5136,8 @@ static void rail_build(const struct app *a, struct wlrail *L)
 		[RB_CMD] = { .tip = "Command view  Tab", .icon = wlrail_ic_eye, .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .lit = a->cmd },
 		[RB_BLOCKS] = { .tip = "Blocks  E", .icon = ic_cube, .base = lm_theme.btn_rust, .lite = lm_theme.btn_rust_lit },
 		[RB_SOUND] = { .tip = a->sound_on ? "Sound is on" : "Sound is off", .icon = a->sound_on ? ic_speaker : ic_mute, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit },
+		[RB_PANEL] = { .tip = !wlwin_panes(&a->win) ? "No info panel here: the text is over the picture" : a->panel ? "Info panel is on  I" : "Info panel is off  I", .icon = ic_panel,
+		               .base = lm_theme.btn_sky, .lite = lm_theme.btn_sky_lit, .lit = panel_on(a) },
 		[RB_GOAL] = { .tip = "How to win  G", .icon = ic_flag, .base = lm_theme.btn_maroon, .lite = lm_theme.btn_maroon_lit },
 		[RB_HELP] = { .tip = "Help  F1", .text = "?", .base = lm_theme.btn_grey, .lite = lm_theme.btn_slate_lit, .bottom = true },
 	};
@@ -5090,6 +5146,8 @@ static void rail_build(const struct app *a, struct wlrail *L)
 		L->it[i].show = true;
 		L->it[i].idle = wait;
 	}
+	L->it[RB_PANEL].idle = wait || !wlwin_panes(&a->win);
+	L->it[RB_GOAL].show = a->survival;                       /* (free building has nothing to win) */
 	L->n = RB_N;
 }
 
@@ -5639,6 +5697,7 @@ static void rail_action(struct app *a, int id)
 		a->sound_on = !a->sound_on;
 		say(a, a->sound_on ? "Sound on" : "Sound off");
 		break;
+	case RB_PANEL: toggle_panel(a); break;
 	case RB_GOAL: pause_game(a, P_GOAL); break;
 	case RB_HELP:
 		pause_game(a, P_HELP);
@@ -6207,8 +6266,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		return;
 	}
 	if (code == K_I && (a->prompt == P_NONE || a->prompt == P_PAUSE)) {           /* the panel of text, or the text over the picture */
-		a->panel = !a->panel;
-		say(a, !wlwin_panes(&a->win) ? "There are no panels here: the text stays over the picture" : a->panel ? "The text is in its panel (drag it anywhere)" : "The text is over the picture");
+		toggle_panel(a);
 		return;
 	}
 	if (a->prompt == P_PAUSE && code == K_F1) {                  /* the pages from the pause card, too */
@@ -6255,7 +6313,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		pause_game(a, P_PALETTE);
 		return;
 	}
-	if (code == K_G && a->playing) {
+	if (code == K_G && a->playing && a->survival) {
 		pause_game(a, P_GOAL);
 		return;
 	}
@@ -7770,6 +7828,7 @@ int main(int argc, char **argv)
 	save_all(&a, false);
 	wlwin_lock_pointer(&a.win, false);
 	icons_free(&a);
+	plan_pics_free(&a);
 	free(a.frame);
 	bl_world_free(a.world);
 	wlwin_destroy(&a.win);

@@ -152,6 +152,15 @@ static int plan_cells(int plan, struct pcell *o)
 	return n;
 }
 
+int bl_plan_shape(int plan, struct bl_cell out[BL_SITE_CELLS])
+{
+	struct pcell p[BL_SITE_CELLS];
+	int n = plan_cells(plan, p);
+	for (int i = 0; i < n; i++)
+		out[i] = (struct bl_cell){ (int16_t)p[i].u, (int16_t)p[i].y, (int16_t)p[i].v, (uint8_t)p[i].block };
+	return n;
+}
+
 void bl_site_box(const struct bl_site *s, int lo[3], int hi[3])
 {
 	for (int k = 0; k < 3; k++) {

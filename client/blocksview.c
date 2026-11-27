@@ -1108,3 +1108,98 @@ void bl_render(const struct bl_world *w, const struct bl_camera *c, const struct
 	free(nx);
 	free(cmax);
 }
+
+/* ---- a picture of a few blocks -------------------------------------------------------------------------------------- */
+
+void bl_picture(const struct bl_cell *cells, int n, uint32_t *out, int w, int h, float most)
+{
+	/* the way the eye looks (30 degrees off the front, 30 down), and the picture's right and up in the world */
+	static const float fwd[3] = { -0.4330127f, -0.5f, 0.75f }, right[3] = { 0.8660254f, 0.0f, 0.5f }, up[3] = { -0.25f, 0.8660254f, 0.4330127f };
+	static const float shade[3] = { 0.62f, 1.0f, 0.84f };           /* the x, top and z faces */
+	enum { MOST_CELLS = BL_SITE_CELLS, SS = 3 };
+	float cx[MOST_CELLS], cy[MOST_CELLS];
+	if (w <= 0 || h <= 0)
+		return;
+	memset(out, 0, (size_t)w * (size_t)h * 4);
+	if (n > MOST_CELLS)
+		n = MOST_CELLS;
+	if (n <= 0)
+		return;
+	if (!g_ready)
+		textures_init();
+	/* half of a block's width and height as the eye sees it */
+	const float hx = 0.5f * (fabsf(right[0]) + fabsf(right[1]) + fabsf(right[2])), hy = 0.5f * (fabsf(up[0]) + fabsf(up[1]) + fabsf(up[2]));
+	float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+	for (int i = 0; i < n; i++) {
+		const float p[3] = { (float)cells[i].x + 0.5f, (float)cells[i].y + 0.5f, (float)cells[i].z + 0.5f };
+		cx[i] = p[0] * right[0] + p[1] * right[1] + p[2] * right[2];
+		cy[i] = p[0] * up[0] + p[1] * up[1] + p[2] * up[2];
+		x0 = fminf(x0, cx[i] - hx);
+		x1 = fmaxf(x1, cx[i] + hx);
+		y0 = fminf(y0, cy[i] - hy);
+		y1 = fmaxf(y1, cy[i] + hy);
+	}
+	const float scale = fminf(fminf((float)w / (x1 - x0), (float)h / (y1 - y0)), most);
+	const float left = 0.5f * (x0 + x1) - 0.5f * (float)w / scale;
+	for (int py = 0; py < h; py++)
+		for (int px = 0; px < w; px++) {
+			float sum[3] = { 0, 0, 0 };
+			int got = 0;
+			for (int k = 0; k < SS * SS; k++) {
+				const float sx = left + ((float)px + ((float)(k % SS) + 0.5f) / SS) / scale;
+				const float sy = y0 + ((float)(h - py) - ((float)(k / SS) + 0.5f) / SS) / scale;
+				float o[3];
+				for (int j = 0; j < 3; j++)
+					o[j] = sx * right[j] + sy * up[j] - 64.0f * fwd[j];
+				float behind = 0.0f;                    /* past the see-through texels met so far */
+				for (;;) {
+					float best = 1e9f;
+					int hit = -1, axis = 0;
+					for (int i = 0; i < n; i++) {
+						if (fabsf(sx - cx[i]) > hx || fabsf(sy - cy[i]) > hy)
+							continue;
+						const float lo[3] = { (float)cells[i].x, (float)cells[i].y, (float)cells[i].z };
+						float in = -1e9f, leave = 1e9f;
+						int ax = 0;
+						for (int j = 0; j < 3; j++) {        /* (no part of fwd is 0) */
+							float a = (lo[j] - o[j]) / fwd[j], b = (lo[j] + 1.0f - o[j]) / fwd[j];
+							if (fminf(a, b) > in) {
+								in = fminf(a, b);
+								ax = j;
+							}
+							leave = fminf(leave, fmaxf(a, b));
+						}
+						if (in < leave && in > behind && in < best) {
+							best = in;
+							hit = i;
+							axis = ax;
+						}
+					}
+					if (hit < 0)
+						break;
+					float f[3];
+					f[0] = o[0] + fwd[0] * best - (float)cells[hit].x;
+					f[1] = o[1] + fwd[1] * best - (float)cells[hit].y;
+					f[2] = o[2] + fwd[2] * best - (float)cells[hit].z;
+					const float u = axis == 0 ? f[2] : f[0], v = axis == 1 ? f[2] : 1.0f - f[1];
+					int tu = (int)(u * (float)TEX), tv = (int)(v * (float)TEX);
+					tu = tu < 0 ? 0 : tu > TEX - 1 ? TEX - 1 : tu;
+					tv = tv < 0 ? 0 : tv > TEX - 1 ? TEX - 1 : tv;
+					const int b = cells[hit].block < BL_COUNT ? cells[hit].block : BL_STONE;
+					const uint32_t t = g_tex[b][axis == 1 ? BL_FACE_TOP : BL_FACE_SIDE][tv * TEX + tu];
+					if (!(t >> 24)) {
+						behind = best;
+						continue;
+					}
+					sum[0] += (float)((t >> 16) & 255) * shade[axis];
+					sum[1] += (float)((t >> 8) & 255) * shade[axis];
+					sum[2] += (float)(t & 255) * shade[axis];
+					got++;
+					break;
+				}
+			}
+			if (got)
+				out[py * w + px] = (uint32_t)(got * 255 / (SS * SS)) << 24 | (uint32_t)(sum[0] / (float)got) << 16 | (uint32_t)(sum[1] / (float)got) << 8 |
+				                   (uint32_t)(sum[2] / (float)got);
+		}
+}

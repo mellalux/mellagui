@@ -35,6 +35,8 @@ struct bl_site {
 const char *bl_plan_name(int plan);                          /* "barracks"; "?" for none */
 void bl_plan_cost(int plan, int *cobble, int *planks);       /* what it takes (survival) */
 int bl_plan_gold(int plan);                                  /* ... and the gold */
+/* the cells of a plan by themselves, for a picture of it: round (0, 0, 0), not turned (the front looks towards -z), lowest first; how many */
+int bl_plan_shape(int plan, struct bl_cell out[BL_SITE_CELLS]);
 /* the cells of a keep of `block` (BL_KEEP or BL_REDKEEP) round (x, y, z), lowest first; how many (at most BL_KEEP_CELLS) */
 int bl_keep_cells(struct bl_cell out[BL_KEEP_CELLS], int x, int y, int z, int block);
 

@@ -2907,6 +2907,27 @@ static void test_plans(void)
 	bl_world_free(w);
 }
 
+static void test_plan_pictures(void)
+{
+	enum { W = 96, H = 64 };
+	static uint32_t pic[BL_PLAN_COUNT][W * H];
+	int solid[BL_PLAN_COUNT];
+	for (int p = 0; p < BL_PLAN_COUNT; p++) {
+		struct bl_cell c[BL_SITE_CELLS];
+		int n = bl_plan_shape(p, c);
+		CHECK(n > 0, "%s has a shape", bl_plan_name(p));
+		bl_picture(c, n, pic[p], W, H, H / 4.5f);
+		solid[p] = 0;
+		for (int i = 0; i < W * H; i++)
+			solid[p] += pic[p][i] >> 24 == 255;
+		CHECK(solid[p] > 150 && solid[p] < W * H * 3 / 4, "%s: a picture of a sensible size (%d)", bl_plan_name(p), solid[p]);
+		CHECK(!(pic[p][0] >> 24) && !(pic[p][W - 1] >> 24) && !(pic[p][W * H - 1] >> 24), "%s: see-through round it", bl_plan_name(p));
+		for (int q = 0; q < p; q++)
+			CHECK(memcmp(pic[p], pic[q], sizeof pic[p]) != 0, "%s does not look like %s", bl_plan_name(p), bl_plan_name(q));
+	}
+	CHECK(solid[BL_PLAN_WALL] < solid[BL_PLAN_BARRACKS], "a wall is smaller than a house");
+}
+
 static void test_builders(void)
 {
 	const float pl[3] = { 40.5f, 20.0f, 20.5f };
@@ -4868,6 +4889,7 @@ int main(int argc, char **argv)
 	printf("the chief, weapons, gold\n");
 	test_chief();
 	test_plans();
+	test_plan_pictures();
 	test_builders();
 	test_gates_and_siege();
 	test_tower();

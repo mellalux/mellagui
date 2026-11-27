@@ -19,6 +19,7 @@ struct bl_pets;                                       /* Tom and Filip (blockspe
 struct bl_mobs;                                       /* the goblins (blocksmobs.h) */
 struct bl_ghosts;                                     /* what is planned to be built (blocksbuild.h) */
 struct bl_hero;                                       /* the player's body (blockshero.h) */
+struct bl_cell;                                       /* a block at a place (blocksbuild.h) */
 
 struct bl_camera {
 	float x, y, z;          /* the eye */
@@ -52,5 +53,9 @@ float bl_daylight(float time_h);                      /* 0 at night .. 1 by day,
 /* The 16 x 16 ARGB picture a block shows on a kind of face (BL_FACE_TOP / SIDE / BOTTOM); alpha 0 = see through. */
 const uint32_t *bl_texture(int block, int face_kind);
 uint32_t bl_block_color(int block);                   /* 0xRRGGBB, the average of its side */
+
+/* A small group of blocks (at most a plan's worth) seen from a corner above its -z side, without perspective: w x h pixels of straight ARGB, see-through where
+ * nothing is. It is made as large as the picture allows but a block never wider than `most` pixels (so a low wall is not blown up), and stands on the bottom edge. */
+void bl_picture(const struct bl_cell *cells, int n, uint32_t *out, int w, int h, float most);
 
 #endif

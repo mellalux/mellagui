@@ -20728,6 +20728,14 @@ class TestBlocks(Base):
         self.assertEqual(self.state()['panel']['on'], '0')
         self.tap('i')
         self.until(lambda: self.own('tool'))
+        st = self.state()                                       # the rail's button does the same, and shows whether the panel is on
+        self.assertIn(9, st['rail'], 'a game has its goal button')
+        self.assertEqual(st['rail'][8]['lit'], 1)
+        self.rail(8)
+        self.until(lambda: not self.own('tool'))
+        self.wait(lambda s: s['panel']['on'] == '0' and s['rail'][8]['lit'] == 0)
+        self.rail(8)
+        self.until(lambda: self.own('tool'))
 
     def test_a_slow_click_breaks_or_puts_one_block_only(self):
         self.start('--pitch', '-45')
@@ -20926,10 +20934,10 @@ class TestBlocks(Base):
         self.assertEqual(st['hist']['grass'], 256 * 256 - 1)
 
     def test_the_rail_of_buttons_does_what_it_says(self):
-        # buttons: 0 new, 1 open, 2 save, 3 save as, 4 play / pause, 5 command view, 6 blocks, 7 sound, 8 the Red Banner, 9 help
+        # buttons: 0 new, 1 open, 2 save, 3 save as, 4 play / pause, 5 command view, 6 blocks, 7 sound, 8 the info panel, 9 how to win, 10 help
         self.start()
         st = self.state()
-        self.assertEqual(sorted(st['rail']), list(range(10)))
+        self.assertEqual(sorted(st['rail']), [0, 1, 2, 3, 4, 5, 6, 7, 8, 10], 'free building has nothing to win')
         self.assertLess(st['rail'][0]['x'], 0, 'the rail is left of the picture')
         self.rail(4)
         self.wait(lambda s: s['state']['playing'] == '1' and s['state']['locked'] == '1')
@@ -21577,11 +21585,7 @@ class TestBlocks(Base):
         self.play()
         st = self.state()
         self.assertEqual((st['game']['survival'], st['game']['have_keep'], st['hist']['keep'], st['rival']['state'], st['arms']['mask']), ('0', '0', 0, '0', '63'))
-        self.tap('g')
-        self.prompt(10)
-        self.tap('esc')
-        self.wait(lambda s: s['state']['playing'] == '1')
-        for key in ('m', 'k', 'p', 'h'):
+        for key in ('g', 'm', 'k', 'p', 'h'):                   # (G is a game's: nothing is to be won here)
             self.tap(key)
         time.sleep(0.2)
         st = self.state()

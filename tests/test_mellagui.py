@@ -30056,7 +30056,7 @@ class TestSmart(Base):
         self.addCleanup(lambda: (pr.poll() is None) and (pr.kill(), pr.wait()))
         self.wait(lambda: [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.smart'] and self.view()['view'], 'the window')
         win = [w for w in c.windows()['windows'] if w['app_id'] == 'mellagui.smart'][0]
-        self.x0, self.y0 = win['x'], win['y']
+        self.x0, self.y0 = win['x'] + 52, win['y']                      # (the drawing area starts right of the rail of buttons)
         return c
 
     def devices_shown(self):
@@ -30286,7 +30286,7 @@ class TestSmart(Base):
         c = self.logged_in_window('w5')
         conf = os.path.join(self.dir, 'cfg', 'mellagui', 'smart.conf')
         kind, x, y = self.view()['foot']
-        self.assertEqual(kind, 'account')                                       # no Log out button in sight: a dim "Account" at the foot
+        self.assertEqual(kind, 'account')                                       # no Log out button in sight: the rail's lowest button asks
         c.click(self.x0 + x + 10, self.y0 + y + 10)
         self.wait(lambda: self.view()['foot'][0] == 'logout', 'the foot asks first')
         c.click(self.x0 + x + 10, self.y0 + y + 10)                             # the same place again is Cancel
@@ -30296,7 +30296,7 @@ class TestSmart(Base):
         c.click(self.x0 + x + 10, self.y0 + y + 10)
         self.wait(lambda: self.view()['foot'][0] == 'logout', 'the question again')
         kind, lx, ly = self.view()['foot']
-        self.assertLess(lx, x - 40)                                             # the button that logs out is beside the pointer, not under it
+        self.assertGreater(lx, x + 200)                                         # the button that logs out is far from the pointer, not under it
         c.click(self.x0 + lx + 10, self.y0 + ly + 10)
         self.wait(lambda: self.view()['view'] == 'login', 'the login view')
         self.assertNotIn('access-token=', open(os.path.join(self.dir, 'cfg', 'mellagui', 'smart.conf')).read())
@@ -30421,7 +30421,7 @@ class TestSmart(Base):
         self.window('scn')                                                      # the window has no row of scene buttons (only the command line does)
         self.wait(self.devices_shown, 'the devices')
         self.assertNotIn('scenes', self.view())
-        self.assertEqual(self.view()['ctl'][('plug1', '-', 'details')][0][1], 78)       # the first card is where it always was
+        self.assertEqual(self.view()['ctl'][('plug1', '-', 'details')][0][1], 70)       # the first card is where it always was
 
 
     def edits(self):
@@ -30469,8 +30469,42 @@ class TestSmart(Base):
         self.assertIn('08:35 weekdays Position 30%', texts)                     # (the dump's words, single spaced)
         self.edit('tog:0')
         self.wait(lambda: open(conf).read().count('off 08:35'), 'a rule can be switched off')
+        self.edit('ed:0')                                                       # change it: the form holds what the rule says
+        self.wait(lambda: 'save' in self.edits(), 'the form of the rule')
+        e = self.edits()
+        self.assertTrue(e['ed:0'][2] and e['a3'][2] and e['k:0'][2] and e['d4'][2] and not e['d5'][2])
+        self.assertNotIn('add', e)
+        self.assertEqual(self.view()['mctl'][('blind1', 'percent_control', 'edslider')][0][4], '30')
+        self.edit('h-')
+        self.wait(lambda: 'At 07:35' in [t[4] for t in self.view()['mctl'][('blind1', '-', 'text')]], 'an hour earlier')
+        self.edit('d5')
+        self.wait(lambda: self.edits()['d5'][2], 'Saturday too')
+        self.edit('save')
+        self.wait(lambda: 'off 07:35 MTWTFS- blind1 percent_control 30\n' in open(conf).read(), 'the rule is changed and stays off')
+        self.assertEqual(open(conf).read().count('blind1'), 1)                  # changed in its place, not added
+        self.wait(lambda: 'add' in self.edits() and 'save' not in self.edits(), 'the form is closed')
         self.edit('del:0')
         self.wait(lambda: 'blind1' not in open(conf).read(), 'and deleted')
+
+    def test_a_blinds_position_slider_shows_where_it_is_not_what_was_asked(self):
+        import copy
+        devices = copy.deepcopy(self.DEVICES)
+        blind = devices[1]
+        blind['status'] = {'control': 'stop', 'percent_control': 100, 'percent_state': 30}
+        blind['status_spec'] = [{'code': 'percent_state', 'type': 'Integer', 'values': '{"unit":"%","min":0,"max":100,"scale":0,"step":1}'}]
+        self.cloud('pct', devices=devices)
+        self.assertEqual(self.cli('--login', 'abc123')[0], 0)
+        self.window('pct')
+        self.wait(self.devices_shown, 'the devices')
+        time.sleep(0.3)
+        self.press(('blind1', '-', 'details'))
+        self.wait(lambda: ('blind1', 'percent_control', 'slider') in self.view()['mctl'], 'the blind\'s view')
+        self.assertEqual(self.view()['mctl'][('blind1', 'percent_control', 'slider')][0][4], '30')
+        self.wait(lambda: 'add' in self.edits(), 'the timetable')
+        self.edit('add')
+        self.wait(lambda: 'a3' in self.edits(), 'the form')
+        self.edit('a3')                                                         # a new rule's position starts there, too
+        self.wait(lambda: self.view()['mctl'].get(('blind1', 'percent_control', 'edslider'), [(0, 0, 0, 0, '')])[0][4] == '30', '30 per cent')
 
     def test_the_background_process_carries_a_rule_out_once_in_its_minute(self):
         self.cloud('sch2')

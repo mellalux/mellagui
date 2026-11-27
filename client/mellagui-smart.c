@@ -59,9 +59,10 @@
 #include "util.h"
 #include "wlc.h"
 #include "wlcard.h"
+#include "wlrail.h"
 #include "wlwin.h"
 
-#define HEAD_H 58
+#define HEAD_H 50
 #define FOOT_H 30
 #define PAD 12
 #define ROW 30
@@ -175,11 +176,16 @@ struct app {
     int sb_drag;                        /* a scroll bar's thumb is in the hand: 1 = the list's, 2 = the device view's */
     int sb_grab;                        /* ... and where it was taken, from its top */
     bool confirm_logout;                /* the foot asks "Log out?" */
+    struct wlrail_anim ran;             /* the springs of the rail of buttons at the left (wlrail.h) */
+    int hovertool;                      /* the rail's button under the pointer, -1 = none */
     /* the timetable (smartsched.h) and the form that adds a rule to the open device */
     struct sched_rule rules[SCHED_MAX];
     int nrules;
     struct {
         bool open;
+        int rule;                       /* the rule being changed (index into rules[]), -1 = a new one */
+        bool reveal;                    /* the form has just opened: the view scrolls so that it shows */
+        int y0, y1;                     /* where the form lies in the view (build_layout) */
         int hour, min;
         int kind;                       /* 0 = at hour:min, 1 = at sunrise, 2 = at sunset */
         int offset;                     /* minutes after (+) or before (-) the sun, -180..180 */
@@ -623,6 +629,26 @@ static void apply_holds(struct app *a)
             copy(dp->str, sizeof(dp->str), h->str);
         }
     }
+}
+
+/* The number a slider stands at. A blind's percent_control is only what was asked for last (it can stay at 0 or 100 whatever the blind does); where
+ * the blind is says percent_state. So the position slider shows that, except while it is dragged and for the few seconds a new wish is held. */
+static double slider_shown(const struct app *a, struct tuya_dev *d, const struct tuya_dp *dp)
+{
+    if (strncmp(dp->code, "percent_control", 15))
+        return dp->num;
+    char code[48];
+    snprintf(code, sizeof(code), "percent_state%.20s", dp->code + 15);             /* (percent_control_2 goes with percent_state_2) */
+    const struct tuya_dp *state = tuya_find_dp(d, code);
+    if (!state || !state->has)
+        return dp->num;
+    if (a->dragging && !strcmp(a->drag_dev, d->id) && !strcmp(a->drag_code, dp->code))
+        return dp->num;
+    uint64_t now = mono_ms();
+    for (int i = 0; i < MAX_HOLD; i++)
+        if (a->hold[i].until > now && !strcmp(a->hold[i].dev, d->id) && !strcmp(a->hold[i].code, dp->code))
+            return dp->num;
+    return state->num;
 }
 
 /* What the devices said themselves in this network goes over the cloud's values (the window's list). */
@@ -1107,6 +1133,17 @@ static void build_actions(struct app *a, struct tuya_dev *d)
 #undef ACT
 }
 
+/* The action that does what the rule does, -1 when the list has none like it (a line written by hand). */
+static int rule_action(const struct app *a, const struct tuya_dev *d, const struct sched_rule *r)
+{
+    for (int i = 0; i < a->nacts; i++) {
+        const struct sact *s = &a->acts[i];
+        if (s->dp >= 0 && !strcmp(d->dp[s->dp].code, r->code) && (s->is_int || !strcmp(s->value, r->value)))
+            return i;
+    }
+    return -1;
+}
+
 /* "07:30  weekdays  Position 30%" */
 static void rule_text(struct tuya_dev *d, const struct sched_rule *r, char *out, size_t n)
 {
@@ -1152,7 +1189,10 @@ static struct ctl *modal_ctl(struct flow *f, enum ctl_kind kind, int dp, struct 
     return c;
 }
 
-/* The timetable of the open device: its rules (each can be switched off or deleted) and the form that adds one. */
+static void schedule_form(struct flow *f);
+
+/* The timetable of the open device: its rules (each can be switched off, changed or deleted) and the form that changes one (under its line) or adds
+ * one (under the list). */
 static void schedule_controls(struct flow *f)
 {
     struct app *a = f->a;
@@ -1160,27 +1200,58 @@ static void schedule_controls(struct flow *f)
     build_actions(a, d);
     if (!a->nacts)
         return;                                                 /* nothing a rule could tell it */
+    if (a->ed.open && a->ed.rule >= 0 && a->ed.rule < a->nrules && rule_action(a, d, &a->rules[a->ed.rule]) < 0) {
+        struct sact *s = &a->acts[a->nacts < 24 ? a->nacts++ : 23];             /* what it does is not in the list: it can stay as it is */
+        s->dp = -1;
+        s->is_int = false;
+        memcpy(s->value, a->rules[a->ed.rule].value, sizeof(s->value));
+        copy(s->label, sizeof(s->label), "As it is");
+    }
     flow_line(f, C_LABEL, "Timetable (while this computer is on)");
     for (int i = 0; i < a->nrules; i++) {
         char text[160], v[16];
         if (strcmp(a->rules[i].dev, d->id))
             continue;
         rule_text(d, &a->rules[i], text, sizeof(text));
-        modal_ctl(f, C_TEXT, -1, (struct box){ f->x0, f->cy + 4, f->x1 - f->x0 - 124, 18 }, text, NULL, false);
+        bool editing = a->ed.open && a->ed.rule == i;
+        const int btns = 48 + 6 + 56 + 6 + 62;
+        bool below = lm_font_text_width(text) > f->x1 - f->x0 - btns - 8;       /* a long line gets the buttons under it */
+        modal_ctl(f, C_TEXT, -1, (struct box){ f->x0, f->cy + 4, f->x1 - f->x0 - (below ? 0 : btns + 8), 18 }, text, NULL, a->rules[i].on);
+        if (below)
+            f->cy += 24;
         snprintf(v, sizeof(v), "tog:%d", i);
-        modal_ctl(f, C_EDIT, -1, (struct box){ f->x1 - 116, f->cy, 48, 24 }, a->rules[i].on ? "On" : "Off", v, a->rules[i].on);
+        modal_ctl(f, C_EDIT, -1, (struct box){ f->x1 - btns, f->cy, 48, 24 }, a->rules[i].on ? "On" : "Off", v, a->rules[i].on);
+        snprintf(v, sizeof(v), "ed:%d", i);
+        modal_ctl(f, C_EDIT, -1, (struct box){ f->x1 - 62 - 6 - 56, f->cy, 56, 24 }, "Edit", v, editing);
         snprintf(v, sizeof(v), "del:%d", i);
         modal_ctl(f, C_EDIT, -1, (struct box){ f->x1 - 62, f->cy, 62, 24 }, "Delete", v, false);
         f->cy += 30;
+        if (editing) {
+            f->cx = f->x0;
+            f->used = false;
+            a->ed.y0 = f->cy - (below ? 54 : 30);
+            flow_line(f, C_LABEL, "Change this time");
+            schedule_form(f);
+            a->ed.y1 = f->cy;
+            f->cy += 6;
+        }
     }
     f->cx = f->x0;
     f->used = false;
     if (!a->ed.open) {
-        struct ctl *c = flow_add(f, C_EDIT, -1, lm_font_text_width("Add a time...") + 28, "Add a time...", "add");
-        (void)c;
+        flow_add(f, C_EDIT, -1, lm_font_text_width("Add a time...") + 28, "Add a time...", "add");
         flow_break(f);
-        return;
+    } else if (a->ed.rule < 0) {
+        a->ed.y0 = f->cy;
+        schedule_form(f);
+        a->ed.y1 = f->cy;
     }
+}
+
+/* The form of a rule: the time, the days, what it does. */
+static void schedule_form(struct flow *f)
+{
+    struct app *a = f->a;
     char text[120];
     static const char *const day[7] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
     static const char *const step[4][2] = { { "h-", "- 1 h" }, { "h+", "+ 1 h" }, { "m-", "- 5 min" }, { "m+", "+ 5 min" } };
@@ -1412,6 +1483,7 @@ static void build_layout(struct app *a)
     int top = LM_CLAMP(24 + a->win.card_dy, 0, LM_MAX(a->win.bh - 120, 0)), ctop = top + MODAL_HEAD;
     int room = LM_MAX(a->win.bh - top - 24, 96);
     struct flow f = { .a = a, .dev = (int)(d - a->dev), .modal = true, .x0 = mx + 16, .x1 = mx + mw - 10 - sbar_w(), .cx = mx + 16, .cy = ctop - a->modal_scroll };
+    a->ed.y0 = a->ed.y1 = 0;
     modal_controls(&f);
     a->modal_h = f.cy + a->modal_scroll - ctop + 12;
     int mh = LM_MIN(MODAL_HEAD + a->modal_h, room);
@@ -1505,9 +1577,8 @@ static void clamp_scroll(struct app *a)
 
 /* ---- painting ----------------------------------------------------------------------------------------------------------------------------- */
 
-static struct box btn_refresh(const struct app *a) { return (struct box){ a->win.bw - 104, 15, 90, 28 }; }
-/* Logging out is out of the way: a dim "Account" at the foot asks first, and the button that does it appears beside the pointer, not under it. */
-static struct box btn_account(const struct app *a) { return (struct box){ a->win.bw - 14 - 76, a->win.bh - FOOT_H + 4, 76, 22 }; }
+/* Logging out is out of the way: the rail's lowest button turns the foot into a question, whose buttons are far from the pointer. */
+static struct box btn_cancel(const struct app *a) { return (struct box){ a->win.bw - 14 - 76, a->win.bh - FOOT_H + 4, 76, 22 }; }
 static struct box btn_logout(const struct app *a) { return (struct box){ a->win.bw - 14 - 76 - 8 - 76, a->win.bh - FOOT_H + 4, 76, 22 }; }
 static struct box login_field(const struct app *a) { return (struct box){ 24, 250, LM_MIN(a->win.bw - 48, 260), 30 }; }
 static struct box login_go(const struct app *a) { struct box f = login_field(a); return (struct box){ f.x, f.y + 44, 150, 30 }; }
@@ -1518,10 +1589,19 @@ static void rbox(struct wlwin *w, struct box b, int r, uint32_t rgb)
     wlwin_round_fill(w, b.x, b.y, b.w, b.h, r, rgb);
 }
 
-static void button(struct wlwin *w, struct box b, const char *label, bool hot, uint32_t bg, uint32_t fg)
+enum tint { T_SLATE, T_BLUE, T_GREEN, T_AMBER, T_RED, T_GREY, T_IDLE };
+
+/* A coloured drop with its label: lighter under the pointer, grey and dim when there is nothing it can do (T_IDLE). */
+static void button(struct wlwin *w, struct box b, const char *label, bool hot, enum tint t)
 {
-    wlwin_drop(w, b.x, b.y, b.w, b.h, LM_MAX(lm_button_radius(b.h / 2), 3), hot ? lm_theme.button_hover : bg);
-    wlwin_text(w, b.x + (b.w - lm_font_text_width(label)) / 2, b.y + (b.h - LM_FONT_H) / 2, label, 1, fg, 0);
+    const uint32_t fill[][2] = {
+        { lm_theme.btn_slate, lm_theme.btn_slate_lit }, { lm_theme.btn_blue, lm_theme.btn_blue_lit }, { lm_theme.btn_green, lm_theme.btn_green_lit },
+        { lm_theme.btn_amber, lm_theme.btn_amber_lit }, { lm_theme.btn_red, lm_theme.btn_red_lit }, { lm_theme.btn_grey, lm_theme.btn_grey_lit },
+        { lm_theme.control_idle, lm_theme.control_idle },
+    };
+    wlwin_drop(w, b.x, b.y, b.w, b.h, LM_MAX(lm_button_radius(b.h / 2), 3), fill[t][hot]);
+    wlwin_text(w, b.x + (b.w - lm_font_text_width(label)) / 2, b.y + (b.h - LM_FONT_H) / 2, label, 1,
+               t == T_IDLE ? lm_theme.title_text_idle : lm_theme.on_colour, 0);
 }
 
 /* Text broken at spaces to fit max_w; returns the y after the last line. */
@@ -1555,6 +1635,54 @@ static void slider_track(struct box b, int *x0, int *x1)
         *x1 = *x0 + 40;
 }
 
+enum { R_REFRESH, R_ACCOUNT, R_N };
+
+static void ic_refresh(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    wlwin_round_fill(w, cx - 7, cy - 7, 14, 14, 7, c);
+    wlwin_round_fill(w, cx - 5, cy - 5, 10, 10, 5, bg);
+    wlwin_fill(w, cx + 1, cy - 8, 8, 7, bg);                    /* the ring is open at the top right ... */
+    for (int i = 0; i < 4; i++)                                 /* ... and ends in an arrow head */
+        wlwin_fill(w, cx + 1 + i, cy - 9 + i, 1, 9 - 2 * i, c);
+}
+
+static void ic_logout(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    (void)bg;
+    wlwin_fill(w, cx - 8, cy - 7, 8, 2, c);                     /* a door that stands open to the right, an arrow out of it */
+    wlwin_fill(w, cx - 8, cy + 5, 8, 2, c);
+    wlwin_fill(w, cx - 8, cy - 7, 2, 14, c);
+    wlwin_fill(w, cx - 3, cy - 1, 9, 2, c);
+    for (int i = 0; i < 5; i++)
+        wlwin_fill(w, cx + 4 + i, cy - 4 + i, 1, 8 - 2 * i, c);
+}
+
+static void smart_rail(const struct app *a, struct wlrail *L)
+{
+    bool idle = a->view != V_DEVICES || a->modal_dev[0];
+    memset(L, 0, sizeof(*L));
+    L->y0 = 0;
+    L->y1 = a->win.bh > 0 ? a->win.bh - FOOT_H : 400;
+    L->n = R_N;
+    L->it[R_REFRESH] = (struct wlrail_item){ .tip = "Ask the devices again  F5", .icon = ic_refresh, .base = lm_theme.btn_blue, .lite = lm_theme.btn_blue_lit,
+                                             .show = true, .idle = idle };
+    L->it[R_ACCOUNT] = (struct wlrail_item){ .tip = a->confirm_logout ? "Stay logged in" : "Log out...", .icon = ic_logout,
+                                             .base = a->confirm_logout ? lm_theme.btn_red : lm_theme.btn_slate,
+                                             .lite = a->confirm_logout ? lm_theme.btn_red_lit : lm_theme.btn_slate_lit,
+                                             .show = true, .idle = idle, .lit = a->confirm_logout, .bottom = true };
+}
+
+/* The rail's button under the pointer: -1 when there is none that does something (also while the pointer is on the device view). */
+static int rail_under(struct app *a)
+{
+    struct wlrail L;
+    if (a->modal_dev[0] || a->px >= 0 || a->py < 0)             /* (the pointer on a card window reports a place far to the right) */
+        return -1;
+    smart_rail(a, &L);
+    int i = wlrail_at(&L, a->win.rpx, a->win.rpy);
+    return i >= 0 && !L.it[i].idle ? i : -1;
+}
+
 static void dump_state(struct app *a)
 {
     if (!a->dump)
@@ -1567,8 +1695,12 @@ static void dump_state(struct app *a)
     pthread_mutex_lock(&a->lan_lock);
     int lan_cmds = a->lan_cmds, lan_reads = a->lan_reads;
     pthread_mutex_unlock(&a->lan_lock);
-    if (a->view == V_DEVICES && !a->modal_dev[0]) {
-        struct box b = a->confirm_logout ? btn_logout(a) : btn_account(a);
+    if (a->view == V_DEVICES && !a->modal_dev[0]) {             /* the rail's account button (left of the drawing area: x < 0), or the question's Log out */
+        struct wlrail L;
+        int y[WLRAIL_MAX];
+        smart_rail(a, &L);
+        wlrail_layout(&L, y);
+        struct box b = a->confirm_logout ? btn_logout(a) : (struct box){ (WLRAIL_W - WLRAIL_D) / 2 - WLRAIL_W, y[R_ACCOUNT], WLRAIL_D, WLRAIL_D };
         fprintf(f, "foot %s %d %d %d %d\n", a->confirm_logout ? "logout" : "account", b.x, b.y, b.w, b.h);
     } else {
         fprintf(f, "foot - 0 0 0 0\n");
@@ -1577,6 +1709,13 @@ static void dump_state(struct app *a)
             a->loaded, a->msg_err, lan_cmds, lan_reads, a->modal_dev[0] ? a->modal_dev : "-", a->msg, a->view == V_QR && a->have_qr ? a->qr_token : "");
     if (a->view == V_DEVICES) {
         fprintf(f, "cols %d\n", a->cols);
+        {
+            struct wlrail L;
+            int y[WLRAIL_MAX];
+            smart_rail(a, &L);
+            wlrail_layout(&L, y);
+            fprintf(f, "rail refresh %d %d %d %d\n", (WLRAIL_W - WLRAIL_D) / 2 - WLRAIL_W, y[R_REFRESH], WLRAIL_D, WLRAIL_D);
+        }
         for (int i = 0; i < a->ndev; i++)
             fprintf(f, "card %s %d %d %d %d\n", a->dev[i].id, a->card[i].x, a->card[i].y, a->card[i].w, a->card[i].h);
         for (int i = 0; i < a->ndev; i++)
@@ -1603,7 +1742,7 @@ static void dump_state(struct app *a)
             else if (c->dp >= 0 && (c->kind == C_BUTTON || c->kind == C_HOLD))
                 copy(v, sizeof(v), c->value);
             else if (c->dp >= 0 && d->dp[c->dp].type == TUYA_INT)
-                snprintf(v, sizeof(v), "%g", d->dp[c->dp].num);
+                snprintf(v, sizeof(v), "%g", slider_shown(a, d, &d->dp[c->dp]));
             else if (c->dp >= 0 && d->dp[c->dp].type == TUYA_BOOL)
                 copy(v, sizeof(v), d->dp[c->dp].b ? "on" : "off");
             else if (c->dp >= 0)
@@ -1631,7 +1770,7 @@ static void paint_login(struct app *a)
         wlwin_fill(w, f.x, f.y, f.w, f.h, lm_theme.field);
         wlwin_text(w, f.x + 8, f.y + 7, a->code, 1, lm_theme.text, f.w - 20);
         wlwin_fill(w, f.x + 8 + lm_font_text_width(a->code), f.y + 7, 2, LM_FONT_H, lm_theme.accent);
-        button(w, login_go(a), a->qr_busy ? "Asking..." : "Show QR code", in(a->px, a->py, login_go(a)), lm_theme.button, lm_theme.text);
+        button(w, login_go(a), a->qr_busy ? "Asking..." : "Show QR code", in(a->px, a->py, login_go(a)), T_GREEN);
         return;
     }
     int top = HEAD_H + 8, room_h = w->bh - FOOT_H - 48 - top - 44, room_w = w->bw - 48;
@@ -1645,7 +1784,7 @@ static void paint_login(struct app *a)
                 wlwin_fill(w, qx + (x + 4) * scale, qy + (y + 4) * scale, scale, scale, 0x000000);
     int y = wrap_text(w, 24, qy + side + 10, tw, "Scan this with the Smart Life app (the scan button at the top right of its home screen) and confirm there.", lm_theme.text);
     wlwin_text(w, 24, y + 2, "Waiting for the scan...", 1, lm_theme.text_dim, tw);
-    button(w, qr_back(a), "Back", in(a->px, a->py, qr_back(a)), lm_theme.button, lm_theme.text);
+    button(w, qr_back(a), "Back", in(a->px, a->py, qr_back(a)), T_SLATE);
 }
 
 /* A filled arrow (or the stop square) in the middle of a button of the driving cross. */
@@ -1696,7 +1835,8 @@ static void paint_ctl(struct app *a, const struct ctl *c, bool live)
     case C_BUTTON: {
         bool cur = dp->has && dp->type == TUYA_ENUM && !strcmp(dp->str, c->value);
         if (c->label[0]) {
-            button(w, b, c->label, hot, cur ? lm_theme.button_down : lm_theme.button, fg);
+            enum tint t = !d->online ? T_IDLE : cur ? T_BLUE : dp->type == TUYA_ENUM ? T_SLATE : !strcmp(c->value, "0") ? T_AMBER : T_GREEN;
+            button(w, b, c->label, hot, t);
         } else {                                                /* the stop key of the driving cross */
             rbox(w, b, 8, hot ? lm_theme.button_hover : lm_theme.button_alt);
             paint_arrow(w, b, c->value, d->online ? lm_theme.alert : lm_theme.text_dim);
@@ -1717,18 +1857,24 @@ static void paint_ctl(struct app *a, const struct ctl *c, bool live)
         break;
     }
     case C_DETAILS:
-        button(w, b, c->label, hot, lm_theme.background, lm_theme.text_dim);
-        break;
     case C_CLOSE:
-        button(w, b, c->label, hot, lm_theme.button, lm_theme.text);
+        button(w, b, c->label, hot, T_SLATE);
         break;
     case C_LABEL:
         wlwin_text(w, b.x, b.y, c->label, 1, lm_theme.accent, b.w);
         break;
     case C_EDIT: {
         bool hot_e = live && in(a->px, a->py, b);
-        bool save = !strcmp(c->value, "save");
-        button(w, b, c->label, hot_e, save ? lm_theme.ok : c->lit ? lm_theme.button_down : lm_theme.button, save && !hot_e ? lm_theme.ink : c->lit || hot_e || save ? lm_theme.text : lm_theme.text_dim);
+        const char *v = c->value;
+        enum tint t = !strcmp(v, "save") || !strcmp(v, "add") ? T_GREEN
+                      : !strcmp(v, "cancel")                  ? T_GREY
+                      : !strncmp(v, "del:", 4)                ? T_RED
+                      : !strncmp(v, "tog:", 4)                ? (c->lit ? T_GREEN : T_GREY)
+                      : c->lit || !strncmp(v, "ed:", 3)       ? T_BLUE
+                                                              : T_SLATE;
+        if (c->lit && !strncmp(v, "ed:", 3))                    /* the rule whose form is open */
+            t = T_AMBER;
+        button(w, b, c->label, hot_e, t);
         break;
     }
     case C_EDSLIDER: {
@@ -1749,19 +1895,21 @@ static void paint_ctl(struct app *a, const struct ctl *c, bool live)
         break;
     }
     case C_TEXT:
-        wlwin_text(w, b.x, b.y, c->label, 1, lm_theme.text_dim, b.w);
+        wlwin_text(w, b.x, b.y, c->label, 1, c->lit ? lm_theme.text : lm_theme.text_dim, b.w);      /* (lit: a rule that is on) */
         break;
     case C_SLIDER: {
         int x0, x1;
         char v[48];
         slider_track(b, &x0, &x1);
-        double f = dp->has && dp->max > dp->min ? LM_CLAMP((dp->num - dp->min) / (dp->max - dp->min), 0.0, 1.0) : 0.0;
+        struct tuya_dp shown = *dp;
+        shown.num = slider_shown(a, d, dp);
+        double f = dp->has && dp->max > dp->min ? LM_CLAMP((shown.num - dp->min) / (dp->max - dp->min), 0.0, 1.0) : 0.0;
         int kx = x0 + (int)(f * (x1 - x0) + 0.5);
         wlwin_text(w, b.x, b.y + 7, c->label, 1, fg, 142);
         rbox(w, (struct box){ x0, b.y + 12, x1 - x0, 6 }, 3, lm_theme.button);
         rbox(w, (struct box){ x0, b.y + 12, kx - x0, 6 }, 3, d->online ? lm_theme.accent : lm_theme.border);
         rbox(w, (struct box){ kx - 8, b.y + 7, 16, 16 }, 8, d->online ? lm_theme.on_colour : lm_theme.text_dim);
-        tuya_dp_text(dp, v, sizeof(v));
+        tuya_dp_text(&shown, v, sizeof(v));
         wlwin_text(w, x1 + 14, b.y + 7, v, 1, fg, 66);
         break;
     }
@@ -1772,6 +1920,11 @@ static void paint_devices(struct app *a)
 {
     struct wlwin *w = &a->win;
     build_layout(a);
+    if (a->ed.reveal && a->modal_dev[0] && a->ed.y1 > a->ed.y0) {   /* a form that has just opened is scrolled into sight (its top first of all) */
+        int over = a->ed.y1 - (a->modal.y + a->modal.h - 8), most = a->ed.y0 - (a->modal.y + MODAL_HEAD);
+        a->modal_scroll += LM_MAX(LM_MIN(over, most), 0);
+        a->ed.reveal = false;
+    }
     clamp_scroll(a);
     build_layout(a);
     bool live = !a->modal_dev[0] && a->py >= HEAD_H && a->py < w->bh - FOOT_H;
@@ -1860,37 +2013,49 @@ static void paint(struct wlwin *w)
     else
         paint_login(a);
     /* the head and the foot lie over the list */
-    wlwin_fill(w, 0, 0, w->bw, HEAD_H - 8, lm_theme.background);
-    wlwin_fill(w, 0, w->bh - FOOT_H, w->bw, FOOT_H, lm_theme.background);
-    wlwin_text(w, 14, 12, "Smart home", 1, lm_theme.accent, 0);
-    char sub[160];
-    if (a->view == V_DEVICES)
-        snprintf(sub, sizeof(sub), "%s%s%d device%s", a->username, a->username[0] ? "   " : "", a->ndev, a->ndev == 1 ? "" : "s");
-    else
-        snprintf(sub, sizeof(sub), "Smart Life account: not logged in");
-    wlwin_text(w, 14, 32, sub, 1, lm_theme.text_dim, w->bw - 230);
+    wlwin_fill(w, 0, 0, w->bw, HEAD_H - 4, lm_theme.background);
+    char title[100], sub[160];
     if (a->view == V_DEVICES) {
-        button(w, btn_refresh(a), a->poll_busy ? "..." : "Refresh", in(a->px, a->py, btn_refresh(a)), lm_theme.button, lm_theme.text);
+        int online = 0, local = 0;
+        for (int i = 0; i < a->ndev; i++) {
+            online += a->dev[i].online;
+            local += a->dev[i].online && lan_lookup(a, a->dev[i].id, NULL);
+        }
+        snprintf(title, sizeof(title), "%s", a->username[0] ? a->username : "Smart home");
+        int o = snprintf(sub, sizeof(sub), "%d device%s", a->ndev, a->ndev == 1 ? "" : "s");
+        if (a->loaded && a->ndev)
+            o += snprintf(sub + o, sizeof(sub) - (size_t)o, ", %d online", online);
+        if (local)
+            o += snprintf(sub + o, sizeof(sub) - (size_t)o, ", %d in this network", local);
+        if (a->poll_busy)
+            snprintf(sub + o, sizeof(sub) - (size_t)o, "   asking...");
+    } else {
+        snprintf(title, sizeof(title), "Smart Life account");
+        snprintf(sub, sizeof(sub), "not logged in");
     }
-    wlwin_fill(w, 10, HEAD_H - 8, w->bw - 20, 1, lm_theme.border);
-    wlwin_fill(w, 10, w->bh - FOOT_H, w->bw - 20, 1, lm_theme.border);
-    int foot_w = w->bw - 28 - (a->view == V_DEVICES ? (a->confirm_logout ? 176 : 92) : 0);
+    wlwin_text(w, PAD, 6, title, 1, lm_theme.accent, w->bw - 2 * PAD);
+    wlwin_text(w, PAD, 26, sub, 1, lm_theme.text_dim, w->bw - 2 * PAD);
+    int sy = w->bh - FOOT_H;
+    wlwin_fill(w, 0, sy, w->bw, FOOT_H, lm_theme.bar);
+    int foot_w = w->bw - 2 * PAD - (a->view == V_DEVICES && a->confirm_logout ? 176 : 0);
     if (a->view == V_DEVICES && a->confirm_logout) {
         char q[160];
-        snprintf(q, sizeof(q), "Log out%s%s? The devices stay in the account.", a->username[0] ? " of " : "", a->username);
-        wlwin_text(w, 14, w->bh - FOOT_H + 8, q, 1, lm_theme.text, foot_w);
-        button(w, btn_logout(a), "Log out", in(a->px, a->py, btn_logout(a)), lm_theme.danger, lm_theme.on_colour);
-        button(w, btn_account(a), "Cancel", in(a->px, a->py, btn_account(a)), lm_theme.button, lm_theme.text);
+        snprintf(q, sizeof(q), "Log out%s%s?", a->username[0] ? " of " : "", a->username);
+        wlwin_text(w, PAD, sy + 7, q, 1, lm_theme.caution, foot_w);
+        button(w, btn_logout(a), "Log out", in(a->px, a->py, btn_logout(a)), T_RED);
+        button(w, btn_cancel(a), "Cancel", in(a->px, a->py, btn_cancel(a)), T_GREY);
+    } else if (a->msg[0]) {
+        wlwin_text(w, PAD, sy + 7, a->msg, 1, a->msg_err ? lm_theme.error : lm_theme.caution, foot_w);
     } else {
-        if (a->msg[0])
-            wlwin_text(w, 14, w->bh - FOOT_H + 8, a->msg, 1, a->msg_err ? lm_theme.error : lm_theme.text, foot_w);
-        else
-            wlwin_text(w, 14, w->bh - FOOT_H + 8, a->view == V_DEVICES ? "F5 asks again   Esc closes" : "Esc closes", 1, lm_theme.text_dim, foot_w);
-        if (a->view == V_DEVICES)
-            button(w, btn_account(a), "Account", in(a->px, a->py, btn_account(a)), lm_theme.background, lm_theme.text_dim);
+        wlwin_text(w, PAD, sy + 7, a->view == V_DEVICES ? "Click a card to open it, drag it to move it   F5 asks again   Esc closes" : "Esc closes", 1,
+                   lm_theme.text_dim, foot_w);
     }
     if (a->view == V_DEVICES)
         paint_list_bar(a);
+    struct wlrail L;
+    smart_rail(a, &L);
+    wlrail_paint(w, &L, &a->ran, a->hovertool, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.button_hover, lm_theme.text_soft);
+    wlrail_foot(w, &L, lm_theme.bar);
     if (a->view == V_DEVICES && a->modal_dev[0])
         paint_modal(a);
     dump_state(a);
@@ -1961,8 +2126,33 @@ static void press_edit(struct app *a, const struct ctl *c)
             set_msg(a, true, "Only eight devices fit on the desktop card");
         return;
     }
-    if (!strcmp(v, "add")) {
-        a->ed.open = true;
+    if (!strncmp(v, "ed:", 3) && n >= 0 && n < a->nrules) {
+        if (a->ed.open && a->ed.rule == n) {                    /* the lit "Edit" again closes the form */
+            a->ed.open = false;
+            return;
+        }
+        const struct sched_rule *r = &a->rules[n];
+        int act = rule_action(a, d, r), due;
+        a->ed.open = a->ed.reveal = true;
+        a->ed.rule = n;
+        a->ed.kind = r->sun;
+        a->ed.offset = r->sun ? r->offset : 0;
+        a->ed.hour = r->sun ? 7 : r->hour;
+        a->ed.min = r->sun ? 30 : r->min;
+        if (r->sun && sched_minute(r, time(NULL), &due)) {      /* "At a time" starts from what the sun makes of it today */
+            a->ed.hour = due / 60;
+            a->ed.min = due % 60;
+        }
+        a->ed.days = r->days;
+        a->ed.num = atof(r->value);
+        if (act < 0) {                                          /* (the "As it is" that the layout puts at the end of the list) */
+            build_actions(a, d);
+            act = LM_MIN(a->nacts, 23);
+        }
+        a->ed.action = act;
+    } else if (!strcmp(v, "add")) {
+        a->ed.open = a->ed.reveal = true;
+        a->ed.rule = -1;
         a->ed.hour = 7;
         a->ed.min = 30;
         a->ed.kind = 0;
@@ -1971,13 +2161,17 @@ static void press_edit(struct app *a, const struct ctl *c)
         a->ed.action = 0;
         for (int i = 0; i < a->nacts; i++)                      /* a number starts at what the device has now */
             if (a->acts[i].is_int)
-                a->ed.num = d->dp[a->acts[i].dp].num;
+                a->ed.num = slider_shown(a, d, &d->dp[a->acts[i].dp]);
     } else if (!strncmp(v, "tog:", 4) && n >= 0 && n < a->nrules) {
         a->rules[n].on = !a->rules[n].on;
         rules_changed(a);
     } else if (!strncmp(v, "del:", 4) && n >= 0 && n < a->nrules) {
         memmove(&a->rules[n], &a->rules[n + 1], sizeof(a->rules[0]) * (size_t)(a->nrules - n - 1));
         a->nrules--;
+        if (a->ed.open && a->ed.rule == n)
+            a->ed.open = false;
+        else if (a->ed.open && a->ed.rule > n)
+            a->ed.rule--;
         rules_changed(a);
     } else if (!strcmp(v, "h+")) {
         a->ed.hour = (a->ed.hour + 1) % 24;
@@ -1998,9 +2192,10 @@ static void press_edit(struct app *a, const struct ctl *c)
     } else if (v[0] == 'd' && v[1] >= '0' && v[1] <= '6') {
         a->ed.days ^= 1u << (v[1] - '0');
     } else if (v[0] == 'a' && atoi(v + 1) < a->nacts) {
+        bool same = a->ed.action == atoi(v + 1);
         a->ed.action = atoi(v + 1);
-        if (a->acts[a->ed.action].is_int)
-            a->ed.num = d->dp[a->acts[a->ed.action].dp].num;
+        if (!same && a->acts[a->ed.action].is_int)
+            a->ed.num = slider_shown(a, d, &d->dp[a->acts[a->ed.action].dp]);
     } else if (!strcmp(v, "cancel")) {
         a->ed.open = false;
     } else if (!strcmp(v, "save")) {
@@ -2009,27 +2204,33 @@ static void press_edit(struct app *a, const struct ctl *c)
             set_msg(a, true, "Choose at least one day");
             return;
         }
-        if (a->nrules >= SCHED_MAX) {
+        bool change = a->ed.rule >= 0 && a->ed.rule < a->nrules;
+        if (!change && a->nrules >= SCHED_MAX) {
             set_msg(a, true, "The timetable is full");
             return;
         }
-        struct sched_rule *r = &a->rules[a->nrules++];
-        memset(r, 0, sizeof(*r));
-        r->on = true;
+        struct sched_rule *r = &a->rules[change ? a->ed.rule : a->nrules++];
+        if (!change) {
+            memset(r, 0, sizeof(*r));
+            r->on = true;                                       /* (a changed rule stays on or off as it was) */
+        }
         r->hour = a->ed.hour;
         r->min = a->ed.min;
         r->sun = a->ed.kind;
         r->offset = a->ed.kind ? a->ed.offset : 0;
         r->days = a->ed.days & 0x7f;
         copy(r->dev, sizeof(r->dev), d->id);
-        copy(r->code, sizeof(r->code), d->dp[act->dp].code);
-        if (act->is_int)
+        if (act->dp >= 0)
+            copy(r->code, sizeof(r->code), d->dp[act->dp].code);
+        if (act->dp < 0)
+            ;                                                   /* "As it is": the code and the value stay */
+        else if (act->is_int)
             snprintf(r->value, sizeof(r->value), "%lld", (long long)(a->ed.num < 0 ? a->ed.num - 0.5 : a->ed.num + 0.5));
         else
             copy(r->value, sizeof(r->value), act->value);
         a->ed.open = false;
         rules_changed(a);
-        set_msg(a, false, "Saved. It runs while this computer is on.");
+        set_msg(a, false, change ? "Changed. It runs while this computer is on." : "Saved. It runs while this computer is on.");
     }
 }
 
@@ -2174,20 +2375,25 @@ static void press_devices(struct app *a)
             }
         return;
     }
+    int tool = rail_under(a);
     if (a->confirm_logout) {                                    /* the question takes the next click: only its Log out button logs out */
         a->confirm_logout = false;
+        if (tool >= 0)
+            wlrail_press(&a->ran, tool, wlrail_now());
         if (in(a->px, a->py, btn_logout(a)))
             push_job(a, J_LOGOUT, NULL, NULL, NULL);
         return;
     }
-    if (in(a->px, a->py, btn_refresh(a))) {
-        refresh(a);
+    if (tool >= 0) {
+        wlrail_press(&a->ran, tool, wlrail_now());
+        if (tool == R_REFRESH)
+            refresh(a);
+        else
+            a->confirm_logout = true;
         return;
     }
-    if (in(a->px, a->py, btn_account(a))) {
-        a->confirm_logout = true;
+    if (a->px < 0)
         return;
-    }
     if (sbar_press(a, 1))
         return;
     if (a->py < HEAD_H - 8 || a->py >= w->bh - FOOT_H)
@@ -2249,6 +2455,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         int base = op == LM_WL_POINTER_EVT_ENTER ? 2 : 1;
         a->px = lm_fixed_to_double(args[base].f);
         a->py = lm_fixed_to_double(args[base + 1].f);
+        a->hovertool = rail_under(a);
         if (w->card_drag && a->modal_dev[0]) {                  /* the device view follows the pointer */
             double nx = a->px - w->card_gx, ny = a->py - w->card_gy;
             nx = LM_CLAMP(nx, 0.0, (double)LM_MAX(w->bw - a->modal.w, 0));
@@ -2298,6 +2505,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     }
     if (op == LM_WL_POINTER_EVT_LEAVE) {                        /* nothing stays lit when the pointer is gone */
         a->px = a->py = -1;
+        a->hovertool = -1;
         if (a->cdrag >= 0 && !a->cmoved)
             a->cdrag = a->cdrop = -1;
         w->redraw = true;
@@ -2315,6 +2523,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     w->redraw = true;
     if (args[3].u == 0) {                                       /* let go: a dragged slider is sent now, a held direction stops */
         w->card_drag = false;
+        wlrail_release(&a->ran);
         if (a->cdrag >= 0)
             card_release(a);
         if (a->dragging) {
@@ -3163,8 +3372,11 @@ int main(int argc, char **argv)
     bool logged_in = tuya_session_load(&a.sess);
     copy(a.code, sizeof(a.code), a.sess.user_code);
     copy(a.username, sizeof(a.username), a.sess.username);
+    a.hovertool = -1;
+    wlrail_init(&a.ran);
     if (wlwin_connect(&a.win, "mellagui-smart", &ops, &a) < 0)
         return 1;
+    wlwin_set_inset(&a.win, WLRAIL_W);                          /* (after the connect, which clears the window; before the open: it makes room) */
     if (wlwin_open(&a.win, "Smart home", "mellagui.smart", 520, 620, 420, 420) < 0) {
         wlwin_destroy(&a.win);
         return 1;
@@ -3196,7 +3408,10 @@ int main(int argc, char **argv)
     }
     while (a.win.running) {
         tick(&a);
-        if (!wlwin_step(&a.win, a.animating ? 16 : 100))
+        struct wlrail L;
+        smart_rail(&a, &L);
+        int timeout = wlrail_loop(&a.win, &a.ran, &L, a.hovertool, a.animating ? 16 : 100);
+        if (!wlwin_step(&a.win, timeout))
             break;
     }
     wlwin_destroy(&a.win);

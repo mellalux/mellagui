@@ -6,9 +6,15 @@
 
 static const struct {
 	const char *name;
-	int cobble, planks;
+	int cobble, planks, gold;
 } k_plans[BL_PLAN_COUNT] = {
-	{ "barracks", 20, 16 }, { "watchtower", 20, 10 }, { "wall", 6, 0 }, { "gate", 6, 4 },
+	{ "barracks", 12, 8, 0 }, { "watchtower", 20, 10, 0 }, { "wall", 6, 0, 0 }, { "gate", 6, 4, 0 },
+	{ "smithy", 12, 6, 0 }, { "mage tower", 24, 8, 8 }, { "infirmary", 6, 12, 0 }, { "mine", 6, 10, 0 },
+};
+
+/* a cell of the plan before it is turned and placed: u along the width, v into the depth, y up */
+struct pcell {
+	int u, y, v, block;
 };
 
 const char *bl_plan_name(int plan)
@@ -23,30 +29,77 @@ void bl_plan_cost(int plan, int *cobble, int *planks)
 	*planks = ok ? k_plans[plan].planks : 0;
 }
 
-/* a cell of the plan before it is turned and placed: u along the width, v into the depth, y up */
-struct pcell {
-	int u, y, v, block;
-};
+int bl_plan_gold(int plan)
+{
+	return plan >= 0 && plan < BL_PLAN_COUNT ? k_plans[plan].gold : 0;
+}
+
+int bl_keep_cells(struct bl_cell out[BL_KEEP_CELLS], int x, int y, int z, int block)
+{
+	int n = 0;
+	const int r = BL_KEEP_R;
+	for (int h = 0; h < BL_KEEP_TALL; h++)
+		for (int dz = -r; dz <= r; dz++)
+			for (int dx = -r; dx <= r; dx++) {
+				const int ax = dx < 0 ? -dx : dx, az = dz < 0 ? -dz : dz;
+				const bool edge = ax == r || az == r;
+				const bool turret = ax >= r - 1 && az >= r - 1;             /* the four 2 x 2 corners */
+				const bool tower = ax <= 1 && az <= 1;                      /* the tall one in the middle */
+				bool in = false;
+				if (h < 4)                                                  /* the walls and what the towers stand on (the inside is not seen: left empty) */
+					in = edge || turret || tower;
+				else if (h == 4)
+					in = (edge && ((dx + dz) & 1) == 0) || turret || tower;      /* merlons */
+				else if (h == 5)
+					in = turret || tower;
+				else if (h == 6)
+					in = (ax == r && az == r) || (ax == r - 1 && az == r - 1) || tower;   /* teeth on the turrets */
+				else if (h == 7)
+					in = tower;
+				else if (h == 8)
+					in = ax <= 1 && az <= 1 && ((dx + dz) & 1) == 0;                      /* teeth on the tower */
+				else
+					in = dx == 0 && dz == 0;                                              /* the spire */
+				if (dz == -r && dx == 0 && h < 2)                           /* the doorway */
+					in = false;
+				/* the shields: in the middle of each wall and of each side of the tall tower */
+				const bool flag = (h == 3 && ((ax == r && !az) || (az == r && !ax))) || (h == 6 && ((ax == 1 && !az) || (az == 1 && !ax)));
+				if (in && n < BL_KEEP_CELLS)
+					out[n++] = (struct bl_cell){ (int16_t)(x + dx), (int16_t)(y + h), (int16_t)(z + dz), (uint8_t)(!flag ? block : block == BL_REDKEEP ? BL_REDFLAG : BL_KEEPFLAG) };
+			}
+	return n;
+}
+
+/* a house `half` blocks to each side of the middle and from v = -1 to `back`: walls `wall` high with `corner` pillars, a roof, a door, `sign` over the door */
+static int house_cells(struct pcell *o, int half, int back, int wall, int walls, int corner, int roof, int sign)
+{
+	int n = 0;
+	for (int y = 0; y < wall; y++)
+		for (int v = -1; v <= back; v++)
+			for (int u = -half; u <= half; u++) {
+				if (u != -half && u != half && v != -1 && v != back)
+					continue;
+				if (u == 0 && v == -1 && y < 2)
+					continue;                       /* the door */
+				bool c = (u == -half || u == half) && (v == -1 || v == back);
+				o[n++] = (struct pcell){ u, y, v, u == 0 && v == -1 && y == 2 ? sign : c ? corner : walls };
+			}
+	for (int v = -1; v <= back; v++)
+		for (int u = -half; u <= half; u++)
+			o[n++] = (struct pcell){ u, wall, v, roof };
+	return n;
+}
+
 
 /* the cells of a plan, lowest first; how many */
 static int plan_cells(int plan, struct pcell *o)
 {
 	int n = 0;
-	if (plan == BL_PLAN_BARRACKS) {             /* a house of cobble with plank corners and roof, a door in the front, the banner over the door */
-		for (int y = 0; y < 3; y++)
-			for (int v = -1; v <= 2; v++)
-				for (int u = -2; u <= 2; u++) {
-					if (u != -2 && u != 2 && v != -1 && v != 2)
-						continue;
-					if (u == 0 && v == -1 && y < 2)
-						continue;                       /* the door */
-					bool corner = (u == -2 || u == 2) && (v == -1 || v == 2);
-					int b = u == 0 && v == -1 ? BL_BARRACKS : corner ? BL_PLANKS : BL_COBBLE;
-					o[n++] = (struct pcell){ u, y, v, b };
-				}
-		for (int v = -1; v <= 2; v++)
-			for (int u = -2; u <= 2; u++)
-				o[n++] = (struct pcell){ u, 3, v, BL_PLANKS };
+	if (plan == BL_PLAN_BARRACKS) {             /* a hut of cobble with plank corners, a door in the front, the banner on the roof over it */
+		n = house_cells(o, 1, 1, 2, BL_COBBLE, BL_PLANKS, BL_PLANKS, BL_PLANKS);
+		for (int i = 0; i < n; i++)
+			if (o[i].u == 0 && o[i].v == -1 && o[i].y == 2)
+				o[i].block = BL_BARRACKS;
 	} else if (plan == BL_PLAN_TOWER) {         /* four pillars, a platform with the watchpost in its middle, four merlons */
 		for (int y = 0; y < 4; y++)
 			for (int v = -1; v <= 1; v += 2)
@@ -62,6 +115,32 @@ static int plan_cells(int plan, struct pcell *o)
 		for (int y = 0; y < 2; y++)
 			for (int u = -1; u <= 1; u++)
 				o[n++] = (struct pcell){ u, y, 0, BL_COBBLE };
+	} else if (plan == BL_PLAN_SMITHY) {        /* cobble with brick corners and roof */
+		n = house_cells(o, 1, 1, 3, BL_COBBLE, BL_BRICK, BL_BRICK, BL_SMITHY);
+	} else if (plan == BL_PLAN_INFIRMARY) {     /* planks with cobble corners and a plank roof, a red cross over the door and on the roof */
+		n = house_cells(o, 1, 1, 3, BL_PLANKS, BL_COBBLE, BL_PLANKS, BL_INFIRMARY);
+	} else if (plan == BL_PLAN_MAGE) {          /* a slim tower of brick with glass slits and the crystal on top */
+		for (int y = 0; y < 5; y++)
+			for (int v = -1; v <= 1; v++)
+				for (int u = -1; u <= 1; u++) {
+					if (!u && !v)
+						continue;
+					if (u == 0 && v == -1 && y < 2)
+						continue;
+					o[n++] = (struct pcell){ u, y, v, y == 3 && (!u || !v) ? BL_GLASS : BL_BRICK };
+				}
+		for (int v = -1; v <= 1; v++)
+			for (int u = -1; u <= 1; u++)
+				o[n++] = (struct pcell){ u, 5, v, BL_COBBLE };
+		o[n++] = (struct pcell){ 0, 6, 0, BL_MAGE };
+	} else if (plan == BL_PLAN_MINE) {          /* four plank posts, a roof, the winch in its middle */
+		for (int y = 0; y < 3; y++)
+			for (int v = -1; v <= 1; v += 2)
+				for (int u = -1; u <= 1; u += 2)
+					o[n++] = (struct pcell){ u, y, v, BL_PLANKS };
+		for (int v = -1; v <= 1; v++)
+			for (int u = -1; u <= 1; u++)
+				o[n++] = (struct pcell){ u, 3, v, !u && !v ? BL_MINE : BL_COBBLE };
 	} else if (plan == BL_PLAN_GATE) {
 		for (int y = 0; y < 3; y++)
 			for (int u = -1; u <= 1; u++) {

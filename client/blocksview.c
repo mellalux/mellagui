@@ -144,10 +144,12 @@ static void gen_face(int blk, int fk, uint32_t *px)
 			case BL_LAMP:                                /* a glowing block: bright cells with darker seams */
 				c = (x % 8 == 0 || y % 8 == 0) ? tinted(0xc88a2c, tn(x, y, 31, 6)) : tinted(0xffe8a0, tn(x, y, 32, 10));
 				break;
-			case BL_KEEP: {                              /* grey bricks, a golden rim, and on the sides a red shield with a gold cross */
+			case BL_KEEP: case BL_KEEPFLAG: {            /* grey bricks; on the flag's sides a golden rim and a red shield with a gold cross */
 				int row = y / 4;
 				bool mortar = (y % 4 == 3) || ((x + (row & 1) * 4) % 8 == 7);
-				c = mortar ? tinted(0x6a6a72, tn(x, y, 40, 4)) : tinted(0x8e8f98, tn((x + (row & 1) * 4) / 8, row, 41, 10) + tn(x, y, 42, 5));
+				c = mortar ? tinted(0x6a6a72, tn(x, y, 40, 4)) : tinted(0x9a9ba4, tn((x + (row & 1) * 4) / 8, row, 41, 10) + tn(x, y, 42, 5));
+				if (blk == BL_KEEP)
+					break;
 				if (x == 0 || x == TEX - 1 || y == 0 || y == TEX - 1)
 					c = tinted(0xd9a82c, tn(x, y, 43, 6));
 				if (fk == BL_FACE_SIDE) {
@@ -190,10 +192,12 @@ static void gen_face(int blk, int fk, uint32_t *px)
 					c = argb(0, 0, 0, 0);
 				break;
 			}
-			case BL_REDKEEP: {                           /* dark stone with a red rim, and on the sides a long red banner with a black sun */
+			case BL_REDKEEP: case BL_REDFLAG: {          /* dark stone; on the flag's sides a red rim and a long red banner with a black sun */
 				int row = y / 4;
 				bool mortar = (y % 4 == 3) || ((x + (row & 1) * 4) % 8 == 7);
-				c = mortar ? tinted(0x26242a, tn(x, y, 72, 4)) : tinted(0x45414c, tn((x + (row & 1) * 4) / 8, row, 73, 9) + tn(x, y, 74, 5));
+				c = mortar ? tinted(0x26242a, tn(x, y, 72, 4)) : tinted(0x4c4854, tn((x + (row & 1) * 4) / 8, row, 73, 9) + tn(x, y, 74, 5));
+				if (blk == BL_REDKEEP)
+					break;
 				if (x == 0 || x == 15 || y == 0 || y == 15)
 					c = tinted(0x7a1818, tn(x, y, 75, 8));
 				if (fk == BL_FACE_SIDE && x >= 4 && x <= 11 && y >= 1 && y <= 13 && !(y >= 12 && x >= 7 && x <= 8)) {
@@ -218,6 +222,50 @@ static void gen_face(int blk, int fk, uint32_t *px)
 					if (d2 > 60 && d2 < 150)
 						c = tinted(0xe0b030, tn(x, y, 66, 8));
 				}
+				break;
+			}
+			case BL_GOLD: {                              /* stone with fat nuggets of gold */
+				c = tinted(0x7f7f86, tn(x / 2, y / 2, 80, 12) + tn(x, y, 81, 6));
+				uint32_t k = hxy(x / 3 + fk * 7, y / 3, 82) % 5U;
+				if (k < 2 && !((x % 3 == 2) && (y % 3 == 2)))
+					c = tinted((x % 3 == 0 && y % 3 == 0) ? 0xfff2a8 : k ? 0xf2c230 : 0xd89c18, tn(x, y, 83, 8));
+				break;
+			}
+			case BL_SMITHY: {                            /* dark timber with an anvil and sparks; a glowing hearth on top */
+				c = tinted(0x4a3a30, tn(x / 4, y, 84, 8) + tn(x, y, 85, 4));
+				if (fk == BL_FACE_SIDE) {
+					if ((y >= 6 && y <= 7 && x >= 3 && x <= 12) || (y >= 8 && y <= 10 && x >= 6 && x <= 9) || (y >= 11 && y <= 12 && x >= 4 && x <= 11))
+						c = tinted(0xc8ced8, tn(x, y, 86, 8));
+					else if (y < 5 && hxy(x, y, 87) % 9 == 0)
+						c = tinted(0xffa828, 0);
+				} else if (fk == BL_FACE_TOP && x >= 4 && x <= 11 && y >= 4 && y <= 11) {
+					c = tinted(0xe85818, tn(x, y, 88, 30));
+				}
+				break;
+			}
+			case BL_MAGE: {                              /* a violet crystal in a dark frame */
+				int dx = x * 2 - 15, dy = y * 2 - 15, m = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+				c = tinted(0x2a2040, tn(x, y, 89, 6));
+				if (m <= 16)
+					c = tinted(m <= 6 ? 0xf0d8ff : (x + y) % 3 ? 0xa050e8 : 0x7838c0, tn(x, y, 90, 10));
+				break;
+			}
+			case BL_INFIRMARY: {                         /* white boards with a red cross */
+				c = tinted(0xe8e4dc, tn(x / 4, y, 91, 6) - (y % 4 == 3 ? 20 : 0));
+				if ((x >= 6 && x <= 9 && y >= 3 && y <= 12) || (y >= 6 && y <= 9 && x >= 3 && x <= 12))
+					c = tinted(0xd02424, tn(x, y, 92, 6));
+				break;
+			}
+			case BL_MINE: {                              /* a timber frame with a pick and a nugget */
+				c = tinted(0x8a6a40, tn(x / 4, y, 93, 8) + tn(x, y, 94, 4));
+				if (x <= 1 || x >= TEX - 2 || y <= 1 || y >= TEX - 2)
+					c = tinted(0x4a3320, tn(x, y, 95, 6));
+				else if ((x == y && x >= 4 && x <= 11))
+					c = tinted(0x5a4024, 0);
+				else if ((y >= 3 && y <= 4 && x >= 7 && x <= 12) || (x >= 11 && x <= 12 && y >= 3 && y <= 8))
+					c = tinted(0xc8ced8, tn(x, y, 96, 8));
+				else if (x >= 3 && x <= 6 && y >= 10 && y <= 12)
+					c = tinted(0xf2c230, tn(x, y, 97, 10));
 				break;
 			}
 			case BL_COBBLE: {

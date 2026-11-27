@@ -20255,6 +20255,12 @@ class TestBlocks(Base):
                 st.setdefault('rail', {})[int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
             elif f[0] == 'rival':
                 st['rival'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] in ('arms', 'works', 'chief', 'newgame'):
+                st[f[0]] = dict(x.split('=', 1) for x in f[1:] if '=' in x)
+            elif f[0] == 'deposit':
+                st.setdefault('deposits', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'armrow':
+                st.setdefault('armrows', {})[int(f[1])] = {k: int(v) for k, v in (x.split('=') for x in f[2:])}
             elif f[0] == 'guard':
                 st.setdefault('guards', {})[int(f[1])] = dict(x.split('=', 1) for x in f[2:])
             elif f[0] == 'panel':
@@ -20327,6 +20333,21 @@ class TestBlocks(Base):
 
     def pconstraint(self):
         return dict(kv.split('=') for kv in ctl.cmd('pconstraint')[0].split()[1:])
+
+    def test_the_first_start_asks_the_games_name(self):
+        self.start(flat=False, nomode=True)
+        st = self.state()
+        self.assertEqual((st['state']['prompt'], st['newgame']['first'], st['newgame']['survival'], st['world']['file']), ('2', '1', '1', '-'))
+        self.assertEqual([f for f in os.listdir(self.data) if f.endswith('.bl')], [], 'nothing is made before the name')
+        fx, fy, fw = (int(v) for v in st['newgame']['field'].split(','))
+        my, mw, mh = (int(v) for v in st['newgame']['modes'].split(','))
+        self.click_view(fx + mw + 40, my + mh // 2)             # the second mode: free building
+        self.wait(lambda s: s['newgame']['survival'] == '0')
+        self.type_text('zoo')
+        self.tap('enter')
+        st = self.wait(lambda s: s['state']['playing'] == '1')
+        self.assertEqual((st['world']['name'], st['game']['survival'], st['game']['have_keep']), ('zoo', '0', '0'))
+        self.assertTrue(os.path.exists(os.path.join(self.data, 'zoo.bl')))
 
     def test_the_window_opens_with_a_card_and_a_world(self):
         self.start()
@@ -20520,80 +20541,54 @@ class TestBlocks(Base):
     def test_what_he_has_is_listed_in_survival_also_in_the_command_view(self):
         self.start('--give', 'cobble=7,sand=3', survival=True)
         st = self.wait(lambda s: 'stock' in s)
-        self.assertEqual(st['stock']['list'], 'log:0,planks:0,cobble:7,sand:3', 'the wood and the stone always, then what else there is')
+        self.assertEqual(st['stock']['list'], 'log:0,planks:0,cobble:7,gold:0,sand:3', 'the wood and the stone always, then what else there is')
         self.play()
         self.tap('tab')
         st = self.wait(lambda s: s['cmd']['on'] == '1')
-        self.assertEqual(st['stock']['list'], 'log:0,planks:0,cobble:7,sand:3')
+        self.assertEqual(st['stock']['list'], 'log:0,planks:0,cobble:7,gold:0,sand:3')
         out = os.path.join(tmp, 'blocks-stock.ppm')
         self.addCleanup(lambda: os.path.exists(out) and os.unlink(out))
         time.sleep(0.2)
         pic = ctl.dump(out)
         x, y = self.win['x'] + int(st['stock']['x']), self.win['y'] + int(st['stock']['y'])
         self.assertEqual(pic.px(x + 4, y + 20), (43, 48, 59), 'the panel is there, in the colour of the bars')
-        self.tap('g')                                           # (a key of the game, not of the view: creative)
-        st = self.wait(lambda s: s['game']['survival'] == '0')
-        self.assertEqual(st['stock']['list'], 'cobble:7,sand:3', 'in creative: what has been gathered')
 
     def test_creative_with_nothing_gathered_has_no_list(self):
         self.start()
         self.assertNotIn('stock', self.state())
 
-    def test_the_red_banner_comes_when_it_is_asked_for_and_goes_and_stays_with_the_world(self):
-        # prompts: 0 none, 1 pause, 10 the question about the clan
-        self.start('--save', '--no-clock', survival=True)
-        self.assertEqual(self.state()['rival']['state'], '0')
-        self.play()
-        self.tap('k')
-        self.prompt(10)
-        self.assertEqual(self.pconstraint()['active'], 'none', 'it asks first: it changes the world')
-        self.tap('esc')
-        self.prompt(1)
-        self.assertEqual(self.state()['rival']['state'], '0', 'Esc: no camp')
-        self.tap('enter')
-        self.wait(lambda s: s['state']['playing'] == '1')
-        self.tap('k')
-        self.prompt(10)
-        self.tap('enter')
-        st = self.wait(lambda s: s['rival']['state'] == '1' and s['state']['playing'] == '1', timeout=8.0)
+    def test_a_game_has_the_red_banner_its_castle_and_its_captain_and_they_are_saved(self):
+        self.start('--save', '--no-clock', survival=True, rival=True)
+        st = self.state()
         r = st['rival']
-        self.assertEqual((r['on'], r['guards'], r['archer'], r['hp']), ('1', '6', '1', '200.0'))
+        self.assertEqual((r['state'], r['on'], r['guards'], r['archer'], r['hp']), ('1', '1', '6', '1', '200.0'))
         self.assertTrue(70 < float(r['dist']) < 135, 'the camp is far: %s' % r['dist'])
-        self.assertEqual(st['hist']['redkeep'], 3)
-        self.assertGreater(st['hist']['cobble'], 60, 'its wall')
-        self.assertEqual(len(st['guards']), 7)
-        self.tap('k')                                           # off ...
-        self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['guards'] == '0')
-        self.tap('k')                                           # ... and on again, without asking
-        st = self.wait(lambda s: s['rival']['on'] == '1' and s['rival']['guards'] == '6')
-        # the command view: End looks at their camp, the flag of the rail sends them away
+        self.assertGreater(st['hist']['redkeep'], 150, 'a castle')
+        self.assertEqual(st['hist']['redflag'], 8)
+        self.assertEqual((st['chief']['alive'], st['chief']['rgold']), ('1', '20'), 'the Red Captain and their gold')
+        self.assertEqual(len(st['deposits']), 5, 'five deposits of gold')
+        self.play()
+        self.tap('k')                                           # (it switched them off once: nothing does now)
+        time.sleep(0.2)
+        st = self.state()
+        self.assertEqual((st['state']['prompt'], st['rival']['on'], st['rival']['guards']), ('0', '1', '6'))
         self.tap('tab')
         self.wait(lambda s: s['cmd']['on'] == '1')
         self.tap('end')
-        kx, _, kz = (int(v) for v in st['rival']['keep'].split(','))
+        kx, _, kz = (int(v) for v in r['keep'].split(','))
         def at_camp(s):
             fx, _, fz = (float(v) for v in s['cmd']['focus'].split(','))
             return abs(fx - kx) < 2 and abs(fz - kz) < 2
         self.wait(at_camp)
-        self.rail(8)
-        self.wait(lambda s: s['rival']['on'] == '0')
-        self.rail(8)
-        self.wait(lambda s: s['rival']['on'] == '1')
         self.ctrl_tap('s')
         self.wait(lambda s: s['state']['saved'] == '1')
-        self.ctrl_tap('q')
-        for _ in range(60):
-            if self.proc.poll() is not None:
-                break
-            time.sleep(0.05)
-        for _ in range(60):
-            if not any(x['app_id'] == 'mellagui.blocks' for x in ctl.windows()['windows']):
-                break
-            time.sleep(0.05)
-        self.start(flat=False, data=self.data, survival=True)
+        before = self.state()
+        self.quit_game()
+        self.start(flat=False, data=self.data, survival=True, rival=True)
         st = self.state()
         self.assertEqual((st['rival']['state'], st['rival']['on'], st['rival']['keep'], st['rival']['guards']), ('1', '1', r['keep'], '6'))
-        self.assertEqual(st['hist']['redkeep'], 3)
+        self.assertEqual((st['hist']['redkeep'], st['chief']['alive']), (before['hist']['redkeep'], '1'))
+        self.assertEqual({k: (d['x'], d['z']) for k, d in st['deposits'].items()}, {k: (d['x'], d['z']) for k, d in before['deposits'].items()}, 'the same deposits')
 
     def test_a_new_survival_world_has_the_red_banner(self):
         self.start('--no-clock', survival=True, rival=True)
@@ -20616,8 +20611,6 @@ class TestBlocks(Base):
             now = [g for g in s['guards'].values() if g['raider'] == '1']
             return bool(now) and any(abs(float(g['x']) - far[0]) + abs(float(g['z']) - far[1]) > 5 for g in now)
         self.wait(marching, timeout=10.0)
-        self.tap('k')                                           # switched off: the party is gone, too
-        self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['raiders'] == '0')
 
     def test_the_red_banners_workers_supply_the_camp(self):
         self.start(survival=True, rival=True)
@@ -20631,10 +20624,6 @@ class TestBlocks(Base):
             return any(abs(float(w['x']) - at[i][0]) + abs(float(w['z']) - at[i][1]) > 6 for i, w in s.get('rworkers', {}).items() if i in at)
         self.wait(out_of_camp, timeout=15.0)                    # (even in a flat world, with nothing to fell: they forage)
         st = self.wait(lambda s: int(s['rival']['stock']) > 12, timeout=45.0)
-        self.tap('k')                                           # switched off: nobody there
-        self.wait(lambda s: s['rival']['on'] == '0' and s['rival']['workers'] == '0')
-        self.tap('k')
-        self.wait(lambda s: s['rival']['on'] == '1' and s['rival']['workers'] == '4')
 
     def own(self, kind):
         """The game's card window (kind 'card') or panel ('tool'), None when there is none."""
@@ -20789,7 +20778,7 @@ class TestBlocks(Base):
         self.tap('t')
         self.assertEqual(self.S()['clock'], '1')
 
-    LETTERS = dict(a=30, c=46, d=32, e=18, l=38, o=24, r=19, s=31, t=20, w=17, z=44)
+    LETTERS = dict(a=30, c=46, d=32, e=18, g=34, i=23, l=38, n=49, o=24, r=19, s=31, t=20, w=17, z=44)
 
     def type_text(self, text):
         for ch in text:
@@ -20840,6 +20829,9 @@ class TestBlocks(Base):
         # a new world beside it
         self.ctrl_tap('n')
         self.prompt(2)
+        self.type_text('world')
+        self.tap('enter')
+        self.prompt(10)                                         # how to win
         self.tap('enter')
         st = self.wait(lambda s: s['state']['playing'] == '1' and s['world']['name'] == 'world')
         self.assertEqual(st['state']['kind'], '0')
@@ -20933,7 +20925,7 @@ class TestBlocks(Base):
         self.rail(6)
         self.prompt(4)
 
-    def test_f1_lists_the_keys_and_ctrl_n_asks_before_a_new_world(self):
+    def test_f1_lists_the_keys_and_ctrl_n_asks_the_new_games_name(self):
         self.start()
         self.play()
         self.tap('f1')
@@ -20951,7 +20943,16 @@ class TestBlocks(Base):
         self.wait(lambda st: st['state']['prompt'] == '1')
         self.assertEqual(self.S()['kind'], '1', 'Esc cancelled: the same world')
         self.ctrl_tap('n')
-        self.wait(lambda st: st['state']['prompt'] == '2')
+        st = self.wait(lambda st: st['state']['prompt'] == '2')
+        self.assertEqual((st['newgame']['survival'], st['newgame']['first']), ('1', '0'))
+        self.tap('enter')
+        time.sleep(0.2)
+        self.assertEqual(self.S()['prompt'], '2', 'a game has to be given a name')
+        self.type_text('castle')
+        self.tap('enter')
+        st = self.wait(lambda st: st['state']['prompt'] == '10')
+        self.assertEqual((st['world']['name'], st['game']['survival'], st['game']['have_keep']), ('castle', '1', '1'))
+        self.assertTrue(os.path.exists(os.path.join(self.data, 'castle.bl')))
         self.tap('enter')
         s = self.wait(lambda st: st['state']['playing'] == '1')['state']
         self.assertEqual(s['kind'], '0', 'a new world is made from a seed, not flat')
@@ -21071,7 +21072,7 @@ class TestBlocks(Base):
     def put_in_hand(self, block):
         """E opens the palette, a click on the block puts it in the slot in the hand, E goes back to the game."""
         self.tap('e')
-        st = self.wait(lambda s: s['state']['prompt'] == '4' and len(s['pal']) == 17)
+        st = self.wait(lambda s: s['state']['prompt'] == '4' and len(s['pal']) == 22)
         cell = [c for c in st['pal'].values() if c['block'] == block][0]
         ctl.abs(self.win['x'] + cell['x'] + cell['w'] // 2, self.win['y'] + cell['y'] + cell['h'] // 2)
         time.sleep(0.1)
@@ -21090,7 +21091,7 @@ class TestBlocks(Base):
         self.assertEqual(st['state']['playing'], '0')
         self.assertEqual(self.pconstraint()['active'], 'none', 'the pointer is free while the palette is up')
         self.assertEqual([c['block'] for _, c in sorted(st['pal'].items())],
-                         ['grass', 'dirt', 'stone', 'sand', 'log', 'leaves', 'planks', 'glass', 'water', 'brick', 'snow', 'cobble', 'torch', 'lamp', 'barracks', 'gate', 'watchpost'])
+                         ['grass', 'dirt', 'stone', 'sand', 'log', 'leaves', 'planks', 'glass', 'water', 'brick', 'snow', 'cobble', 'torch', 'lamp', 'barracks', 'gate', 'watchpost', 'gold', 'smithy', 'magetower', 'infirmary', 'mine'])
         torch = st['pal'][12]
         ctl.abs(self.win['x'] + torch['x'] + torch['w'] // 2, self.win['y'] + torch['y'] + torch['h'] // 2)
         time.sleep(0.1)
@@ -21304,20 +21305,13 @@ class TestBlocks(Base):
         st = self.state()
         self.assertGreater(float(st['state']['x']), 136.0, 'he got to Tom (through the pond)')
 
-    def test_the_pets_can_be_left_out_and_p_brings_them_back(self):
+    def test_the_pets_can_be_left_out(self):
         self.start()                                          # (--no-pets: no yard, no pond: the world is as it was)
         st = self.state()
         self.assertEqual(st['pets']['on'], '0')
         self.assertNotIn('tom', st)
         self.assertEqual(st['hist']['water'], 0, 'nothing was dug')
         self.assertEqual(st['state']['rev'], '0')
-        self.play()
-        self.tap('p')
-        st = self.wait(lambda s: s['pets']['on'] == '1' and 'tom' in s)
-        self.assertEqual(st['filip']['inwater'], '1', 'a yard near the player, a pond dug beside it, Filip in it')
-        self.assertGreater(st['hist']['water'], 60)
-        self.tap('p')
-        self.assertEqual(self.state()['pets']['on'], '0')
 
     def test_tom_is_in_the_picture_and_not_without_him(self):
         # the player looks at the place where Tom sits (the yard is at +10 in x, Tom in the middle of it), with a narrow view
@@ -21415,21 +21409,20 @@ class TestBlocks(Base):
         self.assertEqual(st['player']['burned'], '1', 'the sun killed it')
         self.assertEqual(st['player']['kills'], '0', 'nobody was hit')
 
-    def test_m_switches_the_goblins_off_and_on_and_they_come_out_at_night(self):
-        self.start('--time', '0', '--goblin', '0,15', mobs=True)
+    def test_the_goblins_of_a_game_come_out_at_night(self):
+        self.start('--time', '0', mobs=True, survival=True)
         self.play()
-        self.assertEqual(self.state()['player']['goblins'], '1')
-        self.tap('m')
-        st = self.state()
-        self.assertEqual((st['player']['mobs'], st['player']['goblins']), ('0', '0'), 'M: no goblins')
-        time.sleep(4.0)
-        self.assertEqual(self.state()['player']['goblins'], '0', 'and none appear')
-        self.tap('m')
-        st = self.wait(lambda s: s['player']['mobs'] == '1' and int(s['player']['spawned']) >= 1, timeout=12.0)
+        st = self.wait(lambda s: int(s['player']['spawned']) >= 1, timeout=12.0)
         self.assertEqual(st['player']['mobs'], '1')
-        self.assertGreaterEqual(int(st['player']['goblins']), 1, 'at night they come out again')
         for m in st['mobs'].values():
-            self.assertTrue(abs(m['y'] - 20.0) < 0.1, 'on the floor')
+            self.assertTrue(abs(m['y'] - 20.0) < 1.5, 'on the ground')
+
+    def test_free_building_has_no_goblins_at_night(self):
+        self.start('--time', '0', mobs=True)
+        self.play()
+        time.sleep(4.0)
+        st = self.state()
+        self.assertEqual((st['player']['mobs'], st['player']['goblins']), ('0', '0'))
 
     def test_a_goblin_is_in_the_picture_and_not_when_they_are_off(self):
         pics = []
@@ -21525,46 +21518,58 @@ class TestBlocks(Base):
         self.tap('x')
         self.assertEqual(self.state()['inv'].get('log'), 1, 'dirt makes nothing and costs nothing')
 
-    def test_survival_has_a_keep_that_cannot_be_broken_and_creative_does_not(self):
+    def test_survival_has_a_castle_that_cannot_be_broken(self):
         self.start('--pitch', '-6', survival=True)
         self.play()
         st = self.state()
         self.assertEqual(st['game']['have_keep'], '1')
         kx, ky, kz = (int(v) for v in st['game']['keep'].split(','))
         sx, sz = float(st['state']['x']), float(st['state']['z'])
-        self.assertTrue(3.9 <= math.hypot(kx + 0.5 - sx, kz + 0.5 - sz) <= 10.0, 'the keep is near where he starts')
-        self.assertEqual(st['hist']['keep'], 3, 'a tower of three')
-        self.assertEqual(float(st['game']['keep_hp']), 60.0)
+        self.assertTrue(8.0 <= math.hypot(kx + 0.5 - sx, kz + 0.5 - sz) <= 20.0, 'the keep is near where he starts')
+        stones, flags = st['hist']['keep'], st['hist']['keepflag']
+        self.assertGreater(stones, 150, 'a castle')
+        self.assertEqual(flags, 8)
+        self.assertEqual(float(st['game']['keep_hp']), 150.0)
+        end = time.time() + 15.0
+        while time.time() < end and self.state().get('aim', {}).get('block') not in ('keep', 'keepflag'):
+            self.hold('w', 0.4)
+        self.assertIn(self.state()['aim']['block'], ('keep', 'keepflag'), 'he walks up to it')
         ctl.button(272, True)
         time.sleep(2.8)
         ctl.button(272, False)
-        self.assertEqual(self.state()['hist']['keep'], 3, 'a hand cannot break it, however long')
+        st = self.state()
+        self.assertEqual((st['hist']['keep'], st['hist']['keepflag']), (stones, flags), 'a hand cannot break it, however long')
 
-    def test_g_switches_between_creative_and_survival_and_the_keep_comes_with_survival(self):
-        self.start()                                           # creative
+    def test_nothing_is_switched_off_and_g_tells_how_to_win(self):
+        self.start()                                           # free building
         self.play()
         st = self.state()
-        self.assertEqual((st['game']['survival'], st['game']['have_keep'], st['hist']['keep']), ('0', '0', 0))
+        self.assertEqual((st['game']['survival'], st['game']['have_keep'], st['hist']['keep'], st['rival']['state'], st['arms']['mask']), ('0', '0', 0, '0', '63'))
         self.tap('g')
-        st = self.wait(lambda s: s['game']['survival'] == '1')
-        self.assertEqual((st['game']['have_keep'], st['hist']['keep']), ('1', 3), 'the keep appears')
-        self.tap('g')
-        st = self.wait(lambda s: s['game']['survival'] == '0')
-        self.assertEqual(st['hist']['keep'], 3, 'it stays in the world')
-        # creative breaks at once
-        ctl.button(272, True)
-        ctl.button(272, False)
-        self.tap('g')
-        self.assertEqual(self.state()['game']['survival'], '1')
-        self.assertEqual(self.state()['game']['keep'], st['game']['keep'], 'the same keep')
+        self.prompt(10)
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '1')
+        for key in ('m', 'k', 'p', 'h'):
+            self.tap(key)
+        time.sleep(0.2)
+        st = self.state()
+        self.assertEqual((st['state']['prompt'], st['game']['survival'], st['player']['mobs'], st['rival']['state']), ('0', '0', '0', '0'))
+        self.tap('q')                                           # the next weapon: all are there in free building
+        self.wait(lambda s: s['arms']['weapon'] == '1')
+        self.tap('r')
+        st = self.wait(lambda s: s['state']['prompt'] == '12' and len(s.get('armrows', {})) == 6)
+        self.tap('5')
+        self.wait(lambda s: s['arms']['weapon'] == '4')
+        self.tap('esc')
+        self.wait(lambda s: s['state']['playing'] == '1')
 
     def test_survival_goblins_pull_the_keep_down_and_the_game_is_over(self):
         # dusk (no goblins appear, none burn): four goblins beyond the keep, the player 15 blocks behind it
         self.start('--time', '17.9', '--goblin', '0,30', '--goblin', '3,30', '--goblin', '-3,30', '--goblin', '0,33', survival=True, mobs=True)
         self.play()
         self.hold('s', 3.0)                                    # (away from the keep: a goblin that is within 8 blocks of him goes for him)
-        st = self.wait(lambda s: float(s['game']['keep_hp']) < 60.0, timeout=20.0)
-        self.assertLess(float(st['game']['keep_hp']), 60.0, 'the goblins went to the keep and hit it')
+        st = self.wait(lambda s: float(s['game']['keep_hp']) < 150.0, timeout=20.0)
+        self.assertLess(float(st['game']['keep_hp']), 150.0, 'the goblins went to the keep and hit it')
         end = time.time() + 40.0
         while time.time() < end:
             st = self.state()
@@ -21573,13 +21578,23 @@ class TestBlocks(Base):
             time.sleep(0.1)
         self.assertEqual(st['state']['prompt'], '6', 'the keep fell: the card')
         self.assertEqual(st['game']['have_keep'], '0')
-        self.assertEqual(st['hist']['keep'], 0, 'its blocks are gone')
-        self.assertEqual(len(st['cbtn']), 1, 'one button: New world')
+        self.assertEqual(st['hist']['keep'] + st['hist']['keepflag'], 0, 'its blocks are gone')
+        self.assertEqual(len(st['cbtn']), 1, 'one button: New game')
         self.tap('esc')
-        self.assertEqual(self.state()['state']['prompt'], '6', 'Esc does not start a new world by accident')
+        self.assertEqual(self.state()['state']['prompt'], '6', 'Esc does not leave the card')
+        self.tap('enter')
+        self.prompt(2)
+        self.tap('esc')                                        # (back to the lost game's card)
+        self.prompt(6)
+        self.tap('enter')
+        self.prompt(2)
+        self.type_text('again')
+        self.tap('enter')
+        self.prompt(10)
         self.tap('enter')
         st = self.wait(lambda s: s['state']['prompt'] == '0' and s['game']['have_keep'] == '1')
-        self.assertEqual((st['hist']['keep'], float(st['game']['keep_hp']), st['inv'] if 'inv' in st else {}), (3, 60.0, {}), 'a new world: a new keep with full hit points, empty pockets')
+        self.assertEqual((float(st['game']['keep_hp']), st['inv'] if 'inv' in st else {}), (150.0, {}), 'a new game: a new keep with full hit points, empty pockets')
+        self.assertGreater(st['hist']['keep'], 150)
 
     def test_survival_nights_are_counted_when_the_sun_is_up_again(self):
         self.start('--clock', '--day-minutes', '0.5', '--time', '17.5', survival=True)         # (a day is 30 s)
@@ -21608,7 +21623,7 @@ class TestBlocks(Base):
         st = self.state()
         self.assertEqual((st['inv'].get('cobble'), st['inv'].get('log')), (7, 2), 'the pockets come back')
         self.assertEqual(st['game']['keep'], before['game']['keep'], 'and the same keep')
-        self.assertEqual(st['hist']['keep'], 3)
+        self.assertEqual(st['hist']['keep'], before['hist']['keep'])
         for w in ctl.windows()['windows']:
             if w['app_id'] == 'mellagui.blocks':
                 self.proc.kill()
@@ -21642,10 +21657,10 @@ class TestBlocks(Base):
         self.assertEqual(st['help']['title'], 'Welcome')
         self.tap('right')
         st = self.wait(lambda s: s['help']['page'] == '1')
-        self.assertEqual(st['help']['title'], 'Moving')
+        self.assertEqual(st['help']['title'], 'Winning')
         self.tap('4')
         st = self.wait(lambda s: s['help']['page'] == '3')
-        self.assertEqual(st['help']['title'], 'Survival')
+        self.assertEqual(st['help']['title'], 'Weapons')
         self.tap('left')
         self.wait(lambda s: s['help']['page'] == '2')
         self.tap('esc')
@@ -21664,7 +21679,7 @@ class TestBlocks(Base):
         ctl.button(272, True)
         ctl.button(272, False)
         st = self.wait(lambda s: s['help']['page'] == '5')
-        self.assertEqual(st['help']['title'], 'The_keep')
+        self.assertEqual(st['help']['title'], 'Buildings')
         x, y, w, h = st['hbtns']['next']
         ctl.abs(self.win['x'] + x + w // 2, self.win['y'] + y + h // 2)
         time.sleep(0.1)
@@ -21873,7 +21888,7 @@ class TestBlocks(Base):
         self.start('--give', 'cobble=40,planks=26', '--soldiers', '0', survival=True)
         self.play()
         st = self.cmd_open()
-        self.assertEqual((st['cmd']['plan'], st['cmd']['sites'], len(st['bar'])), ('-1', '0', 4))
+        self.assertEqual((st['cmd']['plan'], st['cmd']['sites'], len(st['bar'])), ('-1', '0', 8))
         self.tap('v')
         time.sleep(0.2)
         self.assertEqual(self.state()['cmd']['soldiers'], '0', 'no barracks yet')
@@ -21881,19 +21896,19 @@ class TestBlocks(Base):
         self.wait(lambda s: s['cmd']['plan'] == '0')
         self.click_at(170, 20)
         st = self.wait(lambda s: s['cmd']['sites'] == '1')
-        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (20, 10), 'twenty cobble and sixteen planks')
+        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (28, 18), 'twelve cobble and eight planks')
         self.assertEqual(st['cmd']['plan'], '-1', 'one barracks at a time')
         site = list(st['sites'].values())[0]
-        self.assertEqual((site['plan'], site['n']), ('barracks', '60'))
+        self.assertEqual((site['plan'], site['n']), ('barracks', '23'))
         self.assertEqual([w['order'] for w in st['workers'].values()], ['3', '3'], 'both idle workers go to build')
-        st = self.wait(lambda s: int(s['sites'][0]['missing']) < 50 if s.get('sites') else True, timeout=30.0)
+        st = self.wait(lambda s: int(s['sites'][0]['missing']) < 18 if s.get('sites') else True, timeout=30.0)
         st = self.wait(lambda s: s['cmd']['sites'] == '0', timeout=60.0)
         self.assertEqual(st['game']['barracks'], '1')
         self.assertEqual(st['hist']['barracks'], 1)
         st = self.wait(lambda s: [w['order'] for w in s['workers'].values()] == ['0', '0'])      # (they hear of it at their next step)
         self.tap('v')
         st = self.wait(lambda s: s['cmd']['soldiers'] == '1')
-        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (14, 6), 'six cobble and four planks')
+        self.assertEqual((st['inv']['cobble'], st['inv']['planks']), (22, 14), 'six cobble and four planks')
 
     def test_the_bar_and_the_keys_choose_a_plan_and_esc_puts_it_aside_before_it_leaves(self):
         self.start('--workers', '1')
@@ -21979,7 +21994,7 @@ class TestBlocks(Base):
         self.tap('3')
         self.click_at(170, 20)
         self.wait(lambda s: s['cmd']['sites'] == '1')
-        st = self.wait(lambda s: int(s['sites'][0]['missing']) <= 55, timeout=30.0)
+        st = self.wait(lambda s: int(s['sites'][0]['missing']) <= 18, timeout=30.0)
         self.tap('tab')
         self.wait(lambda s: s['cmd']['on'] == '0')
         self.tap('esc')
@@ -21989,7 +22004,7 @@ class TestBlocks(Base):
         self.wait(lambda s: s['state']['saved'] == '1')
         self.quit_game()
         with open(os.path.join(self.data, 'player.conf')) as f:
-            self.assertEqual(len([l for l in f.read().splitlines() if l.startswith('site = 0 60 ')]), 1)
+            self.assertEqual(len([l for l in f.read().splitlines() if l.startswith('site = 0 23 ')]), 1)
         self.start(flat=False, data=self.data)
         st = self.state()
         self.assertEqual(st['cmd']['sites'], '1')
@@ -22139,7 +22154,7 @@ class TestBlocks(Base):
                 n += g > r + 20 and g > b + 20
         return n / total
 
-    def test_the_arm_is_in_the_lower_right_of_the_picture_and_h_hides_the_body(self):
+    def test_the_arm_is_in_the_lower_right_of_the_picture(self):
         self.start('--pitch', '-20', body=True)
         self.play()
         st = self.state()
@@ -22148,11 +22163,6 @@ class TestBlocks(Base):
         with_arm = self.picture()
         self.assertLess(self.greenish(with_arm, w * 3 // 4 - 40, h * 2 // 3, w * 3 // 4 + 60, h - 130), 0.6, 'the arm covers grass at the lower right')
         self.assertGreater(self.greenish(with_arm, w // 4 - 40, h * 2 // 3, w // 4 + 60, h - 130), 0.9, 'and nothing at the lower left')
-        self.tap('h')
-        self.wait(lambda s: s['hero']['on'] == '0')
-        self.assertGreater(self.greenish(self.picture(), w * 3 // 4 - 40, h * 2 // 3, w * 3 // 4 + 60, h - 130), 0.9, 'gone with H')
-        self.tap('h')
-        self.wait(lambda s: s['hero']['on'] == '1')
 
     def test_the_legs_walk_the_arm_swings_and_a_goblin_brings_the_sword_out(self):
         self.start('--time', '17.9', '--pitch', '-60', '--goblin', '0,5', body=True, mobs=True)
@@ -22195,34 +22205,10 @@ class TestBlocks(Base):
         self.assertGreater(near, 0.5, 'never inside the worker')
         self.assertGreater(moved, 0.5, 'he gave way')
 
-    def test_the_hidden_body_is_saved(self):
-        self.start('--save', body=True)
-        self.play()
-        self.tap('h')
-        self.wait(lambda s: s['hero']['on'] == '0')
-        self.ctrl_tap('s')
-        conf = os.path.join(self.data, 'player.conf')
-        end = time.time() + 5.0
-        while time.time() < end and not (os.path.exists(conf) and 'body = 0' in open(conf).read()):
-            time.sleep(0.05)
-        with open(conf) as f:
-            self.assertIn('body = 0', f.read())
-
-    def test_the_goblins_are_a_setting_of_the_world_and_a_bad_goblin_option_is_refused(self):
+    def test_a_bad_goblin_option_is_refused(self):
         p = subprocess.run([self.EXE, '--goblin', '1'], capture_output=True, text=True, timeout=10)
         self.assertEqual(p.returncode, 2)
         self.assertIn('--goblin / --brute want', p.stderr)
-        self.start('--time', '0', '--save', mobs=True)
-        self.play()
-        self.tap('m')                                         # off ...
-        self.ctrl_tap('s')                                    # ... saved
-        conf_path = os.path.join(self.data, 'player.conf')
-        end = time.time() + 5.0
-        while time.time() < end and not os.path.exists(conf_path):          # ('saved' is true at once when nothing was edited: wait for the file)
-            time.sleep(0.05)
-        with open(conf_path) as f:
-            conf = f.read()
-        self.assertIn('mobs = 0', conf, 'the choice is kept in player.conf')
 
     def test_the_yard_the_water_and_the_places_of_the_pets_are_saved(self):
         self.start('--save', pets=True)

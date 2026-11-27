@@ -144,13 +144,22 @@ void bl_hero_set(struct bl_hero *h, const struct bl_world *w, float time_h)
 	const float walk = sinf(h->phase * 6.2831853f) * clamp01(h->stride);
 	const float sw = h->swing > 0.0f ? sinf((1.0f - clamp01(h->swing)) * 3.14159265f) : 0.0f;
 	h->nbody = 0;
+	/* the weapons seen from outside, two boxes each, in the right hand */
+	static const struct part k_held[6][2] = {
+		{ { 0.31f, 0.35f, 0.88f, 1.58f, 0.08f, 0.12f, 0xdde2e8u, P_HAND }, { 0.26f, 0.40f, 0.84f, 0.89f, 0.07f, 0.13f, 0x8a6a30u, P_HAND } },   /* sword */
+		{ { 0.31f, 0.35f, 0.40f, 1.80f, 0.08f, 0.12f, 0x6a4a2au, P_HAND }, { 0.29f, 0.37f, 1.80f, 2.02f, 0.07f, 0.13f, 0xd8dee6u, P_HAND } },   /* spear */
+		{ { 0.31f, 0.35f, 0.70f, 1.45f, 0.08f, 0.12f, 0x6a4a2au, P_HAND }, { 0.23f, 0.43f, 1.45f, 1.68f, -0.04f, 0.24f, 0x7a808au, P_HAND } },  /* war hammer */
+		{ { 0.31f, 0.35f, 0.55f, 1.35f, 0.24f, 0.28f, 0x8a5a2au, P_HAND }, { 0.32f, 0.34f, 0.55f, 1.35f, 0.14f, 0.15f, 0xe8e8e0u, P_HAND } },   /* bow */
+		{ { 0.31f, 0.35f, 0.45f, 1.55f, 0.08f, 0.12f, 0x3a2418u, P_HAND }, { 0.26f, 0.40f, 1.55f, 1.70f, 0.03f, 0.17f, 0xffa020u, P_HAND } },   /* fire staff */
+		{ { 0.29f, 0.38f, 0.74f, 0.86f, 0.10f, 0.52f, 0x9aa2aeu, P_HAND }, { 0.30f, 0.37f, 0.76f, 0.84f, 0.52f, 0.58f, 0xff2020u, P_HAND } },   /* laser */
+	};
+	const int wp = h->weapon >= 0 && h->weapon < 6 ? h->weapon : 0;
 	for (int k = 0; k < N_PARTS + 2; k++) {
 		struct part p;
 		if (k < N_PARTS) {
 			p = k_hero[k];
-		} else if (h->sword) {                                   /* what he holds, seen from outside: the blade and its guard ... */
-			p = k == N_PARTS ? (struct part){ 0.31f, 0.35f, 0.88f, 1.58f, 0.08f, 0.12f, 0xdde2e8u, P_HAND }
-			                 : (struct part){ 0.26f, 0.40f, 0.84f, 0.89f, 0.07f, 0.13f, 0x8a6a30u, P_HAND };
+		} else if (h->sword) {
+			p = k_held[wp][k - N_PARTS];
 		} else if (h->held > 0 && k == N_PARTS) {                /* ... or the block */
 			p = (struct part){ 0.25f, 0.43f, 0.70f, 0.88f, 0.07f, 0.25f, bl_block_color(h->held), P_HAND };
 		} else {
@@ -199,7 +208,25 @@ void bl_hero_set(struct bl_hero *h, const struct bl_world *w, float time_h)
 	into_arm(h, h->vo);
 	add_arm(h, -0.062f, 0.062f, -0.062f, 0.062f, -0.45f, -0.02f, TUNIC, 0);         /* the sleeve */
 	add_arm(h, -0.050f, 0.050f, -0.050f, 0.050f, -0.02f, 0.17f, SKIN, 0);           /* the forearm and the hand */
-	if (h->sword) {
+	if (h->sword && wp == 1) {                                                          /* spear */
+		add_arm(h, -0.012f, 0.012f, -0.20f, 0.62f, 0.108f, 0.132f, 0x7a5428u, 0);
+		add_arm(h, -0.028f, 0.028f, 0.62f, 0.74f, 0.104f, 0.136f, 0xdde2e8u, 0);
+	} else if (h->sword && wp == 2) {                                                   /* war hammer */
+		add_arm(h, -0.016f, 0.016f, -0.08f, 0.36f, 0.108f, 0.14f, 0x7a5428u, 0);
+		add_arm(h, -0.085f, 0.085f, 0.36f, 0.48f, 0.07f, 0.19f, 0x8a929cu, 0);
+	} else if (h->sword && wp == 3) {                                                   /* bow */
+		add_arm(h, -0.012f, 0.012f, -0.16f, 0.40f, 0.20f, 0.225f, 0x8a5a2au, 0);
+		add_arm(h, -0.003f, 0.003f, -0.16f, 0.40f, 0.10f, 0.106f, 0xe8e8e0u, 0);
+		add_arm(h, -0.005f, 0.005f, 0.11f, 0.125f, 0.10f, 0.40f, 0xc8b070u, 0);
+	} else if (h->sword && wp == 4) {                                                   /* fire staff */
+		add_arm(h, -0.014f, 0.014f, -0.18f, 0.40f, 0.108f, 0.136f, 0x3a2418u, 0);
+		add_arm(h, -0.040f, 0.040f, 0.40f, 0.49f, 0.085f, 0.165f, 0xffa020u, -1);
+		add_arm(h, -0.018f, 0.018f, 0.49f, 0.53f, 0.105f, 0.14f, 0xffe060u, -1);
+	} else if (h->sword && wp == 5) {                                                   /* laser */
+		add_arm(h, -0.030f, 0.030f, -0.01f, 0.09f, 0.11f, 0.15f, 0x30343cu, 0);
+		add_arm(h, -0.040f, 0.040f, 0.09f, 0.18f, 0.10f, 0.40f, 0x9aa2aeu, 0);
+		add_arm(h, -0.018f, 0.018f, 0.115f, 0.155f, 0.40f, 0.46f, 0xff2020u, -1);
+	} else if (h->sword) {
 		add_arm(h, -0.014f, 0.014f, -0.07f, 0.11f, 0.11f, 0.14f, 0x4a3320u, 0);     /* the grip */
 		add_arm(h, -0.075f, 0.075f, 0.11f, 0.135f, 0.095f, 0.155f, 0xb08a3au, 0);   /* the guard */
 		add_arm(h, -0.012f, 0.012f, 0.135f, 0.52f, 0.108f, 0.142f, 0xdde2e8u, 0);   /* the blade */
@@ -257,7 +284,7 @@ static void lit_colour(const struct bl_hero *h, uint32_t c, float shade, float r
 bool bl_hero_ray(const struct bl_hero *h, const float o[3], const float d[3], float tmax, float rgb[3], float *t)
 {
 	/* a cheap no: nothing of him is above `top` over his feet (in the first person that is the chest, under the eyes) or further than 0.75 sideways */
-	const float top = h->first ? BL_HERO_CHEST + 0.01f : 1.9f;
+	const float top = h->first ? BL_HERO_CHEST + 0.01f : 2.1f;
 	if (o[1] > h->y + top && d[1] >= 0.0f)
 		return false;
 	float wlo[3] = { h->x - 0.75f, h->y - 0.01f, h->z - 0.75f }, whi[3] = { h->x + 0.75f, h->y + top, h->z + 0.75f }, tt;

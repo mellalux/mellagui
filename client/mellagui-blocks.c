@@ -88,8 +88,18 @@ enum {
 #define MAX_HP 20.0f                                        /* ten hearts, two hit points each */
 #define SWORD_SHOWN 7.0f                                    /* a goblin this near: the sword is in the hand */
 #define SWORD_MS 400                                        /* the least time between two blows */
-#define KEEP_HP 60.0f                                       /* what the keep can take: a goblin's blow is 2 */
-#define KEEP_H 3                                            /* it is a tower of three blocks */
+#define KEEP_HP 150.0f                                      /* what the keep can take: a goblin's blow is 2 */
+#define KEEP_GOLD 20                                        /* what a new keep costs, when one has fallen: whoever cannot pay it has lost */
+#define KEEP_BACK 30.0f                                     /* seconds until the player's stands again ... */
+#define RIVAL_BACK 45.0f                                    /* ... and the Red Banner's */
+#define RIVAL_GOLD 20                                       /* the gold a new camp has ... */
+#define RIVAL_GOLD_MAX 60                                   /* ... and the most it keeps */
+#define CHIEF_BACK 90.0f                                    /* seconds until their chief is back after he has fallen */
+#define DEPOSITS 5                                          /* gold: one deposit near each side and three between them */
+#define MINE_EVERY 10.0f                                    /* seconds between two pieces a mine takes ... */
+#define MINE_RANGE 6                                        /* ... of the gold this near it */
+#define HEAL_RANGE 10.0f                                    /* this near an infirmary the player's own mend */
+#define SPECIAL_MAX 8
 #define FAST_MS 15.0
 
 #define RIVAL_HP 200.0f                                     /* what the Red Banner's keep can take: a blow of the sword takes 3, of a soldier 4 */
@@ -105,6 +115,7 @@ enum {
 #define RIVAL_WORKER_EVERY 90.0f                            /* seconds until a worker of theirs who is gone is replaced */
 #define CAMP_CHECK 5.0f                                     /* how often the camp looks over its buildings and starts the next one */
 #define RIVAL_NAME "Red Banner"
+#define CHIEF_NAME "Red Captain"
 #define RAID_FIRST 300.0f                                   /* seconds of play by day until their first raiding party sets out in survival (time to get soldiers) ... */
 #define RAID_FIRST_CREATIVE 120.0f                          /* ... in creative, where nothing has to be gathered ... */
 #define RAID_PAUSE 240.0f                                   /* ... and from the end of one until the next */
@@ -117,15 +128,15 @@ enum { CAMP_TOWER, CAMP_HOUSE, CAMP_TOWER2, CAMP_TOWER3, CAMP_BUILDINGS };
 static const struct {
 	const char *name;
 	int cost, dx, dz;                                       /* (a tower's middle, from their keep) */
-} k_camp[CAMP_BUILDINGS] = { { "watchtower", 20, -3, -3 }, { "longhouse", 30, 0, 0 }, { "watchtower", 20, 3, 3 }, { "watchtower", 20, 3, -3 } };
+} k_camp[CAMP_BUILDINGS] = { { "watchtower", 20, -7, -7 }, { "longhouse", 30, 0, 0 }, { "watchtower", 20, 7, 7 }, { "watchtower", 20, 7, -7 } };
 
 #define PANEL_W 340                                          /* the panel of text beside the window (I) */
-#define PANEL_H 600
+#define PANEL_H 640
 #define LOG_N 24                                            /* the messages it remembers */
 
 #define N_SFX 33                                            /* the sounds of k_sfx */
 
-enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE, P_CLAN, P_WON };
+enum prompt { P_NONE, P_PAUSE, P_NEW, P_HELP, P_PALETTE, P_DEAD, P_LOST, P_OPEN, P_SAVEAS, P_REPLACE, P_GOAL, P_WON, P_ARMS };
 
 struct app {
 	struct wlhelp help;                                     /* the pages of F1 */
@@ -146,6 +157,28 @@ struct app {
 	char last_world[1024];                                  /* player.conf's `world`: the file that was open the last time */
 	int cli_clock;                                          /* what the command line said holds for every world of this run: the clock (-1 = nothing said) ... */
 	bool cli_no_pets, cli_no_mobs, cli_no_save;             /* ... and no pets, no goblins, nothing saved by itself */
+	bool cli_goblins;                                       /* --goblin / --brute: they are there in a free world, too */
+	char gname[64];                                         /* the card of a new game: its name ... */
+	bool new_survival;                                      /* ... a game (else free building) ... */
+	bool new_first;                                         /* ... and there is no world to go back to */
+	uint32_t arms;                                          /* the weapons he has, bit 1 << BL_WP_* */
+	int weapon;                                             /* the one in his hand */
+	int charges[BL_WP_COUNT];                               /* shots left of the gold that was paid into the fire staff and the laser */
+	int64_t weapon_until;                                   /* the weapon is shown until this (just chosen) */
+	bool keep_down;                                         /* his keep has fallen and a new one is on its way ... */
+	float keep_back;                                        /* ... in this many seconds */
+	int ndeposits;
+	int deposit[BL_DEPOSITS_MAX][3];                        /* where gold lies: x, the ground, z */
+	int ore[BL_DEPOSITS_MAX];                               /* the pieces that are left of each (counted once a second) */
+	int nsmithy, nmage, ninfirm, nmine;                     /* the special buildings (looked for once a second) */
+	int infirm[SPECIAL_MAX][3], mine[SPECIAL_MAX][3];
+	float look_t, mine_t;
+	float rkeep_back;                                       /* their keep has fallen: seconds until it stands again (0 = it stands) */
+	int rgold;                                              /* their gold */
+	uint32_t chief_arms;                                    /* the weapons of their chief */
+	float chief_t, chief_hp;                                /* seconds until he is there again; what the file said of him */
+	float chief_at[3];
+	bool chief_saved, chief_was;                            /* the file had him about; he was about at the last step */
 	enum prompt back;                                       /* where Cancel of the new / open / save as card goes */
 	char field[1024];                                       /* the path in the open / save as card ... */
 	char target[1024];                                      /* ... the file it is about to replace ... */
@@ -346,9 +379,10 @@ static bool hand_ok(int b)
 	return b > BL_AIR && b < BL_COUNT && b != BL_BEDROCK && !(b >= BL_FLOW1 && b <= BL_FLOW7);
 }
 
-#define PAL_N 17
-#define PAL_COLS 7
-static const int k_palette[PAL_N] = { BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS, BL_WATER, BL_BRICK, BL_SNOW, BL_COBBLE, BL_TORCH, BL_LAMP, BL_BARRACKS, BL_GATE, BL_TOWERPOST };
+#define PAL_N 22
+#define PAL_COLS 8
+static const int k_palette[PAL_N] = { BL_GRASS, BL_DIRT, BL_STONE, BL_SAND, BL_LOG, BL_LEAVES, BL_PLANKS, BL_GLASS, BL_WATER, BL_BRICK, BL_SNOW, BL_COBBLE, BL_TORCH, BL_LAMP, BL_BARRACKS, BL_GATE, BL_TOWERPOST,
+	                                      BL_GOLD, BL_SMITHY, BL_MAGE, BL_INFIRMARY, BL_MINE };
 
 static int hand_block(const struct app *a)
 {
@@ -499,7 +533,7 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 		while (*v == ' ')
 			v++;
 		double d = strtod(v, NULL);
-		if (!prefs && (!strcmp(k, "fov") || !strcmp(k, "sensitivity") || !strcmp(k, "sound") || !strcmp(k, "body") || !strcmp(k, "panel")))
+		if (!prefs && (!strcmp(k, "fov") || !strcmp(k, "sensitivity") || !strcmp(k, "sound") || !strcmp(k, "panel")))
 			continue;
 		if (!strcmp(k, "world")) {
 			v[strcspn(v, "\r\n")] = 0;
@@ -509,8 +543,8 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 			float hp;
 			if (sscanf(v, "%d %d %d %d %d %f %d %d", &state, &on, &x, &y, &z, &hp, &guards, &archer) == 8 && state >= 1 && state <= 2 && x > 0 && y > 0 && z > 0 &&
 			    x < BL_MAX_SIZE && z < BL_MAX_SIZE && y < BL_MAX_H && hp >= 0.0f && hp <= RIVAL_HP && guards >= 0 && guards <= BL_GUARD_MAX && archer >= 0 && archer < 1 << CAMP_BUILDINGS) {
+				(void)on;                                   /* (a camp could once be switched off) */
 				a->rival = state;
-				a->rival_on = on != 0 && state == 1;
 				a->rkeep[0] = x;
 				a->rkeep[1] = y;
 				a->rkeep[2] = z;
@@ -535,6 +569,46 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 				a->raid_t = t;
 				a->nraiders_conf = parse_units(v + used, a->raider_conf, BL_RAIDER_MAX);
 			}
+		} else if (with_player && !strcmp(k, "gold")) {
+			float at[BL_DEPOSITS_MAX][3];
+			int n = parse_units(v, at, BL_DEPOSITS_MAX);
+			a->ndeposits = 0;
+			for (int i = 0; i < n; i++)
+				if (at[i][0] >= 1 && at[i][1] >= 1 && at[i][2] >= 1 && at[i][0] < BL_MAX_SIZE && at[i][1] < BL_MAX_H && at[i][2] < BL_MAX_SIZE) {
+					for (int c = 0; c < 3; c++)
+						a->deposit[a->ndeposits][c] = (int)at[i][c];
+					a->ndeposits++;
+				}
+		} else if (with_player && !strcmp(k, "arms")) {
+			unsigned mask;
+			int wp, fire, laser;
+			if (sscanf(v, "%u %d %d %d", &mask, &wp, &fire, &laser) == 4 && mask < 1u << BL_WP_COUNT && wp >= 0 && wp < BL_WP_COUNT && fire >= 0 && fire < 1000 && laser >= 0 && laser < 1000) {
+				a->arms = mask | 1u << BL_WP_SWORD;
+				a->weapon = a->arms & 1u << wp ? wp : BL_WP_SWORD;
+				a->charges[BL_WP_FIRE] = fire;
+				a->charges[BL_WP_LASER] = laser;
+			}
+		} else if (with_player && !strcmp(k, "keep_back") && d > 0 && d <= KEEP_BACK) {
+			a->keep_down = true;
+			a->keep_back = (float)d;
+		} else if (with_player && !strcmp(k, "rkeep_back") && d > 0 && d <= RIVAL_BACK) {
+			a->rkeep_back = (float)d;
+		} else if (with_player && !strcmp(k, "rgold") && d >= 0 && d <= RIVAL_GOLD_MAX) {
+			a->rgold = (int)d;
+		} else if (with_player && !strcmp(k, "chief")) {
+			unsigned mask;
+			int alive;
+			float t, hp, x, y, z;
+			if (sscanf(v, "%u %d %f %f %f %f %f", &mask, &alive, &t, &hp, &x, &y, &z) == 7 && mask < 1u << BL_WP_COUNT && t >= 0 && t <= CHIEF_BACK && hp >= 0 && hp <= BL_CHIEF_HP &&
+			    x >= 0 && x < BL_MAX_SIZE && y >= 0 && y < 2 * BL_MAX_H && z >= 0 && z < BL_MAX_SIZE) {
+				a->chief_arms = mask | 1u << BL_WP_SWORD;
+				a->chief_saved = alive != 0 && hp > 0;
+				a->chief_t = t;
+				a->chief_hp = hp;
+				a->chief_at[0] = x;
+				a->chief_at[1] = y;
+				a->chief_at[2] = z;
+			}
 		} else if (!strcmp(k, "fov") && d >= 40 && d <= 120)
 			a->fov = (float)(d * M_PI / 180.0);
 		else if (!strcmp(k, "sensitivity") && d >= 0.0005 && d <= 0.02)
@@ -543,12 +617,6 @@ static void conf_read(struct app *a, FILE *f, bool with_player, bool prefs)
 			a->clockm = (int)d;
 		else if (!strcmp(k, "sound") && (d == 0 || d == 1))
 			a->sound_on = d != 0;
-		else if (!strcmp(k, "pets") && (d == 0 || d == 1))
-			a->pets_on = d != 0;
-		else if (!strcmp(k, "mobs") && (d == 0 || d == 1))
-			a->mobs_on = d != 0;
-		else if (!strcmp(k, "body") && (d == 0 || d == 1))
-			a->body = d != 0;
 		else if (!strcmp(k, "panel") && (d == 0 || d == 1))
 			a->panel = d != 0;
 		else if (with_player && !strcmp(k, "survival") && (d == 0 || d == 1)) {
@@ -668,12 +736,21 @@ static int rival_archers(const struct app *a)
 /* everything about the game as it is now, as lines conf_read understands */
 static void conf_write(const struct app *a, FILE *f)
 {
-	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\npets = %d\npet_t = %.2f\nmobs = %d\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
-	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on, a->pets_on, a->pet_t, a->mobs_on);
+	fprintf(f, "x = %.3f\ny = %.3f\nz = %.3f\nyaw = %.4f\npitch = %.4f\ntime = %.3f\nflying = %d\nslot = %d\nclock = %d\nsound = %d\npet_t = %.2f\n", a->pl.x, a->pl.y, a->pl.z, a->pl.yaw,
+	        a->pl.pitch, a->time_h, a->pl.flying, a->slot + 1, a->clockm, a->sound_on, a->pet_t);
+	fprintf(f, "arms = %u %d %d %d\n", a->arms, a->weapon, a->charges[BL_WP_FIRE], a->charges[BL_WP_LASER]);
+	if (a->keep_down)
+		fprintf(f, "keep_back = %.1f\n", fmaxf(a->keep_back, 0.1f));
+	if (a->ndeposits) {
+		fprintf(f, "gold = ");
+		for (int i = 0; i < a->ndeposits; i++)
+			fprintf(f, "%s%d:%d:%d", i ? "," : "", a->deposit[i][0], a->deposit[i][1], a->deposit[i][2]);
+		fprintf(f, "\n");
+	}
 	if (a->pets.placed)
 		fprintf(f, "yard_x = %.2f\nyard_z = %.2f\ntom_x = %.3f\ntom_y = %.3f\ntom_z = %.3f\nfilip_x = %.3f\nfilip_y = %.3f\nfilip_z = %.3f\n", a->pets.yard[0], a->pets.yard[2],
 		        a->pets.tom.x, a->pets.tom.y, a->pets.tom.z, a->pets.filip.x, a->pets.filip.y, a->pets.filip.z);
-	fprintf(f, "survival = %d\nnights = %d\nkills = %d\nbody = %d\npanel = %d\n", a->survival, a->nights, a->kills, a->body, a->panel);
+	fprintf(f, "survival = %d\nnights = %d\nkills = %d\npanel = %d\n", a->survival, a->nights, a->kills, a->panel);
 	if (a->have_keep)
 		fprintf(f, "keep_x = %d\nkeep_y = %d\nkeep_z = %d\nkeep_hp = %.1f\n", a->keep[0], a->keep[1], a->keep[2], a->keep_hp);
 	fprintf(f, "workers = ");
@@ -710,14 +787,20 @@ static void conf_write(const struct app *a, FILE *f)
 			hands = bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER);
 		}
 		fprintf(f, "\nrival = %d %d %d %d %d %.1f %d %d", a->rival, a->rival_on, a->rkeep[0], a->rkeep[1], a->rkeep[2], a->rhp, guards, archers);
-		if (a->rival == 1)
-			fprintf(f, "\nsupply = %d %d %d %d", a->rstock, a->rbuilt, a->rsite, hands);
+		if (a->rival == 1) {
+			const int ci = a->rival_on ? bl_mobs_chief(&a->mobs) : -1;
+			const struct bl_mob *c = ci >= 0 ? &a->mobs.mob[ci] : NULL;
+			fprintf(f, "\nsupply = %d %d %d %d\nrgold = %d", a->rstock, a->rbuilt, a->rsite, hands, a->rgold);
+			fprintf(f, "\nchief = %u %d %.1f %.1f %.2f %.2f %.2f", a->chief_arms, c != NULL, a->chief_t, c ? c->hp : 0.0f, c ? c->x : 0.0f, c ? c->y : 0.0f, c ? c->z : 0.0f);
+			if (a->rkeep_back > 0.0f)
+				fprintf(f, "\nrkeep_back = %.1f", a->rkeep_back);
+		}
 		if (a->rival == 1) {                                    /* the raids so far, the time to the next, and the men who are out (not those on their way home) */
 			fprintf(f, "\nraid = %d %.1f ", a->raids, fmaxf(a->raid_t, 0.0f));     /* (while one is out it has run under 0) */
 			bool first = true;
 			for (int i = 0; i < BL_MOBS_MAX; i++) {
 				const struct bl_mob *m = &a->mobs.mob[i];
-				if (m->alive && m->raider && !m->retreat) {
+				if (m->alive && m->kind == BL_MOB_GUARD && m->raider && !m->retreat) {
 					fprintf(f, "%s%.2f:%.2f:%.2f", first ? "" : ",", m->x, m->y, m->z);
 					first = false;
 				}
@@ -1008,6 +1091,7 @@ static void mobs_setup(struct app *a)
 {
 	bl_mobs_init(&a->mobs, a->world->seed);
 	a->mobs.enabled = a->mobs_on;
+	a->chief_was = false;
 	a->hp = MAX_HP;
 	a->hurt_t = a->hit_t = 0.0f;
 	a->regen_t = 0.0f;
@@ -1072,51 +1156,257 @@ static bool craft_hand(struct app *a)
 	return true;
 }
 
-/* the keep: three blocks high on open ground 4 to 9 blocks from (cx, cz), the first place found going round from straight ahead (+z) */
-static bool keep_place(struct app *a, float cx, float cz)
+/* the height of the ground at (x, z): the top block that is not part of a tree */
+static int ground_at(const struct bl_world *w, int x, int z)
 {
-	static const int rings[] = { 6, 7, 5, 8, 9, 4 };
-	struct bl_world *w = a->world;
-	for (size_t ri = 0; ri < sizeof rings / sizeof rings[0]; ri++)
-		for (int k = 0; k < 8; k++) {
-			float ang = (float)k * 0.785398f;
-			int x = (int)floorf(cx + sinf(ang) * (float)rings[ri]), z = (int)floorf(cz + cosf(ang) * (float)rings[ri]);
-			if (x < 3 || z < 3 || x >= w->w - 3 || z >= w->d - 3)
-				continue;
-			int top = bl_top(w, x, z);
-			if (top < 1 || top + KEEP_H + 1 >= w->h)
-				continue;
-			bool ok = !bl_water(bl_get(w, x, top, z));
-			for (int i = 1; i <= KEEP_H && ok; i++)
-				ok = bl_get(w, x, top + i, z) == BL_AIR;
-			if (!ok)
-				continue;
-			for (int i = 1; i <= KEEP_H; i++)
-				bl_set(w, x, top + i, z, BL_KEEP);
-			a->keep[0] = x;
-			a->keep[1] = top + 1;
-			a->keep[2] = z;
-			a->have_keep = true;
+	for (int y = w->h - 2; y > 0; y--) {
+		int b = bl_get(w, x, y, z);
+		if (b != BL_AIR && b != BL_LOG && b != BL_LEAVES && !bl_water(b) && b != BL_TORCH)
+			return y;
+	}
+	return 0;
+}
+
+/* is there something a hand has made (or a keep) in this column from y0 to y1? */
+static bool column_made(const struct bl_world *w, int x, int y0, int y1, int z)
+{
+	for (int y = y0; y <= y1; y++) {
+		int b = bl_get(w, x, y, z);
+		if (bl_siege_hp(b) > 0 || bl_own_keep(b) || bl_red_keep(b))
 			return true;
-		}
+	}
 	return false;
 }
 
-/* the goblins know where the keep is, and only in survival */
-static void keep_sync(struct app *a)
+/* The castle: what is in its way is cleared, what is missing under it is filled with its own stone (so it cannot be dug under), and its cells are set. */
+static void keep_build(struct app *a, const int at[3], int block)
 {
-	bl_mobs_set_keep(&a->mobs, a->survival && a->have_keep, (float)a->keep[0] + 0.5f, (float)a->keep[1], (float)a->keep[2] + 0.5f);
+	struct bl_world *w = a->world;
+	for (int dz = -BL_KEEP_R; dz <= BL_KEEP_R; dz++)
+		for (int dx = -BL_KEEP_R; dx <= BL_KEEP_R; dx++) {
+			for (int y = at[1]; y < w->h - 2 && y < at[1] + BL_KEEP_TALL + 2; y++)
+				if (bl_get(w, at[0] + dx, y, at[2] + dz) != BL_AIR)
+					bl_set(w, at[0] + dx, y, at[2] + dz, BL_AIR);
+			for (int y = at[1] - 1; y > 1; y--) {
+				int b = bl_get(w, at[0] + dx, y, at[2] + dz);
+				if (b != BL_AIR && !bl_water(b) && b != BL_LEAVES && b != BL_LOG)
+					break;
+				bl_set(w, at[0] + dx, y, at[2] + dz, block);
+			}
+		}
+	struct bl_cell c[BL_KEEP_CELLS];
+	const int n = bl_keep_cells(c, at[0], at[1], at[2], block);
+	for (int i = 0; i < n; i++)
+		bl_set(w, c[i].x, c[i].y, c[i].z, c[i].block);
 }
 
-/* In survival there is a keep: the one the world has (its blocks are in the world), else a new one near (cx, cz) with all its hit points. */
+/* it falls: every block of it goes, rubble stays on its floor */
+static void keep_remove(struct app *a, const int at[3], int block)
+{
+	struct bl_cell c[BL_KEEP_CELLS];
+	const int n = bl_keep_cells(c, at[0], at[1], at[2], block);
+	for (int i = 0; i < n; i++)
+		if (bl_get(a->world, c[i].x, c[i].y, c[i].z) == c[i].block)
+			bl_set(a->world, c[i].x, c[i].y, c[i].z, c[i].y == at[1] && (c[i].x * 7 + c[i].z * 3) % 4 == 0 ? BL_COBBLE : BL_AIR);
+}
+
+/* The keep's place: a square of open ground 9 to 40 blocks from (cx, cz), as level as there is, not where the player stands or appears; the nearest good one. */
+static bool keep_place(struct app *a, float cx, float cz)
+{
+	struct bl_world *w = a->world;
+	float spawn[3];
+	bl_spawn(w, spawn);
+	float best = 1e9f;
+	int at[3] = { 0 };
+	for (int r = 11; r <= 40 && best > (float)r; r++)
+		for (int k = 0; k < 24; k++) {
+			const float ang = (float)k * 6.2831853f / 24.0f;
+			const int x = (int)floorf(cx + sinf(ang) * (float)r), z = (int)floorf(cz + cosf(ang) * (float)r);
+			if (x < BL_KEEP_R + 3 || z < BL_KEEP_R + 3 || x >= w->w - BL_KEEP_R - 3 || z >= w->d - BL_KEEP_R - 3)
+				continue;
+			if (hypotf((float)x - a->pl.x, (float)z - a->pl.z) < 8.0f || hypotf((float)x - spawn[0], (float)z - spawn[2]) < 8.0f)
+				continue;
+			int lo = 1000, hi = 0, wet = 0, sum = 0;
+			bool ok = true;
+			for (int dz = -BL_KEEP_R; ok && dz <= BL_KEEP_R; dz++)
+				for (int dx = -BL_KEEP_R; ok && dx <= BL_KEEP_R; dx++) {
+					const int g = ground_at(w, x + dx, z + dz);
+					wet += bl_water(bl_get(w, x + dx, g + 1, z + dz));
+					lo = g < lo ? g : lo;
+					hi = g > hi ? g : hi;
+					sum += g;
+					ok = !column_made(w, x + dx, g - 2, g + 6, z + dz);
+				}
+			const int cells = (2 * BL_KEEP_R + 1) * (2 * BL_KEEP_R + 1), level = (sum + cells / 2) / cells + 1;
+			if (!ok || wet > cells / 5 || hi - lo > 9 || level < 3 || level + BL_KEEP_TALL + 2 >= w->h)
+				continue;
+			const float score = (float)r + (float)(hi - lo) * 6.0f + (float)wet * 4.0f + (1.0f - cosf(ang)) * 8.0f;     /* (ahead of him, if it can be) */
+			if (score < best) {
+				best = score;
+				at[0] = x;
+				at[1] = level;
+				at[2] = z;
+			}
+		}
+	if (best >= 1e9f)
+		return false;
+	keep_build(a, at, BL_KEEP);
+	memcpy(a->keep, at, sizeof a->keep);
+	a->have_keep = true;
+	return true;
+}
+
+/* the enemies know where the keep is, and only in a game, while it stands */
+static void keep_sync(struct app *a)
+{
+	bl_mobs_set_keep(&a->mobs, a->survival && a->have_keep && !a->keep_down, (float)a->keep[0] + 0.5f, (float)a->keep[1], (float)a->keep[2] + 0.5f);
+}
+
+/* In a game there is a keep: the one the world has (its blocks are in the world), else a new one near (cx, cz) with all its hit points. A keep of the old kind
+ * (a tower of three blocks) is built anew as a castle there or nearby. */
 static void ensure_keep(struct app *a, float cx, float cz)
 {
-	if (a->survival && !(a->have_keep && bl_get(a->world, a->keep[0], a->keep[1], a->keep[2]) == BL_KEEP)) {
-		a->have_keep = false;
-		if (keep_place(a, cx, cz))
-			a->keep_hp = KEEP_HP;
+	if (a->survival && !a->keep_down) {
+		const bool there = a->have_keep && bl_get(a->world, a->keep[0], a->keep[1], a->keep[2]) == BL_KEEP;
+		if (there && bl_get(a->world, a->keep[0] + BL_KEEP_R, a->keep[1], a->keep[2]) != BL_KEEP) {
+			const float kx = (float)a->keep[0], kz = (float)a->keep[2], hp = a->keep_hp;
+			for (int i = 0; i < 3; i++)
+				if (bl_get(a->world, a->keep[0], a->keep[1] + i, a->keep[2]) == BL_KEEP)
+					bl_set(a->world, a->keep[0], a->keep[1] + i, a->keep[2], BL_AIR);
+			a->have_keep = keep_place(a, kx, kz);
+			a->keep_hp = hp;
+		} else if (!there) {
+			a->have_keep = false;
+			if (keep_place(a, cx, cz))
+				a->keep_hp = KEEP_HP;
+		}
 	}
 	keep_sync(a);
+}
+
+/* ---- gold: a few deposits, and no more than that ---- */
+
+/* a deposit `rmin` to `rmax` blocks from (cx, cz): an outcrop of gold ore on dry ground, away from what has been made */
+static bool gold_place(struct app *a, float cx, float cz, float rmin, float rmax)
+{
+	struct bl_world *w = a->world;
+	if (a->ndeposits >= BL_DEPOSITS_MAX)
+		return false;
+	uint32_t k = w->seed * 2654435761u + (uint32_t)a->ndeposits * 40503u + 7u;
+	for (int tries = 0; tries < 300; tries++) {
+		k = k * 1664525u + 1013904223u;
+		const float ang = (float)(k >> 8 & 1023) * 6.2831853f / 1024.0f, r = rmin + (rmax - rmin + (float)tries * 0.1f) * (float)(k >> 18 & 1023) / 1024.0f;
+		const int x = (int)floorf(cx + sinf(ang) * r), z = (int)floorf(cz + cosf(ang) * r);
+		if (x < 6 || z < 6 || x >= w->w - 6 || z >= w->d - 6 || hypotf((float)x - a->pl.x, (float)z - a->pl.z) < 8.0f)
+			continue;
+		const int g = ground_at(w, x, z);
+		bool ok = g > 2 && g + 6 < w->h;
+		for (int i = 0; ok && i < a->ndeposits; i++)
+			ok = hypotf((float)(x - a->deposit[i][0]), (float)(z - a->deposit[i][2])) > 12.0f;
+		for (int dz = -3; ok && dz <= 3; dz++)
+			for (int dx = -3; ok && dx <= 3; dx++) {
+				const int h = ground_at(w, x + dx, z + dz);
+				ok = abs(h - g) <= 2 && !bl_water(bl_get(w, x + dx, h + 1, z + dz)) && !column_made(w, x + dx, h - 2, h + 4, z + dz);
+			}
+		if (!ok)
+			continue;
+		for (int dz = -2; dz <= 2; dz++)
+			for (int dx = -2; dx <= 2; dx++) {
+				const int d2 = dx * dx + dz * dz;
+				if (d2 > 5)
+					continue;
+				const int h = ground_at(w, x + dx, z + dz);
+				for (int y = h + 1; y <= h + 4; y++)
+					if (bl_get(w, x + dx, y, z + dz) != BL_AIR)
+						bl_set(w, x + dx, y, z + dz, BL_AIR);
+				bl_set(w, x + dx, h, z + dz, d2 <= 2 ? BL_GOLD : BL_STONE);                     /* (nine pieces in the ground, three on top) */
+				if ((dx == 0 && dz == 0) || (dx == 1 && dz == 0) || (dx == 0 && dz == -1))
+					bl_set(w, x + dx, h + 1, z + dz, BL_GOLD);
+			}
+		a->deposit[a->ndeposits][0] = x;
+		a->deposit[a->ndeposits][1] = g;
+		a->deposit[a->ndeposits][2] = z;
+		a->ndeposits++;
+		return true;
+	}
+	return false;
+}
+
+/* a game has its gold: one deposit near each side, the rest between them (all of it far from nobody for long) */
+static void gold_setup(struct app *a)
+{
+	if (!a->survival || a->ndeposits || !a->have_keep)
+		return;
+	const float kx = (float)a->keep[0], kz = (float)a->keep[2];
+	gold_place(a, kx, kz, 15.0f, 24.0f);
+	if (a->rival == 1) {
+		const float rx = (float)a->rkeep[0], rz = (float)a->rkeep[2], dx = rx - kx, dz = rz - kz;
+		gold_place(a, rx, rz, 19.0f, 28.0f);
+		gold_place(a, kx + dx * 0.5f, kz + dz * 0.5f, 0.0f, 10.0f);
+		gold_place(a, kx + dx * 0.4f - dz * 0.35f, kz + dz * 0.4f + dx * 0.35f, 0.0f, 12.0f);
+		gold_place(a, kx + dx * 0.6f + dz * 0.35f, kz + dz * 0.6f - dx * 0.35f, 0.0f, 12.0f);
+	}
+	for (int i = 0; i < 12 && a->ndeposits < DEPOSITS; i++)
+		gold_place(a, kx, kz, 30.0f, 60.0f);
+}
+
+/* every cell that holds `block`: how many, and the first `max` of them */
+static int blocks_find(const struct bl_world *w, int block, int (*at)[3], int max)
+{
+	const size_t n = (size_t)w->w * (size_t)w->d * (size_t)w->h;
+	int found = 0;
+	for (const uint8_t *p = w->b; (p = memchr(p, block, n - (size_t)(p - w->b))) != NULL; p++) {
+		const size_t i = (size_t)(p - w->b);
+		if (found < max) {
+			at[found][0] = (int)(i / (size_t)w->h % (size_t)w->w);
+			at[found][1] = (int)(i % (size_t)w->h);
+			at[found][2] = (int)(i / (size_t)w->h / (size_t)w->w);
+		}
+		found++;
+	}
+	return found;
+}
+
+/* what is left of a deposit */
+static int ore_left(const struct app *a, int i)
+{
+	int n = 0;
+	for (int y = a->deposit[i][1] - 4; y <= a->deposit[i][1] + 4; y++)
+		for (int z = a->deposit[i][2] - 3; z <= a->deposit[i][2] + 3; z++)
+			for (int x = a->deposit[i][0] - 3; x <= a->deposit[i][0] + 3; x++)
+				n += bl_get(a->world, x, y, z) == BL_GOLD;
+	return n;
+}
+
+/* the special buildings and the gold: looked at again */
+static void survey(struct app *a)
+{
+	int at[SPECIAL_MAX][3];
+	a->nsmithy = blocks_find(a->world, BL_SMITHY, at, SPECIAL_MAX);
+	a->nmage = blocks_find(a->world, BL_MAGE, at, SPECIAL_MAX);
+	a->ninfirm = LM_MIN(blocks_find(a->world, BL_INFIRMARY, a->infirm, SPECIAL_MAX), SPECIAL_MAX);
+	a->nmine = LM_MIN(blocks_find(a->world, BL_MINE, a->mine, SPECIAL_MAX), SPECIAL_MAX);
+	for (int i = 0; i < a->ndeposits; i++)
+		a->ore[i] = ore_left(a, i);
+	bl_mobs_set_deposits(&a->mobs, (const int (*)[3])a->deposit, a->ndeposits);
+}
+
+/* a mine takes the nearest piece of gold that is within its reach */
+static bool mine_take(struct app *a, const int at[3])
+{
+	int best = 1 << 20, gx = 0, gy = 0, gz = 0;
+	for (int dy = -7; dy <= 3; dy++)
+		for (int dz = -MINE_RANGE; dz <= MINE_RANGE; dz++)
+			for (int dx = -MINE_RANGE; dx <= MINE_RANGE; dx++) {
+				const int d = dx * dx + dz * dz + dy * dy;
+				if (d >= best || bl_get(a->world, at[0] + dx, at[1] + dy, at[2] + dz) != BL_GOLD)
+					continue;
+				best = d;
+				gx = at[0] + dx;
+				gy = at[1] + dy;
+				gz = at[2] + dz;
+			}
+	return best < 1 << 20 && bl_set(a->world, gx, gy, gz, BL_AIR);
 }
 
 static void workers_start(struct app *a, int n);
@@ -1130,7 +1420,9 @@ static void survival_setup(struct app *a, float cx, float cz)
 	a->dig_on = false;
 	a->dig_t = 0.0f;
 	a->have_keep = false;
+	a->keep_down = false;
 	a->keep_hp = KEEP_HP;
+	a->ndeposits = 0;
 	ensure_keep(a, cx, cz);
 	if (a->have_keep)
 		workers_start(a, 2);
@@ -1151,7 +1443,7 @@ static bool worker_spot(const struct app *a, float cx, float cz, float r0, float
 {
 	for (int ri = 0; ri < 3; ri++)
 		for (int k = 0; k < 8; k++) {
-			float ang = (float)k * 0.785398f + 0.3f * (float)ri, r = r0 + 0.8f * (float)ri, x = cx + sinf(ang) * r, z = cz + cosf(ang) * r;
+			float ang = (float)(k + 4) * 0.785398f + 0.3f * (float)ri, r = r0 + 0.8f * (float)ri,      /* (first on the near side, by the keep's door) */ x = cx + sinf(ang) * r, z = cz + cosf(ang) * r;
 			int top = bl_top(a->world, (int)floorf(x), (int)floorf(z));
 			if (top < 1)
 				continue;
@@ -1185,7 +1477,7 @@ static bool worker_add(struct app *a)
 {
 	float cx, cz, p[3];
 	worker_home(a, &cx, &cz);
-	if (nworkers(a) >= BL_WORKER_MAX || !worker_spot(a, cx, cz, 2.2f, a->have_keep ? (float)a->keep[1] + 2.5f : 1e9f, p))
+	if (nworkers(a) >= BL_WORKER_MAX || !worker_spot(a, cx, cz, a->have_keep ? BL_KEEP_EDGE + 1.6f : 2.2f, a->have_keep ? (float)a->keep[1] + 2.5f : 1e9f, p))
 		return false;
 	return bl_mobs_add(&a->mobs, a->world, BL_MOB_WORKER, p[0], p[1], p[2]);
 }
@@ -1294,7 +1586,7 @@ static bool train_soldier(struct app *a)
 		return false;
 	}
 	float p[3];
-	if (!worker_spot(a, where[0], where[2], 2.0f, where[1] + 1.5f, p) || !bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, p[0], p[1], p[2])) {
+	if (!worker_spot(a, where[0], where[2], 2.6f, where[1] + 0.5f, p) || !bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, p[0], p[1], p[2])) {
 		say(a, "There is no room for a soldier by the barracks");
 		return false;
 	}
@@ -1343,19 +1635,8 @@ static void sites_restore(struct app *a)
 
 static void pause_game(struct app *a, enum prompt p);
 
-/* the height of the ground at (x, z): the top block that is not part of a tree */
-static int ground_at(const struct bl_world *w, int x, int z)
-{
-	for (int y = w->h - 2; y > 0; y--) {
-		int b = bl_get(w, x, y, z);
-		if (b != BL_AIR && b != BL_LOG && b != BL_LEAVES && !bl_water(b) && b != BL_TORCH)
-			return y;
-	}
-	return 0;
-}
-
-#define CAMP_R 8                                                /* the camp is levelled this far from its keep; its wall runs CAMP_WALL from it */
-#define CAMP_WALL 6
+#define CAMP_R 12                                               /* the camp is levelled this far from its keep; its wall runs CAMP_WALL from it */
+#define CAMP_WALL 10
 
 /* A place for their camp, 80 to 120 blocks (less in a small world) from the player's keep (else from him): as level and dry as there is, with nothing a hand has
  * made near it and nobody of the player's within 50. out = x, the height of the ground, z. */
@@ -1385,7 +1666,7 @@ static bool rival_site(const struct app *a, int out[3])
 					n++;
 					for (int y = g - 3; y <= g + 5 && ok; y++) {
 						int b = bl_get(w, x + dx, y, z + dz);
-						ok = !(bl_siege_hp(b) > 0 || b == BL_KEEP || b == BL_REDKEEP);
+						ok = !(bl_siege_hp(b) > 0 || bl_own_keep(b) || bl_red_keep(b));
 					}
 				}
 			if (!ok || wet > n / 4)
@@ -1439,20 +1720,19 @@ static void rival_build(struct app *a, int x, int level, int z)
 		}
 	struct bl_site tower;
 	const char *why = NULL;
-	bl_plan_lay(w, BL_PLAN_TOWER, 0, x - 3, level + 1, z - 3, NULL, 0, &tower, &why);
+	bl_plan_lay(w, BL_PLAN_TOWER, 0, x + k_camp[CAMP_TOWER].dx, level + 1, z + k_camp[CAMP_TOWER].dz, NULL, 0, &tower, &why);
 	for (int i = 0; i < tower.n; i++)
 		bl_set(w, tower.c[i].x, tower.c[i].y, tower.c[i].z, tower.c[i].block);
-	for (int i = 0; i < KEEP_H; i++)
-		bl_set(w, x, level + 1 + i, z, BL_REDKEEP);
 	a->rkeep[0] = x;
 	a->rkeep[1] = level + 1;
 	a->rkeep[2] = z;
+	keep_build(a, a->rkeep, BL_REDKEEP);
 }
 
 /* a guard comes out at a free post of the camp; false when there is none */
 static bool rival_guard(struct app *a)
 {
-	static const int k_post[RIVAL_GUARDS_MORE][2] = { { 3, 0 }, { -3, 0 }, { 0, 3 }, { 0, -3 }, { 3, 3 }, { -3, 3 }, { 3, -3 }, { 2, 1 } };
+	static const int k_post[RIVAL_GUARDS_MORE][2] = { { 6, 0 }, { -6, 0 }, { 0, 6 }, { 0, -6 }, { 5, 5 }, { -5, 5 }, { 5, -5 }, { 6, 3 } };
 	for (int i = 0; i < (int)(sizeof k_post / sizeof k_post[0]); i++) {
 		float x = (float)(a->rkeep[0] + k_post[i][0]) + 0.5f, y = (float)a->rkeep[1], z = (float)(a->rkeep[2] + k_post[i][1]) + 0.5f;
 		bool taken = false;
@@ -1489,7 +1769,7 @@ static void rival_man(struct app *a, int guards, int archers)
 /* a worker of theirs comes out beside the keep */
 static bool rival_worker(struct app *a)
 {
-	static const int k_at[4][2] = { { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } };
+	static const int k_at[4][2] = { { 5, 2 }, { -5, 2 }, { 5, -2 }, { -5, -2 } };
 	const int n = bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER);
 	for (int i = 0; i < 4; i++) {
 		const int *p = k_at[(n + i) % 4];
@@ -1541,7 +1821,7 @@ static bool camp_house(const struct app *a, struct bl_site *s)
 			for (int cx = lo[0] - 1; cx <= hi[0] + 1 && clean; cx++)
 				for (int cy = y - 2; cy <= y + 4 && clean; cy++) {
 					int b = bl_get(w, cx, cy, cz);
-					clean = !(bl_siege_hp(b) > 0 || b == BL_KEEP);
+					clean = !(bl_siege_hp(b) > 0 || bl_own_keep(b));
 				}
 		if ((there || clean) && there > best) {
 			best = there;
@@ -1585,7 +1865,7 @@ static void camp_level(struct app *a, const struct bl_site *s)
 		for (int x = lo[0] - 1; x <= hi[0] + 1; x++) {
 			for (int y = w->h - 2; y > level; y--) {
 				int b = bl_get(w, x, y, z);
-				if (b != BL_AIR && bl_siege_hp(b) == 0 && b != BL_KEEP)
+				if (b != BL_AIR && bl_siege_hp(b) == 0 && !bl_own_keep(b))
 					bl_set(w, x, y, z, BL_AIR);
 			}
 			for (int y = level - 1; y > 1; y--) {
@@ -1671,6 +1951,59 @@ static void camp_step(struct app *a, float dt)
 static void rival_sync(struct app *a)
 {
 	bl_mobs_set_rival(&a->mobs, a->rival == 1 && a->rival_on, (float)a->rkeep[0] + 0.5f, (float)a->rkeep[1], (float)a->rkeep[2] + 0.5f);
+	a->mobs.rkeep_down = a->rkeep_back > 0.0f;
+	a->mobs.rgold_wanted = a->rgold < RIVAL_GOLD_MAX;
+	a->mobs.chief_arms = a->chief_arms;
+}
+
+/* their chief comes out before the keep */
+static bool chief_spawn(struct app *a, float hp)
+{
+	for (int k = 0; k < 4; k++) {
+		const float x = (float)a->rkeep[0] + 0.5f + (float)(k - 1) * 1.5f, z = (float)a->rkeep[2] + 0.5f - 6.0f;
+		if (!bl_mobs_add_chief(&a->mobs, a->world, x, (float)a->rkeep[1], z))
+			continue;
+		a->mobs.mob[bl_mobs_chief(&a->mobs)].hp = hp;
+		a->chief_was = true;
+		return true;
+	}
+	return false;
+}
+
+/* what he buys for the gold they have to spare (the price of a new keep is not touched) */
+static void chief_shop(struct app *a)
+{
+	static const struct {
+		int weapon, price;
+	} k_buy[] = { { BL_WP_SPEAR, 3 }, { BL_WP_HAMMER, 6 }, { BL_WP_FIRE, 10 }, { BL_WP_LASER, 15 } };
+	for (size_t i = 0; i < sizeof k_buy / sizeof k_buy[0]; i++) {
+		if (a->chief_arms & 1u << k_buy[i].weapon)
+			continue;
+		if (a->rgold >= KEEP_GOLD + k_buy[i].price) {
+			a->rgold -= k_buy[i].price;
+			a->chief_arms |= 1u << k_buy[i].weapon;
+			say(a, "The %s has got himself a %s", CHIEF_NAME, bl_weapon(k_buy[i].weapon)->name);
+		}
+		return;                                             /* (one at a time, in this order) */
+	}
+}
+
+/* he falls, he is away, he is back */
+static void chief_step(struct app *a, float dt)
+{
+	const bool there = bl_mobs_chief(&a->mobs) >= 0;
+	if (a->chief_was && !there) {
+		a->chief_t = CHIEF_BACK;
+		say(a, "The %s has fallen! He is back in %.0f seconds if their keep stands", CHIEF_NAME, CHIEF_BACK);
+		sound(a, "dawn");
+	}
+	a->chief_was = there;
+	if (!there && a->rkeep_back <= 0.0f && (a->chief_t -= dt) <= 0.0f) {
+		if (!chief_spawn(a, BL_CHIEF_HP))
+			a->chief_t = 5.0f;
+		else
+			a->chief_t = 0.0f;
+	}
 }
 
 /* which way (tx, tz) is from the player, as he faces, and how far */
@@ -1743,7 +2076,10 @@ static bool raid_send(struct app *a)
 	a->raid_here = a->raid_home = false;
 	float dist;
 	const char *way = rival_bearing(a, &dist);
-	say(a, "The %s sends %d raiders at you! Their camp is %s", RIVAL_NAME, came, way);
+	if (a->raids % 2 == 0 && bl_mobs_chief_raid(&a->mobs))          /* every second party has him at its head */
+		say(a, "The %s leads %d raiders at you! Their camp is %s", CHIEF_NAME, came, way);
+	else
+		say(a, "The %s sends %d raiders at you! Their camp is %s", RIVAL_NAME, came, way);
 	sound(a, "horn");
 	return true;
 }
@@ -1771,7 +2107,7 @@ static void raid_step(struct app *a, float dt)
 				sound(a, "alarm");
 			}
 		}
-	} else if (a->hp > 0.0f && bl_daylight(a->time_h) > 0.55f) {
+	} else if (a->hp > 0.0f && bl_daylight(a->time_h) > 0.55f && a->rkeep_back <= 0.0f) {
 		a->raid_t -= dt;
 		if (a->raid_t <= 0.0f && !raid_send(a))
 			a->raid_t = 30.0f;                                  /* (nothing to pay with, or no room at the gateway: later) */
@@ -1796,6 +2132,10 @@ static bool rival_start(struct app *a)
 	a->raid_t = raid_first(a);
 	a->raid_out = false;
 	a->rstock = RIVAL_STOCK;
+	a->rgold = RIVAL_GOLD;
+	a->rkeep_back = 0.0f;
+	a->chief_arms = 1u << BL_WP_SWORD | 1u << BL_WP_BOW;
+	a->chief_t = 0.0f;
 	a->rbuilt = 1 << CAMP_TOWER;
 	a->rsite = -1;
 	a->rworker_t = RIVAL_WORKER_EVERY;
@@ -1807,6 +2147,7 @@ static bool rival_start(struct app *a)
 	a->rarchers = 1 << CAMP_TOWER;
 	a->rhands = BL_RWORKER_MAX;
 	rival_sync(a);
+	chief_spawn(a, BL_CHIEF_HP);
 	float dist;
 	const char *way = rival_bearing(a, &dist);
 	say(a, "The %s has made camp %.0f blocks away, %s", RIVAL_NAME, dist, way);
@@ -1814,45 +2155,28 @@ static bool rival_start(struct app *a)
 	return true;
 }
 
-/* K with a camp that stands: their men stand down (and are gone) or come back */
-static void rival_switch(struct app *a)
-{
-	if (a->rival != 1)
-		return;
-	if (a->rival_on) {
-		a->rguards = rival_count(a, false);
-		a->rarchers = rival_archers(a);
-		a->rhands = bl_mobs_count_kind(&a->mobs, BL_MOB_RWORKER);
-		a->rival_on = false;
-		a->raid_out = false;
-		bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);             /* (a raiding party that is out is gone, too) */
-		bl_mobs_clear_kind(&a->mobs, BL_MOB_RWORKER);
-		bl_mobs_set_rsite(&a->mobs, NULL);
-		say(a, "The %s stands down (K brings it back)", RIVAL_NAME);
-	} else {
-		a->rival_on = true;
-		a->raid_t = raid_first(a);
-		rival_man(a, a->rguards, a->rarchers);
-		rival_workers(a, a->rhands);
-		camp_resume(a);
-		say(a, "The %s is back at its camp", RIVAL_NAME);
-	}
-	rival_sync(a);
-}
-
-/* their keep has no hit points left: it is gone, their men with it, and the game is won */
+/* their keep has no hit points left. With the price of a new one they build it again; without it they are beaten and the game is won. */
 static void rival_fall(struct app *a)
 {
-	for (int i = 0; i < KEEP_H; i++)
-		bl_set(a->world, a->rkeep[0], a->rkeep[1] + i, a->rkeep[2], BL_AIR);
+	keep_remove(a, a->rkeep, BL_REDKEEP);
+	a->rhp = 0.0f;
+	sound(a, "keep-fall");
+	if (a->rgold >= KEEP_GOLD) {
+		a->rgold -= KEEP_GOLD;
+		a->rkeep_back = RIVAL_BACK;
+		rival_sync(a);
+		say(a, "Their keep is down, but they pay %d gold: it stands again in %.0f seconds (%d gold left)", KEEP_GOLD, RIVAL_BACK, a->rgold);
+		return;
+	}
 	bl_mobs_clear_kind(&a->mobs, BL_MOB_GUARD);
 	bl_mobs_clear_kind(&a->mobs, BL_MOB_RWORKER);
+	bl_mobs_clear_kind(&a->mobs, BL_MOB_CHIEF);
 	bl_mobs_set_rsite(&a->mobs, NULL);
 	a->rsite = -1;
 	a->rival = 2;
 	a->rival_on = false;
 	a->raid_out = false;
-	a->rhp = 0.0f;
+	a->chief_was = false;
 	rival_sync(a);
 	sound(a, "dawn");
 	pause_game(a, P_WON);
@@ -1861,28 +2185,13 @@ static void rival_fall(struct app *a)
 
 static void rival_hit(struct app *a, float damage)
 {
-	if (a->rival != 1 || !a->rival_on)
+	if (a->rival != 1 || !a->rival_on || a->rkeep_back > 0.0f)
 		return;
 	a->rhp -= damage;
 	a->rhit_t = 6.0f;
 	sound(a, "wall-hit");
 	if (a->rhp <= 0.0f)
 		rival_fall(a);
-}
-
-/* the player's sword on their keep */
-static void rival_strike(struct app *a, int64_t now)
-{
-	if (a->rival != 1 || !a->rival_on) {
-		say(a, "The %s has stood down: K brings it back", RIVAL_NAME);
-		return;
-	}
-	if (now < a->next_sword)
-		return;
-	a->next_sword = now + SWORD_MS;
-	a->arm_swing = 1.0f;
-	a->hit_t = 0.18f;
-	rival_hit(a, RIVAL_SWORD);
 }
 
 /* while the camp stands, its workers keep it supplied; from the store men come to it again, one at a time, raiding parties set out and it grows */
@@ -1892,6 +2201,17 @@ static void rival_step(struct app *a, float dt)
 	raid_step(a, dt);
 	if (a->rival != 1 || !a->rival_on)
 		return;
+	if (a->rkeep_back > 0.0f && (a->rkeep_back -= dt) <= 0.0f) {
+		a->rkeep_back = 0.0f;
+		keep_build(a, a->rkeep, BL_REDKEEP);
+		a->rhp = RIVAL_HP;
+		say(a, "The %s has built its keep again", RIVAL_NAME);
+		sound(a, "horn");
+	}
+	rival_sync(a);
+	chief_step(a, dt);
+	if ((a->rcheck_t <= dt))
+		chief_shop(a);
 	camp_step(a, dt);
 	if (rival_count(a, false) >= (a->rbuilt & 1 << CAMP_HOUSE ? RIVAL_GUARDS_MORE : RIVAL_GUARDS)) {
 		a->rguard_t = RIVAL_REINFORCE;
@@ -1911,13 +2231,14 @@ static void camp_take(struct app *a, const struct bl_mobs_result *R)
 	for (int k = 0; k < R->nraze; k++) {
 		const struct bl_break *c = &R->raze[k];
 		int b = bl_get(a->world, c->x, c->y, c->z);
-		if ((b == BL_LOG || b == BL_LEAVES || b == BL_STONE) && bl_set(a->world, c->x, c->y, c->z, BL_AIR) && b != BL_LEAVES && !said &&
+		if ((b == BL_LOG || b == BL_LEAVES || b == BL_STONE || b == BL_GOLD) && bl_set(a->world, c->x, c->y, c->z, BL_AIR) && b != BL_LEAVES && !said &&
 		    heard(a, (float)c->x, (float)c->z, HEAR)) {
 			block_sound(a, "break", b);
 			said = true;
 		}
 	}
 	a->rstock = LM_MIN(a->rstock + R->delivered, RIVAL_STOCK_MAX);
+	a->rgold = LM_MIN(a->rgold + R->delivered_gold, RIVAL_GOLD_MAX);
 }
 
 /* what the workers have finished: the blocks go, what they leave goes into the pockets */
@@ -2080,11 +2401,11 @@ static void cmd_select_box(struct app *a, double x0, double y0, double x1, doubl
 
 /* ---- building: pick a plan (3 .. 6 or the bar), point at the ground, a worker builds it ---- */
 
-#define KEY_PLAN0 (K_1 + 2)                                     /* 3 barracks, 4 watchtower, 5 wall, 6 gate */
+#define KEY_PLAN0 (K_1 + 2)                                     /* the keys 3 4 5 6 7 8 9 0: barracks, watchtower, wall, gate, smithy, mage tower, infirmary, mine */
 
 static const char *plan_title(int plan)
 {
-	static const char *const k[BL_PLAN_COUNT] = { "Barracks", "Watchtower", "Wall", "Gate" };
+	static const char *const k[BL_PLAN_COUNT] = { "Barracks", "Watchtower", "Wall", "Gate", "Smithy", "Mage tower", "Infirmary", "Mine" };
 	return plan >= 0 && plan < BL_PLAN_COUNT ? k[plan] : "?";
 }
 
@@ -2092,7 +2413,19 @@ static bool plan_affordable(const struct app *a, int plan)
 {
 	int cob, pl;
 	bl_plan_cost(plan, &cob, &pl);
-	return !a->survival || (a->inv[BL_COBBLE] >= cob && a->inv[BL_PLANKS] >= pl);
+	return !a->survival || (a->inv[BL_COBBLE] >= cob && a->inv[BL_PLANKS] >= pl && a->inv[BL_GOLD] >= bl_plan_gold(plan));
+}
+
+/* "12 cobble 8 planks": what a plan costs, in words; `brief`: "12c 8p" */
+static void plan_cost_text(int plan, bool brief, char *out, size_t n)
+{
+	int cob, pl, gold = bl_plan_gold(plan);
+	bl_plan_cost(plan, &cob, &pl);
+	int at = snprintf(out, n, brief ? "%dc" : "%d cobble", cob);
+	if (pl && at < (int)n)
+		at += snprintf(out + at, n - (size_t)at, brief ? " %dp" : " %d planks", pl);
+	if (gold && at < (int)n)
+		snprintf(out + at, n - (size_t)at, brief ? " %dg" : " %d gold", gold);
 }
 
 /* The plan at the block under the pointer, as it would be built: false with *why when it cannot be. `*any` = there is something to show. */
@@ -2122,14 +2455,22 @@ static bool plan_at_pointer(const struct app *a, struct bl_site *s, const char *
 			ok = false;
 		}
 	}
+	if (ok && a->plan == BL_PLAN_MINE) {
+		bool gold = false;
+		for (int dy = -5; dy <= 2 && !gold; dy++)
+			for (int dz = -MINE_RANGE; dz <= MINE_RANGE && !gold; dz++)
+				for (int dx = -MINE_RANGE; dx <= MINE_RANGE && !gold; dx++)
+					gold = bl_get(a->world, x + dx, y + 3 + dy, z + dz) == BL_GOLD;
+		if (!gold) {
+			*why = "A mine needs gold beside it";
+			ok = false;
+		}
+	}
 	if (ok && !plan_affordable(a, a->plan)) {
-		static char msg[80];
-		int cob, pl;
-		bl_plan_cost(a->plan, &cob, &pl);
-		if (pl)
-			snprintf(msg, sizeof msg, "A %s costs %d cobble and %d planks", bl_plan_name(a->plan), cob, pl);
-		else
-			snprintf(msg, sizeof msg, "A %s costs %d cobble", bl_plan_name(a->plan), cob);
+		static char msg[120];
+		char cost[64];
+		plan_cost_text(a->plan, false, cost, sizeof cost);
+		snprintf(msg, sizeof msg, "The %s costs %s", bl_plan_name(a->plan), cost);
 		*why = msg;
 		ok = false;
 	}
@@ -2157,6 +2498,7 @@ static bool build_place(struct app *a)
 		bl_plan_cost(a->plan, &cob, &pl);
 		a->inv[BL_COBBLE] -= cob;
 		a->inv[BL_PLANKS] -= pl;
+		a->inv[BL_GOLD] -= bl_plan_gold(a->plan);
 	}
 	bool chosen = false;
 	for (int i = 0; i < BL_MOBS_MAX; i++)
@@ -2244,9 +2586,9 @@ static bool tower_at(const struct app *a, const struct bl_hit *h, int post[3])
 /* the bar of the plans at the bottom of the command view (it takes the hotbar's place) */
 static void bar_rect(const struct app *a, int i, int *x, int *y, int *bw, int *bh)
 {
-	*bw = LM_CLAMP((a->win.bw - 24) / BL_PLAN_COUNT - 6, 70, 170);
+	*bw = LM_CLAMP((a->win.bw - 16) / BL_PLAN_COUNT - 4, 40, 150);
 	*bh = 42;
-	*x = (a->win.bw - (BL_PLAN_COUNT * (*bw + 6) - 6)) / 2 + i * (*bw + 6);
+	*x = (a->win.bw - (BL_PLAN_COUNT * (*bw + 4) - 4)) / 2 + i * (*bw + 4);
 	*y = a->win.bh - *bh - 12;
 }
 
@@ -2419,39 +2761,58 @@ static bool free_world_path(const struct app *a, char *out, size_t n)
 }
 
 /* A new world beside the one that was open: that one is saved first and stays in its file. */
-static void new_world(struct app *a)
+static void state_reset(struct app *a);
+static void world_begin(struct app *a, bool from_file, int mode, int workers, int soldiers);
+
+/* the file of a new game called `name` in the worlds' folder; false with *why when the name will not do */
+static bool game_path(const struct app *a, const char *name, char *out, size_t n, const char **why)
 {
+	while (*name == ' ')
+		name++;
+	size_t l = strlen(name);
+	while (l && name[l - 1] == ' ')
+		l--;
+	if (!l) {
+		*why = "Give the game a name";
+		return false;
+	}
+	if (l > 60 || name[0] == '.' || memchr(name, '/', l)) {
+		*why = "A name has no / in it, does not begin with a dot and is at most 60 letters";
+		return false;
+	}
+	snprintf(out, n, "%.500s/%.*s.bl", a->dir, (int)l, name);
+	if (access(out, F_OK) == 0) {
+		*why = "There is a game of that name already";
+		return false;
+	}
+	return true;
+}
+
+/* A new world beside the one that was open: that one is saved first and stays in its file. `path`: the new one's file (NULL: the first free world-N.bl);
+ * `mode`: 1 a game, 0 free building. */
+static void new_world(struct app *a, const char *path, int mode)
+{
+	char file[1024] = "";
+	if (path)
+		snprintf(file, sizeof file, "%s", path);
+	else
+		free_world_path(a, file, sizeof file);
 	if (a->path[0] && !a->nosave)
 		save_all(a, false);
 	if (!make_world(a, a->test_seed ? a->test_seed : fresh_seed(), false)) {
 		say(a, "Cannot make a world");
 		return;
 	}
-	free_world_path(a, a->path, sizeof a->path);
+	state_reset(a);
+	snprintf(a->path, sizeof a->path, "%s", file);
 	a->nosave = a->cli_no_save;
-	a->time_h = 9.0f;
-	a->pet_t = 0.0f;
-	a->have_yard = false;
-	a->have_tom = a->have_filip = false;
-	mobs_setup(a);
-	a->kills = 0;
-	survival_setup(a, a->pl.x, a->pl.z);
-	if (a->pets_on) {
-		float near[3] = { a->pl.x, a->pl.y, a->pl.z };
-		pets_setup(a, near, false);
-	} else {
-		memset(&a->pets, 0, sizeof a->pets);
-	}
+	world_begin(a, false, mode, -1, -1);
+	a->force_save = true;
 	save_all(a, false);                                     /* (it is in the list of worlds at once) */
 	title_update(a);
 	char name[300];
 	world_name(a->path, name, sizeof name);
-	say(a, "A new world: %s (seed %u)", name, a->world->seed);
-	a->rival = 0;
-	a->rival_on = false;
-	rival_sync(a);
-	if (a->survival && !a->cli_no_rival && rival_start(a))
-		save_all(a, false);
+	say(a, "A new %s: %s", a->survival ? "game" : "world to build in", name);
 }
 
 /* what belongs to one world, as it is before the world's own lines are read */
@@ -2464,8 +2825,21 @@ static void state_reset(struct app *a)
 	a->dig_on = false;
 	a->dig_t = 0.0f;
 	a->have_keep = false;
+	a->keep_down = false;
 	a->keep_hp = KEEP_HP;
 	a->keep_msg_t = 0.0f;
+	a->keep_back = a->rkeep_back = 0.0f;
+	a->ndeposits = a->nsmithy = a->nmage = a->ninfirm = a->nmine = 0;
+	a->look_t = a->mine_t = 0.0f;
+	a->arms = 1u << BL_WP_SWORD;
+	a->weapon = BL_WP_SWORD;
+	memset(a->charges, 0, sizeof a->charges);
+	a->rgold = RIVAL_GOLD;                                  /* (a camp saved before it had gold: as a new one) */
+	a->chief_arms = 1u << BL_WP_SWORD | 1u << BL_WP_BOW;
+	a->chief_t = a->chief_hp = 0.0f;
+	a->chief_saved = a->chief_was = false;
+	a->cmd = false;
+	a->plan = -1;
 	a->nights = a->kills = 0;
 	a->rival = 0;
 	a->rival_on = false;
@@ -2496,7 +2870,7 @@ static void state_reset(struct app *a)
 	a->time_h = 9.0f;
 	a->clockm = 1;
 	a->real_ms = 0;
-	a->pets_on = a->mobs_on = true;
+	a->pets_on = true;
 	a->water_acc = 0.0f;
 	a->walk_phase = a->walk_stride = a->arm_swing = 0.0f;
 	a->next_sword = 0;
@@ -2513,8 +2887,11 @@ static void world_begin(struct app *a, bool from_file, int mode, int workers, in
 		a->clockm = a->cli_clock;
 	if (a->cli_no_pets)
 		a->pets_on = false;
-	if (a->cli_no_mobs)
-		a->mobs_on = false;
+	if (from_file && a->conf_read && !a->conf_mode && mode < 0)
+		a->survival = false;                                    /* a world saved before survival was a creative world */
+	if (mode >= 0)
+		a->survival = mode != 0;
+	a->mobs_on = (a->survival || a->cli_goblins) && !a->cli_no_mobs;     /* a game has its goblins, free building has nobody */
 	settle_player(a);
 	if (a->pets_on) {                                       /* (without them no yard is looked for and no pond is dug: the world is left as it is) */
 		float near[3];
@@ -2522,10 +2899,8 @@ static void world_begin(struct app *a, bool from_file, int mode, int workers, in
 		pets_setup(a, near, true);
 	}
 	mobs_setup(a);
-	if (from_file && a->conf_read && !a->conf_mode && mode < 0)
-		a->survival = false;                                    /* a world saved before survival was a creative world */
-	if (mode >= 0)
-		a->survival = mode != 0;
+	if (!a->survival)
+		a->arms = (1u << BL_WP_COUNT) - 1;                      /* (nothing costs anything there) */
 	if (from_file) {
 		ensure_keep(a, a->pl.x, a->pl.z);
 		workers_restore(a);
@@ -2542,25 +2917,41 @@ static void world_begin(struct app *a, bool from_file, int mode, int workers, in
 		for (int i = 0; i < soldiers; i++) {
 			float cx, cz, sp[3];
 			worker_home(a, &cx, &cz);
-			if (worker_spot(a, cx, cz, 3.0f, a->have_keep ? (float)a->keep[1] + 2.5f : 1e9f, sp))
+			if (worker_spot(a, cx, cz, a->have_keep ? BL_KEEP_EDGE + 2.4f : 3.0f, a->have_keep ? (float)a->keep[1] + 2.5f : 1e9f, sp))
 				bl_mobs_add(&a->mobs, a->world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]);
 		}
 	}
+	a->rival_on = a->rival == 1 && (a->survival || a->cli_rival);       /* every game has them: they cannot be switched off */
 	if (from_file) {
 		sites_restore(a);
-		if (a->rival == 1 && a->rival_on) {
+		if (a->rival_on) {
+			if (a->rkeep_back <= 0.0f && bl_get(a->world, a->rkeep[0] + BL_KEEP_R, a->rkeep[1], a->rkeep[2]) != BL_REDKEEP &&
+			    bl_get(a->world, a->rkeep[0], a->rkeep[1], a->rkeep[2]) == BL_REDKEEP) {     /* a camp of the old, small kind: made anew where it is */
+				rival_build(a, a->rkeep[0], a->rkeep[1] - 1, a->rkeep[2]);
+				a->rbuilt = 1 << CAMP_TOWER;
+				a->rsite = -1;
+				a->rarchers = 1 << CAMP_TOWER;
+				a->nraiders_conf = 0;
+			}
+			rival_sync(a);
 			rival_man(a, a->rguards, a->rarchers);
 			rival_workers(a, a->rhands);
 			camp_resume(a);
 			for (int i = 0; i < a->nraiders_conf; i++)          /* the party that was out */
 				a->raid_out |= bl_mobs_add_raider(&a->mobs, a->world, a->raider_conf[i][0], a->raider_conf[i][1], a->raider_conf[i][2]);
+			if (a->chief_saved && bl_mobs_add_chief(&a->mobs, a->world, a->chief_at[0], a->chief_at[1], a->chief_at[2])) {
+				a->mobs.mob[bl_mobs_chief(&a->mobs)].hp = a->chief_hp;
+				a->chief_was = true;
+			}
 		}
 		if ((a->cli_raid > 0.0f && !a->raid_out) || a->raid_t < 0.0f)
 			a->raid_t = raid_first(a);
-	} else if (a->survival && !a->cli_no_rival) {
-		rival_start(a);                                         /* a new world has them from the start */
 	}
+	if (a->survival && a->rival == 0 && !a->cli_no_rival)
+		rival_start(a);                                         /* a game has them from the start */
+	gold_setup(a);
 	rival_sync(a);
+	survey(a);
 }
 
 /* Reads a world's file and makes it the one that is played; false = it cannot be read (the world that is open stays, *err says why). A world.bl in the worlds'
@@ -2823,35 +3214,182 @@ static void aim_update(struct app *a)
 	a->aimed = bl_pick(a->world, eye, look, BL_REACH, &a->aim);
 }
 
-/* the sword: a goblin the player aims at, nearer than the block he aims at, takes the blow (and nothing is broken behind it) */
+/* ---- weapons ------------------------------------------------------------------------------------------------------ */
+
+static const struct {
+	int price_gold, price_block, price_n;       /* what making it takes ... */
+	int building;                               /* ... and where: BL_SMITHY, BL_MAGE */
+	const char *what;
+} k_arms[BL_WP_COUNT] = {
+	{ 0, 0, 0, 0, "close by, quick" },
+	{ 2, BL_PLANKS, 4, BL_SMITHY, "reaches farther" },
+	{ 4, BL_COBBLE, 8, BL_SMITHY, "slow and heavy; breaks walls and keeps" },
+	{ 3, BL_PLANKS, 6, BL_SMITHY, "far; an arrow costs a plank" },
+	{ 10, 0, 0, BL_MAGE, "a burst that hurts all near it; 1 gold = 5 shots" },
+	{ 15, 0, 0, BL_MAGE, "a beam, very far; 1 gold = 30 shots" },
+};
+#define FIRE_SHOTS 5
+#define LASER_SHOTS 30
+
+static void arms_price(int wp, char *out, size_t n)
+{
+	if (k_arms[wp].price_n)
+		snprintf(out, n, "%d gold, %d %s", k_arms[wp].price_gold, k_arms[wp].price_n, bl_block_name(k_arms[wp].price_block));
+	else
+		snprintf(out, n, "%d gold", k_arms[wp].price_gold);
+}
+
+static bool arms_has(const struct app *a, int wp)
+{
+	return a->arms & 1u << wp;
+}
+
+static void arms_hold(struct app *a, int wp)
+{
+	a->weapon = wp;
+	a->weapon_until = now_ms() + 2500;
+	say(a, "In your hand: the %s", bl_weapon(wp)->name);
+}
+
+/* the next weapon he has (Q) */
+static void arms_next(struct app *a)
+{
+	for (int i = 1; i <= BL_WP_COUNT; i++) {
+		const int wp = (a->weapon + i) % BL_WP_COUNT;
+		if (arms_has(a, wp)) {
+			if (wp == a->weapon)
+				say(a, "You have only the %s: R makes more at a smithy", bl_weapon(wp)->name);
+			else
+				arms_hold(a, wp);
+			return;
+		}
+	}
+}
+
+/* the weapon of the armoury's row: taken in the hand, or made first */
+static bool arms_choose(struct app *a, int wp)
+{
+	if (wp < 0 || wp >= BL_WP_COUNT)
+		return false;
+	if (arms_has(a, wp)) {
+		arms_hold(a, wp);
+		return true;
+	}
+	survey(a);
+	if ((k_arms[wp].building == BL_SMITHY ? a->nsmithy : a->nmage) == 0) {
+		sound(a, "no");
+		say(a, "The %s is made at a %s: have your workers build one (Tab, %s)", bl_weapon(wp)->name, k_arms[wp].building == BL_SMITHY ? "smithy" : "mage tower",
+		    k_arms[wp].building == BL_SMITHY ? "7" : "8");
+		return false;
+	}
+	if (a->inv[BL_GOLD] < k_arms[wp].price_gold || (k_arms[wp].price_n && a->inv[k_arms[wp].price_block] < k_arms[wp].price_n)) {
+		char p[64];
+		arms_price(wp, p, sizeof p);
+		sound(a, "no");
+		say(a, "The %s costs %s", bl_weapon(wp)->name, p);
+		return false;
+	}
+	a->inv[BL_GOLD] -= k_arms[wp].price_gold;
+	if (k_arms[wp].price_n)
+		a->inv[k_arms[wp].price_block] -= k_arms[wp].price_n;
+	a->arms |= 1u << wp;
+	sound(a, "built");
+	arms_hold(a, wp);
+	return true;
+}
+
+/* the shots that are left for the weapon in the hand (-1: it needs none) */
+static int arms_shots(const struct app *a, int wp)
+{
+	if (!a->survival)
+		return -1;
+	if (wp == BL_WP_BOW)
+		return a->inv[BL_PLANKS];
+	if (wp == BL_WP_FIRE)
+		return a->charges[wp] + a->inv[BL_GOLD] * FIRE_SHOTS;
+	if (wp == BL_WP_LASER)
+		return a->charges[wp] + a->inv[BL_GOLD] * LASER_SHOTS;
+	return -1;
+}
+
+static void arms_spend(struct app *a, int wp)
+{
+	if (!a->survival)
+		return;
+	if (wp == BL_WP_BOW) {
+		a->inv[BL_PLANKS]--;
+	} else if (wp == BL_WP_FIRE || wp == BL_WP_LASER) {
+		if (a->charges[wp] <= 0) {
+			a->inv[BL_GOLD]--;
+			a->charges[wp] = wp == BL_WP_FIRE ? FIRE_SHOTS : LASER_SHOTS;
+		}
+		a->charges[wp]--;
+	}
+}
+
+/* The weapon in the hand: when an enemy (or their keep) is in its reach and in sight it takes the blow or the shot, and nothing is dug behind it. */
 static bool sword_swing(struct app *a, int64_t now)
 {
+	const struct bl_weapon_info *wi = bl_weapon(a->weapon);
 	float eye[3], look[3], t = 0.0f;
 	bl_player_eye(&a->pl, eye);
 	bl_player_look(&a->pl, look);
-	int id = bl_mobs_pick(&a->mobs, eye, look, BL_SWORD_REACH, &t);
-	if (id < 0 || (a->mobs.mob[id].kind == BL_MOB_GOBLIN && !a->mobs_on))
-		return false;
-	const int kind = a->mobs.mob[id].kind;
-	bool guard = bl_mob_is_rival(kind), raider = a->mobs.mob[id].raider;
-	if (a->aimed && a->aim.t < t)                           /* a block is in the way (leaves are none: goblins stand among them) */
+	int id = bl_mobs_pick(&a->mobs, eye, look, wi->reach, &t);
+	if (id >= 0 && a->mobs.mob[id].kind == BL_MOB_GOBLIN && !a->mobs_on)
+		id = -1;
+	if (id >= 0)                                            /* a block is in the way (leaves are none: goblins stand among them) */
 		for (float s = 0.0f; s < t; s += 0.1f)
-			if (bl_solid_unit(bl_get(a->world, (int)floorf(eye[0] + look[0] * s), (int)floorf(eye[1] + look[1] * s), (int)floorf(eye[2] + look[2] * s))))
-				return false;
+			if (bl_solid_unit(bl_get(a->world, (int)floorf(eye[0] + look[0] * s), (int)floorf(eye[1] + look[1] * s), (int)floorf(eye[2] + look[2] * s)))) {
+				id = -1;
+				break;
+			}
+	struct bl_hit h;
+	const bool keep = id < 0 && a->rival == 1 && a->rival_on && a->rkeep_back <= 0.0f && bl_pick(a->world, eye, look, fmaxf(wi->reach, BL_REACH), &h) &&
+	                  bl_red_keep(bl_get(a->world, h.x, h.y, h.z));
+	if (id < 0 && !keep)
+		return false;
 	if (now < a->next_sword)
 		return true;                                         /* too soon for another blow, and the block behind it is not touched */
-	a->next_sword = now + SWORD_MS;
+	if (arms_shots(a, a->weapon) == 0) {
+		a->next_sword = now + 700;
+		sound(a, "no");
+		say(a, a->weapon == BL_WP_BOW ? "No arrows: each costs a plank (Q: another weapon)" : "No gold for another shot (Q: another weapon)");
+		return true;
+	}
+	arms_spend(a, a->weapon);
+	a->next_sword = now + (int64_t)(wi->cooldown * 1000.0f);
 	a->arm_swing = 1.0f;
-	bool dead = bl_mobs_hurt(&a->mobs, id, BL_SWORD_DAMAGE, look[0], look[2]);
 	a->hit_t = 0.18f;
-	if (dead && guard) {
+	const float dist = keep ? h.t : t;
+	const float to[3] = { eye[0] + look[0] * (dist + 0.2f), eye[1] + look[1] * (dist + 0.2f), eye[2] + look[2] * (dist + 0.2f) };
+	if (wi->shot >= 0) {                                    /* it flies from the right hand */
+		const float rx = cosf(a->pl.yaw), rz = -sinf(a->pl.yaw);
+		const float from[3] = { eye[0] + look[0] * 0.7f + rx * 0.28f, eye[1] + look[1] * 0.7f - 0.24f, eye[2] + look[2] * 0.7f + rz * 0.28f };
+		bl_mobs_shot(&a->mobs, from, to, wi->shot);
+		sound(a, "arrow");
+	}
+	if (keep) {
+		if (wi->splash > 0.0f)
+			bl_mobs_splash(&a->mobs, to, wi->splash, wi->damage, -1);
+		rival_hit(a, wi->keep_damage);
+		return true;
+	}
+	const int kind = a->mobs.mob[id].kind;
+	const bool guard = bl_mob_is_rival(kind), raider = a->mobs.mob[id].raider;
+	const bool heavy = a->weapon != BL_WP_LASER;
+	const bool dead = bl_mobs_hurt(&a->mobs, id, wi->damage, heavy ? look[0] : 0.0f, heavy ? look[2] : 0.0f);
+	if (wi->splash > 0.0f)
+		a->kills += bl_mobs_splash(&a->mobs, to, wi->splash, wi->damage * 0.7f, id);
+	if (dead && kind == BL_MOB_CHIEF) {
+		;                                                   /* (chief_step tells of it) */
+	} else if (dead && guard) {
 		sound(a, "goblin-die");
 		say(a, kind == BL_MOB_RWORKER ? "A worker of the %s is down" : raider ? "A raider of the %s is down" : "A guard of the %s is down", RIVAL_NAME);
 	} else if (dead) {
 		a->kills++;
 		sound(a, "goblin-die");
 		say(a, "Goblin down (%d)", a->kills);
-	} else {
+	} else if (wi->shot != BL_SHOT_LASER) {
 		sound(a, "hit");
 	}
 	return true;
@@ -2863,14 +3401,18 @@ static void do_break(struct app *a, int64_t now)
 		return;
 	a->arm_swing = 1.0f;
 	int b = a->aimed ? bl_get(a->world, a->aim.x, a->aim.y, a->aim.z) : BL_AIR;
-	if (b == BL_REDKEEP) {
-		rival_strike(a, now);
+	if (bl_red_keep(b))                                     /* (struck by sword_swing, not broken) */
 		return;
-	}
 	if (a->aimed && bl_break(a->world, &a->aim)) {
 		block_sound(a, "break", b);
 		aim_update(a);
 	}
+}
+
+/* the war hammer goes through what a hand has built four times as fast */
+static float dig_speed(const struct app *a, int block)
+{
+	return a->weapon == BL_WP_HAMMER && bl_siege_hp(block) > 0 ? 4.0f : 1.0f;
 }
 
 /* survival: the button is held on a block: the sword first, else the block takes its time (`bl_hardness`) and gives what it leaves (`bl_drop`) */
@@ -2889,13 +3431,12 @@ static void dig_step(struct app *a, int64_t now, float dt)
 		return;
 	}
 	int b = bl_get(a->world, a->aim.x, a->aim.y, a->aim.z);
-	if (b == BL_REDKEEP) {                                      /* their keep: struck, not dug */
+	if (bl_red_keep(b)) {                                       /* their keep: struck (sword_swing), not dug */
 		a->dig_on = false;
-		rival_strike(a, now);
 		return;
 	}
 	if (!bl_breakable(b)) {
-		if (b == BL_KEEP && !a->dig_on) {
+		if (bl_own_keep(b) && !a->dig_on) {
 			a->dig_on = true;                                       /* (said once while the button is held) */
 			say(a, "The keep cannot be broken");
 		}
@@ -2909,7 +3450,7 @@ static void dig_step(struct app *a, int64_t now, float dt)
 		a->dig_t = 0.0f;
 		a->dig_tick = 0.0f;
 	}
-	a->dig_t += dt;
+	a->dig_t += dt * dig_speed(a, b);
 	if (a->dig_t >= a->dig_tick && a->dig_t < bl_hardness(b)) {     /* a blow at it every quarter of a second */
 		block_sound(a, "dig", b);
 		a->dig_tick += 0.28f;
@@ -2982,17 +3523,76 @@ static void look_by(struct app *a, double dyaw, double dpitch)
 	a->pl.pitch = p < -1.553f ? -1.553f : p > 1.553f ? 1.553f : p;
 }
 
-/* the keep has no hit points left: it is gone, and the game with it (a card) */
+/* The keep has no hit points left. With the price of a new one it is built again; without it the game is lost (a card). */
 static void keep_fall(struct app *a)
 {
-	for (int i = 0; i < KEEP_H; i++)
-		bl_set(a->world, a->keep[0], a->keep[1] + i, a->keep[2], BL_AIR);
-	a->have_keep = false;
+	keep_remove(a, a->keep, BL_KEEP);
 	a->keep_hp = 0.0f;
-	keep_sync(a);
 	sound(a, "keep-fall");
+	if (a->inv[BL_GOLD] >= KEEP_GOLD) {
+		a->inv[BL_GOLD] -= KEEP_GOLD;
+		a->keep_down = true;
+		a->keep_back = KEEP_BACK;
+		keep_sync(a);
+		bl_mobs_raid_retreat(&a->mobs);                     /* (they have had their day: no second fall to the same party) */
+		say(a, "Your keep is down! You pay %d gold: it stands again in %.0f seconds", KEEP_GOLD, KEEP_BACK);
+		return;
+	}
+	a->have_keep = false;
+	keep_sync(a);
 	pause_game(a, P_LOST);
 	say(a, "The keep has fallen");
+}
+
+/* a new keep rises where the old one stood; whoever stands there is put on top of it */
+static void keep_rise(struct app *a)
+{
+	a->keep_down = false;
+	keep_build(a, a->keep, BL_KEEP);
+	a->keep_hp = KEEP_HP;
+	keep_sync(a);
+	for (int i = 0; i < BL_KEEP_TALL + 3 && bl_box_hits(a->world, a->pl.x, a->pl.y, a->pl.z, BL_PLAYER_W * 0.5f, BL_PLAYER_H); i++)
+		a->pl.y += 1.0f;
+	say(a, "Your keep stands again");
+	sound(a, "built");
+}
+
+/* the keep that is on its way, the gold the mines bring, the mending by the infirmaries */
+static void works_tick(struct app *a, float dt)
+{
+	if (a->keep_down && (a->keep_back -= dt) <= 0.0f)
+		keep_rise(a);
+	if ((a->look_t -= dt) <= 0.0f) {
+		a->look_t = 1.0f;
+		survey(a);
+	}
+	if ((a->mine_t += dt) >= MINE_EVERY) {
+		a->mine_t = 0.0f;
+		int got = 0;
+		for (int i = 0; i < a->nmine; i++)
+			if (bl_get(a->world, a->mine[i][0], a->mine[i][1], a->mine[i][2]) == BL_MINE)
+				got += mine_take(a, a->mine[i]);
+		if (got)
+			inv_add(a, BL_GOLD, got);
+	}
+	for (int i = 0; i < a->ninfirm; i++) {
+		const float x = (float)a->infirm[i][0] + 0.5f, z = (float)a->infirm[i][2] + 0.5f;
+		if (a->hp > 0.0f && hypotf(a->pl.x - x, a->pl.z - z) < HEAL_RANGE) {
+			a->hp = fminf(MAX_HP, a->hp + 2.0f * dt);
+			break;
+		}
+	}
+	for (int k = 0; k < BL_MOBS_MAX; k++) {
+		struct bl_mob *m = &a->mobs.mob[k];
+		if (!m->alive || !bl_mob_is_unit(m->kind))
+			continue;
+		const float max = m->kind == BL_MOB_SOLDIER ? BL_SOLDIER_HP : BL_WORKER_HP;
+		for (int i = 0; i < a->ninfirm && m->hp < max; i++)
+			if (hypotf(m->x - (float)a->infirm[i][0] - 0.5f, m->z - (float)a->infirm[i][2] - 0.5f) < HEAL_RANGE) {
+				m->hp = fminf(max, m->hp + 1.5f * dt);
+				break;
+			}
+	}
 }
 
 /* The goblins move; their blows take hit points and push the player; he mends slowly when nobody has hit him for a while; no hit points left = dead (a card). */
@@ -3012,6 +3612,8 @@ static void mobs_advance(struct app *a, float dt)
 		say(a, "Your soldiers brought down a worker of the %s", RIVAL_NAME);
 		sound(a, "goblin-die");
 	}
+	if (R.chief_slain > 0)
+		a->kills += R.chief_slain;
 	if (R.guards_slain > 0) {
 		say(a, R.raiders_slain ? "Your soldiers brought down a raider of the %s" : "Your soldiers brought down a guard of the %s", RIVAL_NAME);
 		sound(a, "goblin-die");
@@ -3042,7 +3644,7 @@ static void mobs_advance(struct app *a, float dt)
 		else if (R.sword_hits > 0 && !m->posted && m->swing > 0.6f)
 			sound(a, "clash");
 	}
-	if (R.keep_damage > 0.0f && a->survival && a->have_keep) {
+	if (R.keep_damage > 0.0f && a->survival && a->have_keep && !a->keep_down) {
 		a->keep_hp -= R.keep_damage;
 		if (a->keep_msg_t <= 0.0f) {
 			say(a, "The keep is under attack!");
@@ -3078,7 +3680,7 @@ static void mobs_advance(struct app *a, float dt)
 		if (a->hp <= 0.0f) {
 			a->hp = 0.0f;
 			pause_game(a, P_DEAD);
-			say(a, R.guard_hits ? "The Red Banner got you" : "A goblin got you");
+			say(a, R.chief_hits ? "The Red Captain got you" : R.guard_hits ? "The Red Banner got you" : "A goblin got you");
 		}
 	} else if (a->hp < MAX_HP) {
 		a->regen_t += dt;
@@ -3108,7 +3710,7 @@ static void survival_tick(struct app *a, float dt)
 	a->keep_msg_t = fmaxf(0.0f, a->keep_msg_t - dt);
 	float day = bl_daylight(a->time_h);
 	if (day < 0.3f) {
-		if (!a->in_night && a->have_keep && a->mobs_on) {              /* a night begins: a wave comes for the keep (the bigger the more nights are behind him) */
+		if (!a->in_night && a->have_keep && !a->keep_down && a->mobs_on) {              /* a night begins: a wave comes for the keep (the bigger the more nights are behind him) */
 			int n = 3 + 2 * a->nights > 18 ? 18 : 3 + 2 * a->nights, cap = 3 + a->nights > 10 ? 10 : 3 + a->nights;
 			int brutes = a->nights == 0 ? 0 : (a->nights + 1) / 2 > 4 ? 4 : (a->nights + 1) / 2;       /* from the second night on: the big ones, last of the wave */
 			bl_mobs_start_wave(&a->mobs, n, cap, brutes);
@@ -3137,7 +3739,7 @@ static void survival_tick(struct app *a, float dt)
 		if (a->mobs.wave_on)
 			bl_mobs_end_wave(&a->mobs);
 		a->in_night = false;
-		if (a->have_keep && a->keep_hp < KEEP_HP)
+		if (a->have_keep && !a->keep_down && a->keep_hp < KEEP_HP)
 			a->keep_hp = fminf(KEEP_HP, a->keep_hp + 1.5f * dt);
 	}
 }
@@ -3194,6 +3796,7 @@ static void advance(struct app *a, int64_t now, float dt)
 			if (a->b_break && a->playing)
 				dig_step(a, now, dt);
 			survival_tick(a, dt);
+			works_tick(a, dt);
 		} else if (a->b_break && now >= a->next_break) {
 			do_break(a, now);
 			a->next_break = now + REPEAT_MS;
@@ -3275,6 +3878,22 @@ static void red_flash(struct app *a)
 	}
 }
 
+/* the weapon in the hand, over the right end of the hotbar */
+static void paint_weapon(struct app *a, const struct lay *L)
+{
+	struct wlwin *w = &a->win;
+	char l[80], name[32];
+	snprintf(name, sizeof name, "%s", bl_weapon(a->weapon)->name);
+	name[0] = (char)(name[0] - 'a' + 'A');
+	const int shots = arms_shots(a, a->weapon);
+	if (shots >= 0)
+		snprintf(l, sizeof l, "%s (%d)   Q", name, shots);
+	else
+		snprintf(l, sizeof l, "%s   Q", name);
+	const int right = L->x0 + SLOTS * L->slot + (SLOTS - 1) * L->gap;
+	shadow_text(w, right - lm_font_text_width(l), L->y0 - LM_FONT_H - 18, l, shots == 0 ? 0xff6a5au : 0xffe8a0u);
+}
+
 /* ten hearts over the left end of the hotbar: two hit points each, a half heart is half red */
 static void paint_hearts(struct app *a, const struct lay *L)
 {
@@ -3338,6 +3957,58 @@ static bool panel_on(const struct app *a)
 	return a->panel && wlwin_panes(&a->win);
 }
 
+/* where the game stands: whether their keep can come back */
+static void goal_theirs(const struct app *a, char *out, size_t n)
+{
+	if (a->rival == 2)
+		snprintf(out, n, "You have beaten the %s", RIVAL_NAME);
+	else if (a->rkeep_back > 0.0f)
+		snprintf(out, n, "Their keep rises in %.0f s", ceilf(a->rkeep_back));
+	else if (a->rgold >= KEEP_GOLD)
+		snprintf(out, n, "Their gold %d: they can rebuild (needs %d)", a->rgold, KEEP_GOLD);
+	else
+		snprintf(out, n, "Their gold %d: pull their keep down and you win!", a->rgold);
+}
+
+/* the nearest deposit with gold left in it: its number, -1: there is none */
+static int nearest_gold(const struct app *a)
+{
+	int best = -1;
+	float bd = 1e9f;
+	for (int i = 0; i < a->ndeposits; i++) {
+		const float d = hypotf((float)a->deposit[i][0] - a->pl.x, (float)a->deposit[i][2] - a->pl.z);
+		if (a->ore[i] > 0 && d < bd) {
+			bd = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
+/* the one thing to do next */
+static const char *next_step(const struct app *a)
+{
+	if (a->rival == 2)
+		return "Play on: build what you like";
+	if (a->keep_down)
+		return "Hold on: your keep is being built again";
+	if (nworkers(a) < 2)
+		return "Train workers: Tab, then B (8 planks; X makes planks of logs)";
+	if (a->inv[BL_LOG] + a->inv[BL_PLANKS] / 4 < 3 && nsoldiers(a) == 0)
+		return "Gather wood and stone: Tab, choose workers, 2, right-click a tree";
+	if (a->inv[BL_GOLD] == 0 && a->nmine == 0 && a->arms == 1u << BL_WP_SWORD)
+		return "Dig gold: Tab, choose workers, 2, right-click a gold deposit";
+	if (nsoldiers(a) == 0)
+		return "Build a barracks (Tab, 3) and train a soldier (V)";
+	if (a->nsmithy == 0 && a->arms == 1u << BL_WP_SWORD)
+		return "Build a smithy (Tab, 7) and take a better weapon (R)";
+	if (a->inv[BL_GOLD] < KEEP_GOLD && nsoldiers(a) < 4)
+		return "Save 20 gold for a spare keep and train more soldiers";
+	if (a->rgold >= KEEP_GOLD)
+		return "Rob their gold: dig the deposits, kill their diggers, strike their keep";
+	return "Attack their keep now: they cannot build it again";
+}
+
 /* survival: the keep's hit points over the middle of the top, the nights survived, and under the crosshair how far the block is broken */
 static void paint_survival(struct app *a)
 {
@@ -3351,9 +4022,14 @@ static void paint_survival(struct app *a)
 		if (f > 0.0f)
 			wlwin_round_fill(w, x, y, LM_MAX(8, (int)((float)bw * f)), 12, 5, f > 0.5f ? 0x4cb050u : f > 0.25f ? 0xe0a030u : 0xe04030u);
 		char l[160];
-		snprintf(l, sizeof l, "Keep %d   Nights %d   Workers %d   Soldiers %d   (Tab: command view)", (int)ceilf(a->keep_hp), a->nights, nworkers(a), nsoldiers(a));
+		if (a->keep_down)
+			snprintf(l, sizeof l, "Your keep rises in %.0f s", ceilf(a->keep_back));
+		else if (a->rival >= 1)
+			goal_theirs(a, l, sizeof l);
+		else
+			snprintf(l, sizeof l, "Keep %d   Nights %d", (int)ceilf(a->keep_hp), a->nights);
 		if (!panel_on(a))
-			shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, 0xffffffu);
+			shadow_text(w, (w->bw - lm_font_text_width(l)) / 2, y + 18, l, a->keep_down ? 0xff9a70u : 0xffffffu);
 		if (!panel_on(a) && a->mobs.wave_on && bl_mobs_wave_remaining(&a->mobs) > 0) {
 			int br = bl_mobs_count_brutes(&a->mobs) + a->mobs.wave_brutes;
 			if (br > 0)
@@ -3376,12 +4052,12 @@ static void paint_survival(struct app *a)
 static int stock_list(const struct app *a, int list[BL_COUNT])
 {
 	int n = 0;
-	static const int k_first[3] = { BL_LOG, BL_PLANKS, BL_COBBLE };
-	for (int i = 0; i < 3; i++)
+	static const int k_first[4] = { BL_LOG, BL_PLANKS, BL_COBBLE, BL_GOLD };
+	for (int i = 0; i < 4; i++)
 		if (a->survival || a->inv[k_first[i]] > 0)
 			list[n++] = k_first[i];
 	for (int b = 1; b < BL_COUNT; b++)
-		if (a->inv[b] > 0 && b != BL_LOG && b != BL_PLANKS && b != BL_COBBLE)
+		if (a->inv[b] > 0 && b != BL_LOG && b != BL_PLANKS && b != BL_COBBLE && b != BL_GOLD)
 			list[n++] = b;
 	return n;
 }
@@ -3538,6 +4214,20 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 			shadow_text(w, (int)sx - lm_font_text_width(l) / 2, (int)sy - LM_FONT_H, l, 0xff8a7au);
 		}
 	}
+	for (int i = 0; i < a->ndeposits; i++) {                                 /* the gold */
+		float sx, sy;
+		if (a->ore[i] > 0 && cmd_project(a, cam, (float)a->deposit[i][0] + 0.5f, (float)a->deposit[i][1] + 3.0f, (float)a->deposit[i][2] + 0.5f, &sx, &sy)) {
+			char l[40];
+			snprintf(l, sizeof l, "gold %d", a->ore[i]);
+			shadow_text(w, (int)sx - lm_font_text_width(l) / 2, (int)sy - LM_FONT_H, l, 0xffd830u);
+		}
+	}
+	{
+		const int ci = bl_mobs_chief(&a->mobs);
+		float sx, sy;
+		if (ci >= 0 && cmd_project(a, cam, a->mobs.mob[ci].x, a->mobs.mob[ci].y + BL_CHIEF_H + 0.6f, a->mobs.mob[ci].z, &sx, &sy))
+			shadow_text(w, (int)sx - lm_font_text_width(CHIEF_NAME) / 2, (int)sy - LM_FONT_H, CHIEF_NAME, 0xff7060u);
+	}
 	{                                                                        /* where he stands */
 		float sx, sy;
 		if (cmd_project(a, cam, a->pl.x, a->pl.y + (a->body ? 2.2f : 1.0f), a->pl.z, &sx, &sy)) {
@@ -3552,7 +4242,7 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 		shadow_text(w, 8, y0, "COMMAND VIEW", 0xffe080u);
 		snprintf(l, sizeof l, "Left: choose (drag a box, Shift adds)   Right: %s   1 go there, 2 break blocks", a->order_mode == 1 ? "break that block and the rest of its kind" : "go there");
 		shadow_text(w, 8, y0 + LM_FONT_H + 2, l, 0xffffffu);
-		shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), "Build: 3 to 6 or the bar below, R turns it, Delete takes a plan away", 0xffffffu);
+		shadow_text(w, 8, y0 + 2 * (LM_FONT_H + 2), "Build: 3 to 0 or the bar below, R turns it, Delete takes a plan away", 0xffffffu);
 		snprintf(l, sizeof l, "B: a worker (%d planks)   V: a soldier (a barracks, %d cobble, %d planks)", WORKER_COST, SOLDIER_COBBLE, SOLDIER_PLANKS);
 		shadow_text(w, 8, y0 + 3 * (LM_FONT_H + 2), l, 0xffffffu);
 		shadow_text(w, 8, y0 + 4 * (LM_FONT_H + 2), a->rival == 1 && a->rival_on ? "WASD move   arrows turn   wheel zoom   Home back   End: their camp   Tab or Esc: back to him" : "WASD move   arrows turn   wheel zoom   Home back   Tab or Esc: back to him", 0xffffffu);
@@ -3560,9 +4250,8 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 		shadow_text(w, 8, y0 + 5 * (LM_FONT_H + 2), l, 0xc8e8ffu);
 	}
 	for (int i = 0; i < BL_PLAN_COUNT; i++) {                                /* the plans */
-		int x, y, bw, bh, cob, pl;
+		int x, y, bw, bh;
 		bar_rect(a, i, &x, &y, &bw, &bh);
-		bl_plan_cost(i, &cob, &pl);
 		if (a->plan == i) {
 			wlwin_round_fill(w, x - 3, y - 3, bw + 6, bh + 6, lm_button_radius(13), lm_theme.accent);
 			wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius(11), lm_theme.background);
@@ -3570,16 +4259,14 @@ static void paint_cmd(struct app *a, const struct bl_camera *cam)
 			wlwin_round_fill(w, x - 1, y - 1, bw + 2, bh + 2, lm_button_radius(11), lm_theme.bar);
 			wlwin_round_fill(w, x, y, bw, bh, lm_button_radius(10), lm_theme.background);
 		}
-		snprintf(l, sizeof l, "%d %s", i + 3, plan_title(i));
+		snprintf(l, sizeof l, "%d %s", (i + 3) % 10, plan_title(i));
 		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 3, l, 1, lm_theme.text_bright, bw - 6);
 		if (!a->survival)
 			snprintf(l, sizeof l, "free");
-		else if (pl)
-			snprintf(l, sizeof l, "%d cobble %d planks", cob, pl);
 		else
-			snprintf(l, sizeof l, "%d cobble", cob);
-		if (lm_font_text_width(l) > bw - 6)
-			snprintf(l, sizeof l, "%dc %dp", cob, pl);
+			plan_cost_text(i, false, l, sizeof l);
+		if (a->survival && lm_font_text_width(l) > bw - 6)
+			plan_cost_text(i, true, l, sizeof l);
 		wlwin_text(w, x + LM_MAX(3, (bw - lm_font_text_width(l)) / 2), y + 5 + LM_FONT_H, l, 1, plan_affordable(a, i) ? lm_theme.text_dim : lm_theme.caution, bw - 6);
 	}
 	if (a->plan >= 0 && a->has_pointer && bar_at(a, a->px, a->py) < 0) {     /* what a click would do, by the pointer */
@@ -3621,29 +4308,42 @@ static void paint_debug(struct app *a)
 /* ---- the help: pages of text with a list of topics (F1; wlhelp.h; a feature of the game needs its line here) ---- */
 static const char *const HP_WELCOME[] = {
 	"# What this is",
-	"A world made of blocks, in the first person. You walk, look, break blocks and put them back. By day it is quiet; at night goblins come out of the ground, and in survival you have a keep to defend with workers and soldiers you command from above.",
+	"A world made of blocks, in the first person. A new game is either a game or free building; you choose when you give it its name, and it stays so.",
+	"- A game: you have a keep, the Red Banner has one too, there is gold to fight over, and at night goblins come out of the ground.",
+	"- Free building: every block, breaking at once, nothing used up, nobody about.",
+	"# How to win",
+	"Pull down the Red Banner's keep when they have under 20 gold, so that they cannot build it again. You lose when your keep falls and you have under 20 gold. The page Winning tells how; G in the game shows it in short, and the panel says what to do next.",
 	"# The window",
-	"- The picture is drawn at a smaller size and stretched, so it stays quick; it takes more pixels by itself when the machine has the time.",
-	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In survival the number under a block is how many you have.",
-	"- Ten hearts over the hotbar are your hit points. In survival the keep's bar is at the top.",
-	"# The panel",
-	"Everything the game says in words stands in a panel of its own beside the window: the keep, the Red Banner, what you have, in the command view its orders, and the messages with the earlier ones under them. Drag it anywhere on the screen by pressing on it, while the game is paused or in the command view; it stays where you left it. I switches between the panel and text over the picture.",
-	"- Without the panel the same stands over the picture. The list at the right is then what you have: in survival the wood, the planks and the cobble always and then everything else you carry; in creative, where nothing is used up, what you and your workers have gathered. The panel lists the same.",
-	"# Sounds",
-	"Blocks sound of what they are made of; the sword, the goblins, your soldiers, the builders, the keep's bell, the horn of a wave and the dawn have their own sounds. They follow Settings > Sound > Sound feedback and the chosen output; --no-sound starts without them.",
+	"- The row of nine squares at the bottom is the hotbar: what is in your hand is the lit one. In a game the number under a block is how many you have.",
+	"- Ten hearts over the hotbar are your hit points, at the right the weapon in your hand. Your keep's bar is at the top.",
+	"- The panel beside the window holds everything the game says in words. Drag it anywhere while the game is paused or in the command view; I switches between the panel and text over the picture.",
 	"# To start",
 	"|Click|Click in the window: the pointer is locked to it and the game goes on. Esc lets the pointer go and pauses.",
 	"|F1|These pages.",
 	"|Ctrl+Q|Quit.",
-	"# The buttons at the left",
-	"New, Open, Save, Save as; Play or Pause, the command view, the blocks, sound on and off; ? for these pages. They work while the pointer is free: when the game is paused and in the command view.",
-	"# Worlds",
-	"Every world is a file of its own, with where you stand, what you have, the keep, the workers and the buildings in it. The one that was open last is opened the next time; the window's title says which it is.",
-	"|Ctrl+S|Save (the world also saves itself every minute and when you pause or quit).",
-	"|Ctrl+Shift+S|Save as: the world goes into another file and goes on there; the old file stays as it was saved last. It asks before it replaces a world.",
-	"|Ctrl+O|Open another world; the one you are in is saved first.",
-	"|Ctrl+N|A new world in a file of its own (world-2, world-3 ...); the old one stays.",
-	"A world started with --seed or --flat has no file: Save as gives it one. Worlds are deleted in the file manager.",
+	"# Saved games",
+	"Every game is a file of its own with the name you gave it. The one that was open last is opened the next time.",
+	"|Ctrl+N|A new game: it asks for its name. The old one stays saved.",
+	"|Ctrl+O|Open another game; the one you are in is saved first.",
+	"|Ctrl+S|Save (the game also saves itself every minute and when you pause or quit).",
+	"|Ctrl+Shift+S|Save as: the game goes into another file and goes on there.",
+};
+
+static const char *const HP_WINNING[] = {
+	"# The two keeps",
+	"A keep is the castle with corner turrets and a tall tower: yours grey with red shields, theirs dark with red banners. Yours cannot be broken by your own hand. A keep is not a barracks.",
+	"# A keep can be built again - for gold",
+	"A keep that falls rises again if its owner has 20 gold: yours after half a minute, theirs after forty-five seconds. Whoever cannot pay has lost.",
+	"They start with 20 gold, enough for one new keep. Their workers dig more of it from the deposits. So take their gold away:",
+	"- Kill their gold diggers (a deposit near their camp is where they go).",
+	"- Dig the deposits yourself before they do: the gold is limited, there is no more of it in the world.",
+	"- Pull their keep down once to make them spend it, then again.",
+	"# A way to win",
+	"- 1. Tab: choose workers, press 2, right-click trees and stone. Press B for more workers.",
+	"- 2. Send some to the gold near your keep (Tab shows every deposit and what is left in it). A mine beside a deposit digs by itself.",
+	"- 3. Build a barracks (3) and train soldiers (V). Build a smithy (7) and take a better weapon (R).",
+	"- 4. Guard a deposit near their camp, or raid their workers there.",
+	"- 5. Strike their keep: the war hammer and the fire staff do it quickest. Soldiers you send to it (right-click it in the command view) strike too.",
 };
 
 static const char *const HP_MOVING[] = {
@@ -3654,196 +4354,140 @@ static const char *const HP_MOVING[] = {
 	"|Shift|Sneak: slow, lower, and you do not walk off an edge. While flying it goes down.",
 	"|Ctrl|Run.",
 	"|F|Fly (double speed with Ctrl). Press it again to come down.",
-	"# You",
-	"You have a body. In the lower right is your arm with the block you hold, or the sword when a goblin is near; look down and you see your chest and boots. From the command view you are the figure in the purple tunic and the white cape. Goblins, workers, soldiers, Tom and Filip cannot walk through you: they give way, or you do.",
-	"|H|Hide your body, or show it again.",
-	"# Time",
-	"|[ and ]|Move the clock an hour back or on.",
-	"|T|The clock stands still, runs (a day is twenty minutes), or follows the real sun of the place the computer is in: the real sunrise is six o'clock here and the real sunset is six in the evening.",
-	"|F3|Numbers: where you are, what you aim at, how quick the picture is.",
-	"# Water and falling",
-	"Water slows you down and holds you up. A hop out of it onto the bank works with Space. A fall does not hurt.",
-};
-
-static const char *const HP_BUILDING[] = {
-	"# Breaking and putting",
-	"|Left button|Break the block you aim at (hold it). In survival a block takes time and the crosshair shows how far it is.",
-	"|Right button|Put the block in your hand against the face you aim at. One click, one block: held for half a second it goes on, four a second (breaking too).",
+	"A fall does not hurt. Water slows you down and holds you up.",
+	"# Blocks",
+	"|Left button|Break the block you aim at (hold it). In a game a block takes time.",
+	"|Right button|Put the block in your hand against the face you aim at.",
 	"|Middle button|Take the block you aim at into your hand.",
 	"|1 to 9, wheel|Choose the square of the hotbar.",
-	"|E|The palette: every block you can put. A click puts it into the square in your hand. In survival only what you have.",
-	"# The blocks",
-	"- Grass, dirt, stone, sand, snow, cobble, brick, planks, logs, leaves and glass are what you expect them to be.",
-	"- A torch gives light and stands on a block; it goes if the block under it goes. A lamp is a block that shines.",
-	"- Water you put by hand is a source and flows: down first, then out as far as seven blocks. Take the source away and the flow dries up.",
-	"- Bedrock at the bottom cannot be broken. The keep (a tower of three grey blocks) cannot be broken by hand either.",
-	"- A barracks, a watchtower, a wall and a gate are built by workers (see Buildings). A gate lets you and your people through and stops the goblins.",
-	"# Light",
-	"Torches and lamps light the blocks round them; a cave without one is dim. The light goes round corners and through glass and water, and goes when the torch does.",
+	"|E|The palette: every block you can put; in a game only what you have.",
+	"|X|Make something of the block in your hand: a log makes four planks, planks two torches, sand glass, cobble stone, stone brick.",
+	"- Dirt, sand and snow take half a second, planks and logs about one, stone, brick and gold two and more. Grass leaves dirt, stone leaves cobble, leaves and glass nothing.",
+	"- A torch gives light and stands on a block. Water you put by hand is a source and flows.",
+	"# Time",
+	"|[ and ]|Move the clock an hour back or on.",
+	"|T|The clock stands still, runs (a day is twenty minutes), or follows the real sun.",
+	"|F3|Numbers.",
 };
 
-static const char *const HP_SURVIVAL[] = {
-	"# Two modes",
-	"|G|Switch between survival and creative. A new world starts in survival; a world saved before this had survival is a creative one.",
-	"- Creative: every block, breaking at once, nothing used up.",
-	"- Survival: a block takes time, what it leaves goes into your pockets, a block you put is used up.",
-	"# How long a block takes (held)",
-	"|Leaves, torch|A moment.",
-	"|Dirt, sand, grass, snow|Half a second or so.",
-	"|Planks, logs|About one second.",
-	"|Stone, cobble, brick|Two seconds and a little.",
-	"# What a block leaves",
-	"Grass leaves dirt and stone leaves cobble; leaves and glass leave nothing; everything else leaves itself. A block that is not in the hotbar takes the place of an empty square.",
-	"# Making things",
-	"|X|Make something of the block in your hand.",
-	"|Log|Four planks.",
-	"|Planks|Two torches.",
-	"|Sand|Glass.",
-	"|Cobble|Stone.",
-	"|Stone|Brick.",
-};
-
-static const char *const HP_NIGHT[] = {
-	"# Goblins",
-	"At night goblins come out of the ground fourteen to twenty-six blocks from you, in the open. They walk at you, climb a block that is one high, and hit when they are near: three of your twenty hit points a blow, once a second, and they push you away. Leaves do not stop them, nor your sword.",
-	"They go for your workers and soldiers too: one within ten blocks first, one within twenty-four when it is nearer than you and the keep. When your people are more than thirty blocks from you (in a wave: from the keep), some goblins come out of the ground near them (at night up to three, besides the six round you).",
-	"In daylight a goblin that stands in the open burns up in about five seconds; one under a roof or in water does not. They never come by day.",
-	"# Brutes",
-	"From the second night on the last goblins of a wave are brutes: bigger (taller than you), darker, with horns and a plate on the chest. A brute has twenty-six hit points - seven blows of the sword - walks slower than a goblin, and hits for five of your hit points, a worker's or a soldier's, and four of the keep's.",
-	"# The sword",
-	"The left button is the sword when a goblin is nearer than the block you aim at: three blows kill one and no block behind it is broken. The crosshair turns red when a blow lands.",
+static const char *const HP_WEAPONS[] = {
+	"# Fighting",
+	"The left button uses the weapon in your hand when an enemy (or their keep) is within its reach and in sight; else it breaks the block you aim at. The crosshair turns red when a blow lands.",
+	"|Q|Take the next weapon you have.",
+	"|R|The weapons: take one, or have one made. In a game a smithy or a mage tower has to stand somewhere.",
+	"# The weapons",
+	"|Sword|You have it. Quick, close by.",
+	"|Spear|Smithy: 2 gold, 4 planks. Reaches farther.",
+	"|War hammer|Smithy: 4 gold, 8 cobble. Slow; much harder on the keep, and it breaks walls four times as fast.",
+	"|Bow|Smithy: 3 gold, 6 planks. Far; each arrow costs a plank.",
+	"|Fire staff|Mage tower: 10 gold. A burst that hurts everybody near the one it hits; one gold is five shots. Good against the keep.",
+	"|Laser|Mage tower: 15 gold. A beam that reaches very far; one gold is thirty shots.",
 	"# Hit points",
-	"Hit points come back, one every three seconds, six seconds after the last blow. At nought you die: a card says so, and Respawn puts you back at the start with the world as you left it.",
-	"|M|Switch the goblins off and on (the ones there are go).",
-	"|P|Show or hide Tom the cat and Filip the turtle, who live near where you start. A solid block cannot be put into them and they cannot be hurt.",
-};
-
-static const char *const HP_KEEP[] = {
-	"# The keep",
-	"In survival a tower of three grey blocks with a red shield stands near where you start. It has sixty hit points, mends by day and cannot be broken by hand. When it falls the game is over.",
-	"Goblins that do not have you within eight blocks go for the keep, or for your workers if they see any, and hit what they find. A goblin that has you within eight blocks goes for you.",
-	"# Nights",
-	"Each night the keep stands is counted at the top. The clock has to run (T) for the nights to pass.",
-	"# Workers",
-	"Two workers come with a new survival world. They do what you tell them from the command view and can be killed (two blows).",
-	"|B|Train another worker, up to eight: eight planks (free in creative).",
-	"|V|Train a soldier (see Soldiers, waves).",
-};
-
-static const char *const HP_SOLDIERS[] = {
-	"# Barracks",
-	"Soldiers need a barracks: a house with a blue banner over its door, built by workers from the command view (see Buildings) within forty blocks of the keep. The banner block is what counts: without it the house trains nobody.",
-	"|V|In the command view: train a soldier. He stands by the barracks. It costs six cobble and four planks (free in creative) and takes a barracks: four soldiers to each, eight in all.",
-	"# Soldiers",
-	"A soldier has fourteen hit points and a sword that does what yours does: three blows kill a goblin. He goes after a goblin that comes within twelve blocks of him (and within eighteen of his post), then goes back to his post and stands guard.",
-	"|Right button|Soldiers you have chosen walk to the place you point at and that is their new post. Mode 2 does not matter to them: only workers break blocks.",
-	"|Backspace|The soldier stops where he is and that is his post.",
-	"Goblins go for soldiers as they go for workers: four of them kill one, two soldiers can hold off two.",
-	"# Waves",
-	"When night begins and the keep stands a wave of goblins comes out of the ground twenty to thirty-two blocks from the KEEP (not from you) and walks at it. The first night it is three, each night after it two more (up to eighteen), and no more than three to ten are there at a time. The top of the window tells how many are left.",
-	"From the second night on the last goblins of the wave are brutes: one on the second night, one more every two nights, four at most. They come last.",
-	"At dawn the wave is over and the keep mends. Surviving the night is counted, and when a wave was fought the keep's people leave a tribute at its foot: four planks and three cobble, and two more of each for every night you have survived (thirty planks and twenty-four cobble at most). Soldiers are what makes the difference: put the barracks and the soldiers between the goblins and the keep.",
+	"Hit points come back, one every three seconds, six seconds after the last blow; near an infirmary much faster. At nought you die: Respawn puts you back at the start with the world as you left it.",
 };
 
 static const char *const HP_COMMAND[] = {
 	"# The command view",
-	"|Tab|Look down from above and command your workers. Tab or Esc takes you back to the hero. The goblins and the workers go on meanwhile; the hero stands still.",
-	"# Choosing",
-	"|Left button|Click a worker to choose him, or pull a box over several. Shift adds or takes one away. A click on nothing lets go.",
-	"|Ctrl+A|Choose all workers.",
-	"# Giving orders",
-	"|Right button|Send the chosen workers where the pointer is (mode 1), or have them break that block and the next of its kind (mode 2).",
-	"|1, 2|Mode 1: go there. Mode 2: break. The mode is written at the top.",
-	"|3 to 6|Build: see the page Buildings.",
+	"|Tab|Look down from above and command your people. Tab or Esc takes you back to the hero, who stands still meanwhile.",
+	"|Left button|Click one to choose him, or pull a box over several. Shift adds or takes one away.",
+	"|Ctrl+A|Choose everybody.",
+	"|Right button|Send the chosen where the pointer is (mode 1), or have workers break that block and the next of its kind (mode 2).",
+	"|1, 2|Mode 1: go there. Mode 2: break (trees, stone, gold).",
 	"|Backspace|Stop what the chosen are doing.",
+	"|B|Train a worker: 8 planks, up to eight.",
+	"|V|Train a soldier: 6 cobble, 4 planks, at a barracks.",
 	"# Gathering",
-	"A worker stands beside the block, works for one and a half times as long as you would and then goes on to the next block of the same kind within six blocks. For a tree click its trunk or its leaves (in mode 2): the whole trunk and the leaves of its crown go together, and he goes on to the next tree. Your workers and soldiers push through leaves. What he breaks goes into your pockets.",
+	"A worker goes on to the next block of the same kind within six blocks. For a tree click its trunk or leaves. What he breaks goes into your pockets.",
 	"# The camera",
 	"|W A S D|Move the view.",
 	"|Arrows|Turn it.",
 	"|Wheel|Come nearer or go further.",
-	"|Home|Back to the keep.",
+	"|Home, End|Back to your keep; look at theirs.",
 };
 
 static const char *const HP_BUILDINGS[] = {
 	"# How to build",
-	"In the command view (Tab) pick a building with 3 to 6 or the bar at the bottom. A see-through preview follows the pointer: green where it can be built, red where not, with the reason by the pointer. The left button places it and the price is taken from your pockets (nothing in creative).",
-	"The workers you have chosen go and build it, or every idle worker when none is chosen. A worker puts a block every half second; two are twice as quick. The blue see-through blocks are what is still to come.",
-	"|R|Turn the building. It also turns with the camera: the front of a barracks faces you.",
-	"|Right button|With a plan in hand: put it aside. With workers chosen (mode 1) on a planned building: they build it.",
-	"|Delete|Point at a planned building: it is given up and the price of what is not built yet comes back.",
-	"|Esc|Put the plan aside.",
+	"In the command view pick a building with the keys 3 to 0 or the bar at the bottom. The preview is green where it can be built. The left button places it and the price is taken from your pockets. The chosen workers build it, else every idle one.",
+	"|R|Turn the building.",
+	"|Delete|Point at a planned building: it is given up and the price comes back.",
+	"|Esc, right button|Put the plan aside.",
 	"# The buildings",
-	"|3 Barracks|20 cobble, 16 planks. A house of five by four where soldiers are trained. It wants flat, empty ground within forty blocks of the keep.",
-	"|4 Watchtower|20 cobble, 10 planks. Flat ground, three by three. A soldier on it shoots arrows.",
-	"|5 Wall|6 cobble. Three long, two high, following the ground. It stays in your hand, so a row is quick. Walls that share a corner join.",
-	"|6 Gate|6 cobble, 4 planks. Two posts and a gate: you, your workers and your soldiers walk through it, goblins do not.",
-	"# The watchtower",
-	"Choose a soldier and right-click the tower: he goes to its foot and climbs up. From there he shoots goblins within twenty blocks that he can see - four arrows kill one - and the goblins leave him alone. Send him somewhere else, or press Backspace, and he comes down. One soldier to a tower. If the block with the yellow flag is broken he falls and is on the ground again.",
-	"# Goblins and walls",
-	"Everybody walks round what is in the way when there is a way: your people through gates. A goblin that is after you, your people or the keep and has no way there, or only a very long one, goes straight on and hammers at a made block in its path - cobble, planks, brick, glass, a gate - until it breaks: so a wall has to be closed all round to hold them. A wall holds one goblin for some twenty seconds, a gate for fifteen, a brute is quicker. Stone and earth of the land itself they leave alone. Broken blocks are not repaired by themselves: plan the wall again over the gap.",
+	"|3 Barracks|12 cobble, 8 planks. Soldiers are trained there, four to each. Within forty blocks of the keep.",
+	"|4 Watchtower|20 cobble, 10 planks. A soldier on it shoots arrows (right-click it with him chosen).",
+	"|5 Wall|6 cobble. Stays in your hand, so a row is quick.",
+	"|6 Gate|6 cobble, 4 planks. Your people walk through, goblins and the Red Banner do not.",
+	"|7 Smithy|12 cobble, 6 planks. Spear, war hammer and bow.",
+	"|8 Mage tower|24 cobble, 8 planks, 8 gold. Fire staff and laser.",
+	"|9 Infirmary|6 cobble, 12 planks. You and your people near it mend quickly.",
+	"|0 Mine|6 cobble, 10 planks. Beside gold: it digs one piece every ten seconds from within six blocks.",
+	"The block with the sign (banner, anvil, crystal, cross, winch) is what counts: without it the house does nothing.",
+};
+
+static const char *const HP_SOLDIERS[] = {
+	"# Soldiers",
+	"A soldier has fourteen hit points and a sword like yours. He goes after an enemy that comes near his post, then goes back. Send him somewhere with the right button and that is his new post; send him to the Red Banner's keep and he strikes it.",
+	"# Goblins",
+	"At night goblins come out of the ground. They go for you, your people and your keep. In daylight those in the open burn up. From the second night on the last of a wave are brutes: bigger, twenty-six hit points, five a blow.",
+	"# Waves",
+	"When night begins a wave comes for your keep: three the first night, two more each night. Surviving a night with a wave leaves planks and cobble at the keep.",
+	"# Walls",
+	"Goblins and raiders that cannot get round a wall hammer at it until it breaks. Stone and earth of the land they leave alone.",
 };
 
 static const char *const HP_RIVAL[] = {
 	"# The Red Banner",
-	"A rival clan. A new survival world has it from the start; in a world you have already, press K (or the flag at the left): it asks, then makes camp 80 to 120 blocks away and levels the ground there. K again sends its men away, and once more brings them back.",
-	"# Their camp",
-	"A wall with a gateway on two sides, their keep with the red banner in the middle, a watchtower with an archer, and six tough guards in black with red helmets (each more than a match for one soldier). A guard fights you, your people and the goblins that come near his post; he does not follow far. While the camp stands, a lost guard is replaced 45 seconds later, when there is material for him.",
+	"The rival clan: every game has it, 80 to 120 blocks from your keep. A wall with two gateways, their keep in the middle, a watchtower with an archer, guards in black with red helmets and workers in dark red with a sack.",
+	"# The Red Captain",
+	"Their chief wears a crown and a red cape. He flies, over walls and water too, and takes the best weapon he has for the distance: sword and bow to begin with, then, with gold to spare, spear, war hammer, fire staff and laser. He guards the camp and leads every second raiding party; badly hurt he flies home. When he falls he is back after ninety seconds, as long as their keep stands.",
 	"# Their workers",
-	"Four workers in dark red with a sack on the back keep the camp supplied: they fell trees, cut stone that sticks out of the ground and, where there is neither, forage. Every trip to their keep adds to the store (a tree 2, the rest 1), which holds 60 at most. A guard costs 5 of it and each raider 4. A worker does not fight: it runs for the keep when you or your people come near. One that is gone is replaced after 90 seconds.",
+	"They fell trees, cut stone and dig gold. Trees and stone fill their store, which pays for guards (5), raiders (4) and buildings; gold pays for a new keep and the Captain's weapons. A worker runs home when you or your people come near.",
 	"# The camp grows",
-	"With material to spare they build a longhouse outside the wall (30: then eight guards instead of six, and raiding parties up to six instead of four), then two more watchtowers with archers (20 each). What you pull down they build again. Catch their workers, and fewer men come against you. The command view shows their store over the camp.",
+	"With material to spare they build a longhouse (then more men) and two more watchtowers. What you pull down they build again.",
 	"# Raids",
-	"By day a raiding party sets out for your keep, the first after five minutes of play (two in creative): two men the first time, one more each time after, four at most until they have a longhouse, then six; a party waits until the camp can pay for two at least, and comes smaller when it cannot pay for all. The next one is four minutes after the last one is over. The horn tells you, the top right says how far the nearest raider is and which way. They fight whom they meet, break walls and gates that stop them and, in survival, strike your keep. In creative they cannot hurt the keep: they go after you and your people near it and, with nothing to do, go home. If you die, they go home too.",
-	"# Winning",
-	"Their keep takes 200 hit points. Strike it with the left button (3 a blow), or send soldiers: right-click their keep in the command view and they attack it when no enemy is about. When it falls, you have won.",
+	"By day a raiding party sets out for your keep, the first after five minutes of play, then four minutes after the last is over: two men, one more each time, up to six.",
 	"# Finding them",
-	"The top right says how far their camp is and which way. In the command view End looks at it, and their guards are marked red.",
-	"|K|Bring the Red Banner, send it away, bring it back.",
+	"The top right says how far their camp is and which way. In the command view End looks at it.",
 };
 
 static const char *const HP_KEYS[] = {
-	"# Moving",
+	"# Moving and blocks",
 	"|W A S D|Walk",
 	"|Space, Shift, Ctrl|Jump, sneak, run",
 	"|F|Fly",
-	"# Blocks",
-	"|Left, right, middle|Break, put, take",
+	"|Left, right, middle|Fight or break, put, take",
 	"|1 to 9, wheel|Choose a square",
 	"|E|Palette",
-	"|X|Make something (survival)",
-	"# Game",
-	"|G|Survival / creative",
-	"|M|Goblins on / off",
-	"|P|Tom and Filip on / off",
-	"|H|Your body shown / hidden",
-	"|I|The panel of text on / off",
+	"|X|Make something",
+	"# Fighting",
+	"|Q|Next weapon",
+	"|R|Weapons",
+	"|G|How to win",
+	"# Command view",
 	"|Tab|Command view",
-	"|B|Train a worker (command view)",
-	"|V|Train a soldier (command view)",
-	"|3 4 5 6|Barracks, watchtower, wall, gate (command view)",
-	"|R, Delete|Turn a building, give a planned one up (command view)",
-	"# Time",
+	"|B, V|Train a worker, a soldier",
+	"|3 to 0|Buildings",
+	"|1, 2|Go there, break",
+	"|R, Delete|Turn a building, give a planned one up",
+	"|End, Home|Their keep, yours",
+	"# Others",
+	"|I|The panel of text",
 	"|[ ]|The clock an hour",
 	"|T|Stand / run / real sun",
-	"# Others",
 	"|F1|These pages",
 	"|F3|Numbers",
 	"|Esc|Pause",
 	"|Ctrl+S, Ctrl+Shift+S|Save, save as",
-	"|Ctrl+O, Ctrl+N, Ctrl+Q|Open a world, new world, quit",
+	"|Ctrl+O, Ctrl+N, Ctrl+Q|Open a game, new game, quit",
 };
 
 static const struct wlhelp_page BLOCKS_HELP[] = {
 	{ "Welcome", HP_WELCOME, WLHELP_N(HP_WELCOME) },
-	{ "Moving", HP_MOVING, WLHELP_N(HP_MOVING) },
-	{ "Building", HP_BUILDING, WLHELP_N(HP_BUILDING) },
-	{ "Survival", HP_SURVIVAL, WLHELP_N(HP_SURVIVAL) },
-	{ "Night, sword", HP_NIGHT, WLHELP_N(HP_NIGHT) },
-	{ "The keep", HP_KEEP, WLHELP_N(HP_KEEP) },
-	{ "Soldiers, waves", HP_SOLDIERS, WLHELP_N(HP_SOLDIERS) },
+	{ "Winning", HP_WINNING, WLHELP_N(HP_WINNING) },
+	{ "Moving, blocks", HP_MOVING, WLHELP_N(HP_MOVING) },
+	{ "Weapons", HP_WEAPONS, WLHELP_N(HP_WEAPONS) },
 	{ "The command view", HP_COMMAND, WLHELP_N(HP_COMMAND) },
 	{ "Buildings", HP_BUILDINGS, WLHELP_N(HP_BUILDINGS) },
+	{ "Soldiers, goblins", HP_SOLDIERS, WLHELP_N(HP_SOLDIERS) },
 	{ "The Red Banner", HP_RIVAL, WLHELP_N(HP_RIVAL) },
 	{ "All the keys", HP_KEYS, WLHELP_N(HP_KEYS) },
 };
@@ -3861,6 +4505,21 @@ static bool file_card(const struct app *a)
 {
 	return a->prompt == P_OPEN || a->prompt == P_SAVEAS;
 }
+
+/* the card of a new game: the name's field and under it the two modes (their rectangles) */
+static void name_layout(const struct app *a, struct wlcard *c, int *fx, int *fy, int *fw, int *my, int *mw)
+{
+	c->w = LM_MIN(540, a->win.bw - 16);
+	c->h = LM_MIN(256, a->win.bh - 16);
+	wlcard_center(&a->win, c);
+	*fx = c->x + WLCARD_PAD;
+	*fy = c->y + WLCARD_PAD + 40;
+	*fw = c->w - 2 * WLCARD_PAD;
+	*my = *fy + 40;
+	*mw = (*fw - 10) / 2;
+}
+#define MODE_H 52
+#define ARMS_ROW 40
 
 /* a card that has to be answered before anything else: the rail waits */
 static bool modal_card(const struct app *a)
@@ -3883,14 +4542,20 @@ static void file_layout(const struct app *a, struct wlcard *c, int *fx, int *fy,
 
 static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 {
-	*nb = a->prompt == P_PAUSE ? 4 : (a->prompt == P_NEW || a->prompt == P_REPLACE || a->prompt == P_CLAN || file_card(a)) ? 2 : 1;
+	*nb = a->prompt == P_PAUSE ? 4 : (a->prompt == P_NEW || a->prompt == P_REPLACE || file_card(a)) ? 2 : 1;
+	if (a->prompt == P_NEW) {
+		int fx, fy, fw, my, mw;
+		name_layout(a, c, &fx, &fy, &fw, &my, &mw);
+		return;
+	}
 	if (file_card(a)) {
 		int fx, fy, fw, ly, rows;
 		file_layout(a, c, &fx, &fy, &fw, &ly, &rows);
 		return;
 	}
-	int ch = a->prompt == P_HELP ? 580 : a->prompt == P_PAUSE ? 222 : (a->prompt == P_DEAD || a->prompt == P_LOST || a->prompt == P_NEW || a->prompt == P_WON) ? 150 : a->prompt == P_CLAN ? 172 : 130;
-	int cw = a->prompt == P_HELP ? 940 : a->prompt == P_PAUSE ? 540 : 470;
+	int ch = a->prompt == P_HELP ? 580 : a->prompt == P_PAUSE ? 222 : (a->prompt == P_DEAD || a->prompt == P_LOST || a->prompt == P_WON) ? 150 : a->prompt == P_GOAL ? 290 :
+	         a->prompt == P_ARMS ? 116 + BL_WP_COUNT * ARMS_ROW : 130;
+	int cw = a->prompt == P_HELP ? 940 : a->prompt == P_PAUSE ? 540 : a->prompt == P_GOAL ? 600 : a->prompt == P_ARMS ? 560 : 470;
 	if (a->prompt == P_PALETTE) {
 		int cell = pal_cell(a);
 		cw = PAL_COLS * cell + 2 * WLCARD_PAD;
@@ -3899,6 +4564,18 @@ static void card_rect(const struct app *a, struct wlcard *c, int *nb)
 	c->w = LM_MIN(cw, a->win.bw - 16);
 	c->h = LM_MIN(ch, a->win.bh - 16);
 	wlcard_center(&a->win, c);
+}
+
+/* the armoury's rows: which is at a point, -1 none */
+static int arms_at(const struct app *a, double px, double py)
+{
+	if (a->prompt != P_ARMS)
+		return -1;
+	struct wlcard c;
+	int nb;
+	card_rect(a, &c, &nb);
+	const int i = (int)floor((py - c.y - 38) / ARMS_ROW);
+	return px >= c.x + WLCARD_PAD && px < c.x + c.w - WLCARD_PAD && py >= c.y + 38 && i < BL_WP_COUNT ? i : -1;
 }
 
 /* the palette's squares: the top left of the first one, and which one is at a point */
@@ -3929,8 +4606,8 @@ static void paint_card(struct app *a)
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
-	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new world" : a->prompt == P_HELP ? "Help" : a->prompt == P_PALETTE ? "Blocks" :
-	                    a->prompt == P_CLAN ? "The Red Banner" : a->prompt == P_WON ? "Victory" : a->prompt == P_OPEN ? "Open a world" : a->prompt == P_SAVEAS ? "Save the world as" : a->prompt == P_REPLACE ? "Replace the world" : a->first ? "Blocks" : "Paused";
+	const char *title = a->prompt == P_LOST ? "The keep has fallen" : a->prompt == P_DEAD ? "You died" : a->prompt == P_NEW ? "A new game" : a->prompt == P_HELP ? "Help" : a->prompt == P_PALETTE ? "Blocks" :
+	                    a->prompt == P_GOAL ? "How to win" : a->prompt == P_ARMS ? "Weapons" : a->prompt == P_WON ? "Victory" : a->prompt == P_OPEN ? "Open a world" : a->prompt == P_SAVEAS ? "Save the world as" : a->prompt == P_REPLACE ? "Replace the world" : a->first ? "Blocks" : "Paused";
 	wlcard_frame(w, &c, c.w, c.h, title, lm_theme.accent, lm_theme.background, lm_theme.text_bright);
 	char name[300];
 	world_name(a->path, name, sizeof name);
@@ -3941,7 +4618,7 @@ static void paint_card(struct app *a)
 	if (a->prompt == P_PAUSE) {
 		labels[0] = "Quit";
 		labels[1] = "Save";
-		labels[2] = "New world";
+		labels[2] = "New game";
 		labels[3] = "Play";
 		cols[0] = lm_theme.btn_red;
 		cols[1] = lm_theme.btn_blue;
@@ -3954,12 +4631,12 @@ static void paint_card(struct app *a)
 		wlwin_text(w, tx, ty, a->first ? "Click in the window to look around and play." : "Click in the window to go on.", 1, lm_theme.text, tw);
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, "W A S D walk, Space jumps, Shift sneaks, Ctrl runs, F flies.", 1, lm_theme.text_dim, tw);
 		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Left button breaks, right button puts a block, 1 to 9 choose it.", 1, lm_theme.text_dim, tw);
-		wlwin_text(w, tx, ty + 3 * (LM_FONT_H + 5), "Esc pauses. F1 lists every key.", 1, lm_theme.text_dim, tw);
+		wlwin_text(w, tx, ty + 3 * (LM_FONT_H + 5), a->survival ? "G: how to win.  Q and R: weapons.  F1: every key." : "Esc pauses. F1 lists every key.", 1, lm_theme.text_dim, tw);
 	} else if (a->prompt == P_LOST) {
-		labels[0] = "New world";
+		labels[0] = "New game";
 		cols[0] = lm_theme.btn_amber;
 		char l[120];
-		wlwin_text(w, tx, ty, "Your enemies pulled it down. The game is over.", 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty, "It fell and you had not 20 gold for another. The game is over.", 1, lm_theme.text, tw);
 		snprintf(l, sizeof l, "Nights survived: %d     Goblins killed: %d", a->nights, a->kills);
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
 	} else if (a->prompt == P_DEAD) {
@@ -3992,28 +4669,70 @@ static void paint_card(struct app *a)
 		char l[120];
 		int shown = a->pal_hover >= 0 ? k_palette[a->pal_hover] : hand_block(a);
 		snprintf(l, sizeof l, "%s - slot %d  (click to put it there; 1-9: other slot)", bl_block_name(shown), a->slot + 1);
-		wlwin_text(w, tx, gy + 2 * cell + 8, l, 1, lm_theme.text, tw);
+		wlwin_text(w, tx, gy + ((PAL_N + PAL_COLS - 1) / PAL_COLS) * cell + 8, l, 1, lm_theme.text, tw);
 	} else if (a->prompt == P_NEW) {
-		char l[400];
-		wlwin_text(w, tx, ty, "Make a new world?", 1, lm_theme.text, tw);
-		if (kept)
-			snprintf(l, sizeof l, "%s stays saved: you can open it again.", name);
-		else
-			snprintf(l, sizeof l, "The one you are in is not saved and will be gone.");
-		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, kept ? lm_theme.text_dim : lm_theme.caution, tw);
-		labels[1] = "New world";
-		cols[1] = lm_theme.btn_amber;
-		cols[0] = lm_theme.btn_slate;
-	} else if (a->prompt == P_CLAN) {
-		wlwin_text(w, tx, ty, "A rival clan makes camp 80 to 120 blocks away.", 1, lm_theme.text, tw);
-		wlwin_text(w, tx, ty + LM_FONT_H + 5, "The ground is levelled there. They will raid you.", 1, lm_theme.text_dim, tw);
-		wlwin_text(w, tx, ty + 2 * (LM_FONT_H + 5), "Bring down its keep and you have won.", 1, lm_theme.text_dim, tw);
-		labels[1] = "Make camp";
-		cols[0] = lm_theme.btn_slate;
-		cols[1] = lm_theme.btn_red;
+		struct wlcard nc;
+		int fx, fy, fw, my, mw;
+		name_layout(a, &nc, &fx, &fy, &fw, &my, &mw);
+		wlwin_text(w, fx, fy - LM_FONT_H - 5, "What is the game called?", 1, lm_theme.text, fw);
+		wlwin_round_fill(w, fx, fy, fw, 28, 14, lm_theme.bar);
+		wltext_paint(w, fx + 12, fy + 6, fw - 24, a->gname, true, lm_theme.text_soft, lm_theme.button_hover, lm_theme.text_soft);
+		for (int i = 0; i < 2; i++) {
+			const int x = fx + i * (mw + 10);
+			const bool on = (i == 0) == a->new_survival;
+			wlwin_round_fill(w, x, my, mw, MODE_H, 12, on ? lm_theme.accent : lm_theme.panel_line);
+			wlwin_round_fill(w, x + 2, my + 2, mw - 4, MODE_H - 4, 10, on ? lm_theme.bar : lm_theme.background);
+			wlwin_text_bold(w, x + 12, my + 8, i == 0 ? "Game" : "Free building", 1, on ? lm_theme.text_bright : lm_theme.text_dim, mw - 20);
+			wlwin_text(w, x + 12, my + 10 + LM_FONT_H, i == 0 ? "fight the Red Banner" : "every block, nobody about", 1, lm_theme.text_dim, mw - 20);
+		}
+		wlwin_text(w, fx, my + MODE_H + 8, a->card_msg, 1, lm_theme.caution, fw);
+		labels[0] = a->new_first ? "Quit" : "Cancel";
+		labels[1] = "Start";
+		cols[0] = a->new_first ? lm_theme.btn_red : lm_theme.btn_slate;
+		cols[1] = lm_theme.btn_green;
+	} else if (a->prompt == P_GOAL) {
+		static const char *const k_goal[] = {
+			"Win: pull down the Red Banner's keep when they have under 20 gold,",
+			"so that they cannot build it again. They start with 20.",
+			"You lose when your keep falls and you have under 20 gold.",
+			"",
+			"1.  Tab: send workers to wood, stone and gold (choose, 2, right-click).",
+			"2.  Build a barracks (3) and train soldiers (V).",
+			"3.  Build a smithy (7), then take a weapon (R).",
+			"4.  Take their gold: dig it first, kill their diggers.",
+			"5.  Strike their keep. The Red Captain will not like it.",
+		};
+		for (int i = 0; i < (int)(sizeof k_goal / sizeof k_goal[0]); i++)
+			wlwin_text(w, tx, ty + i * (LM_FONT_H + 4), k_goal[i], 1, i < 3 ? lm_theme.text_bright : lm_theme.text, tw);
+		labels[0] = "Play";
+		cols[0] = lm_theme.btn_green;
+	} else if (a->prompt == P_ARMS) {
+		for (int i = 0; i < BL_WP_COUNT; i++) {
+			const int y = c.y + 38 + i * ARMS_ROW;
+			const bool has = arms_has(a, i), cur = a->weapon == i;
+			wlwin_round_fill(w, tx - 4, y + 1, tw + 8, ARMS_ROW - 3, 10, cur ? lm_theme.panel_line : a->pal_hover == i ? lm_theme.button_hover : lm_theme.background);
+			char l[120], p[64];
+			snprintf(l, sizeof l, "%d  %s", i + 1, bl_weapon(i)->name);
+			l[3] = (char)(l[3] - 'a' + 'A');
+			wlwin_text_bold(w, tx + 4, y + 3, l, 1, has ? lm_theme.text_bright : lm_theme.text_dim, tw / 2);
+			wlwin_text(w, tx + 22, y + 3 + LM_FONT_H, k_arms[i].what, 1, lm_theme.text_dim, tw - 30);
+			arms_price(i, p, sizeof p);
+			if (cur)
+				snprintf(l, sizeof l, "in your hand");
+			else if (has)
+				snprintf(l, sizeof l, "yours");
+			else
+				snprintf(l, sizeof l, "%s: %s", k_arms[i].building == BL_SMITHY ? "smithy" : "mage tower", p);
+			wlwin_text(w, tx + tw - 4 - lm_font_text_width(l), y + 3, l, 1, cur ? lm_theme.accent : has ? lm_theme.text : lm_theme.caution, 0);
+		}
+		char l[220];
+		snprintf(l, sizeof l, "You have %d gold.  %s", a->inv[BL_GOLD], a->msg);
+		wlwin_text(w, tx, c.y + 42 + BL_WP_COUNT * ARMS_ROW, l, 1, lm_theme.text, tw);
+		labels[0] = "Close";
+		cols[0] = lm_theme.btn_green;
 	} else if (a->prompt == P_WON) {
 		char l[120];
-		wlwin_text(w, tx, ty, "Their keep is down. The Red Banner is beaten.", 1, lm_theme.text, tw);
+		wlwin_text(w, tx, ty, "Their keep is down for good. The Red Banner is beaten.", 1, lm_theme.text, tw);
 		snprintf(l, sizeof l, "Nights survived: %d     Goblins killed: %d", a->nights, a->kills);
 		wlwin_text(w, tx, ty + LM_FONT_H + 5, l, 1, lm_theme.text_dim, tw);
 		labels[0] = "Play on";
@@ -4094,6 +4813,22 @@ static void write_dump(struct app *a)
 		}
 	fprintf(f, "hero on=%d phase=%.3f stride=%.2f swing=%.2f sword=%d held=%s\n", a->body, a->walk_phase, a->walk_stride, a->arm_swing, a->body && a->hero.sword,
 	        a->survival && a->inv[hand_block(a)] < 1 ? "air" : bl_block_name(hand_block(a)));
+	fprintf(f, "arms mask=%u weapon=%d fire=%d laser=%d\n", a->arms, a->weapon, a->charges[BL_WP_FIRE], a->charges[BL_WP_LASER]);
+	fprintf(f, "works keep_down=%d keep_back=%.1f smithy=%d mage=%d infirm=%d mine=%d\n", a->keep_down, a->keep_down ? a->keep_back : 0.0f, a->nsmithy, a->nmage, a->ninfirm, a->nmine);
+	for (int i = 0; i < a->ndeposits; i++)
+		fprintf(f, "deposit %d x=%d y=%d z=%d ore=%d\n", i, a->deposit[i][0], a->deposit[i][1], a->deposit[i][2], a->ore[i]);
+	{
+		const int ci = bl_mobs_chief(&a->mobs);
+		const struct bl_mob *c = ci >= 0 ? &a->mobs.mob[ci] : NULL;
+		fprintf(f, "chief alive=%d x=%.3f y=%.3f z=%.3f hp=%.1f weapon=%d flying=%d raider=%d back=%.1f arms=%u rgold=%d rkeep_back=%.1f\n", c != NULL, c ? c->x : 0.0f, c ? c->y : 0.0f,
+		        c ? c->z : 0.0f, c ? c->hp : 0.0f, c ? c->weapon : 0, c ? c->flying : 0, c ? c->raider : 0, a->chief_t, a->chief_arms, a->rgold, a->rkeep_back);
+	}
+	if (a->prompt == P_NEW) {
+		struct wlcard c;
+		int fx, fy, fw, my, mw;
+		name_layout(a, &c, &fx, &fy, &fw, &my, &mw);
+		fprintf(f, "newgame survival=%d first=%d field=%d,%d,%d modes=%d,%d,%d name=%s\nnmsg %s\n", a->new_survival, a->new_first, fx, fy, fw, my, mw, MODE_H, a->gname, a->card_msg);
+	}
 	fprintf(f, "panel on=%d shown=%d messages=%d\n", a->panel, wlwin_pane_shown(&a->win, WLPANE_TOOL), a->nlog);
 	if (a->nlog)
 		fprintf(f, "said %s\n", a->log[0].text);
@@ -4227,6 +4962,9 @@ static void write_dump(struct app *a)
 			for (int i = 0; i < PAL_N; i++)
 				fprintf(f, "pal %d x=%d y=%d w=%d h=%d block=%s\n", i, gx + (i % PAL_COLS) * cell, gy + (i / PAL_COLS) * cell, cell, cell, bl_block_name(k_palette[i]));
 		}
+		if (a->prompt == P_ARMS)
+			for (int i = 0; i < BL_WP_COUNT; i++)
+				fprintf(f, "armrow %d x=%d y=%d w=%d h=%d\n", i, c.x + WLCARD_PAD, c.y + 38 + i * ARMS_ROW, c.w - 2 * WLCARD_PAD, ARMS_ROW);
 		if (a->prompt == P_HELP)
 			wlhelp_dump(&a->help, f, &c);
 		for (int k = 0; k < nb; k++) {
@@ -4255,11 +4993,16 @@ static void hero_pose(struct app *a, const struct bl_camera *cam)
 	h->swing = a->arm_swing;
 	h->hurt = a->hurt_t / 0.45f;
 	h->sneak = a->pl.sneaking && !a->pl.flying;
+	h->weapon = a->weapon;
+	h->sword = now_ms() < a->weapon_until;
+	const float shown = fmaxf(SWORD_SHOWN, bl_weapon(a->weapon)->reach);
 	for (int i = 0; i < BL_MOBS_MAX; i++) {
 		const struct bl_mob *m = &a->mobs.mob[i];
-		if (m->alive && bl_mob_is_foe(m->kind) && hypotf(m->x - a->pl.x, m->z - a->pl.z) < SWORD_SHOWN && fabsf(m->y - a->pl.y) < 4.0f)
+		if (m->alive && bl_mob_is_foe(m->kind) && hypotf(m->x - a->pl.x, m->z - a->pl.z) < shown && fabsf(m->y - a->pl.y) < 8.0f)
 			h->sword = true;
 	}
+	if (a->rival == 1 && a->rival_on && a->aimed && bl_red_keep(bl_get(a->world, a->aim.x, a->aim.y, a->aim.z)))
+		h->sword = true;
 	h->held = a->survival && a->inv[hand_block(a)] < 1 ? 0 : hand_block(a);
 	h->eye[0] = cam->x;
 	h->eye[1] = cam->y;
@@ -4272,7 +5015,7 @@ static void hero_pose(struct app *a, const struct bl_camera *cam)
 /* ================================================================ the rail ================================================================ */
 
 /* the buttons at the left, as in MellaGUI's other programs; the item's number is its place */
-enum { RB_NEW, RB_OPEN, RB_SAVE, RB_SAVEAS, RB_PLAY, RB_CMD, RB_BLOCKS, RB_SOUND, RB_CLAN, RB_HELP, RB_N };
+enum { RB_NEW, RB_OPEN, RB_SAVE, RB_SAVEAS, RB_PLAY, RB_CMD, RB_BLOCKS, RB_SOUND, RB_GOAL, RB_HELP, RB_N };
 
 static void ic_play(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
 {
@@ -4339,8 +5082,7 @@ static void rail_build(const struct app *a, struct wlrail *L)
 		[RB_CMD] = { .tip = "Command view  Tab", .icon = wlrail_ic_eye, .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .lit = a->cmd },
 		[RB_BLOCKS] = { .tip = "Blocks  E", .icon = ic_cube, .base = lm_theme.btn_rust, .lite = lm_theme.btn_rust_lit },
 		[RB_SOUND] = { .tip = a->sound_on ? "Sound is on" : "Sound is off", .icon = a->sound_on ? ic_speaker : ic_mute, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit },
-		[RB_CLAN] = { .tip = a->rival != 1 ? "The Red Banner: bring a rival clan  K" : a->rival_on ? "The Red Banner is on  K" : "The Red Banner is off  K", .icon = ic_flag,
-		              .base = lm_theme.btn_maroon, .lite = lm_theme.btn_maroon_lit, .lit = a->rival == 1 && a->rival_on },
+		[RB_GOAL] = { .tip = "How to win  G", .icon = ic_flag, .base = lm_theme.btn_maroon, .lite = lm_theme.btn_maroon_lit },
 		[RB_HELP] = { .tip = "Help  F1", .text = "?", .base = lm_theme.btn_grey, .lite = lm_theme.btn_slate_lit, .bottom = true },
 	};
 	for (int i = 0; i < RB_N; i++) {
@@ -4421,8 +5163,29 @@ static void paint_panel(struct app *a)
 	const int bottom = PANEL_H - 10;
 	int y = 28;
 	char l[200];
+	if (a->survival && a->rival >= 1) {
+		y = panel_head(w, y, "Goal");
+		goal_theirs(a, l, sizeof l);
+		y = panel_line(w, y, l, a->rgold < KEEP_GOLD ? 0x90ff90u : lm_theme.text);
+		snprintf(l, sizeof l, "Your gold %d (a new keep costs %d)", a->inv[BL_GOLD], KEEP_GOLD);
+		y = panel_line(w, y, l, a->inv[BL_GOLD] >= KEEP_GOLD ? lm_theme.text : lm_theme.caution);
+		const int gi = nearest_gold(a);
+		if (gi >= 0) {
+			float d;
+			const char *to = bearing_to(a, (float)a->deposit[gi][0] + 0.5f, (float)a->deposit[gi][2] + 0.5f, &d);
+			snprintf(l, sizeof l, "Gold: %d pieces %.0f blocks, %s", a->ore[gi], d, to);
+		} else {
+			snprintf(l, sizeof l, "There is no gold left in the world");
+		}
+		y = panel_line(w, y, l, 0xe8c040u);
+		snprintf(l, sizeof l, "Next: %s", next_step(a));
+		y = panel_wrap(w, 14, y, PANEL_W - 28, PANEL_H - 10, l, lm_theme.accent) + 2;
+	}
 	if (a->survival && a->have_keep) {
-		snprintf(l, sizeof l, "Your keep %d of %d      Nights %d", (int)ceilf(a->keep_hp), (int)KEEP_HP, a->nights);
+		if (a->keep_down)
+			snprintf(l, sizeof l, "Your keep rises in %.0f s     Nights %d", ceilf(a->keep_back), a->nights);
+		else
+			snprintf(l, sizeof l, "Your keep %d of %d      Nights %d", (int)ceilf(a->keep_hp), (int)KEEP_HP, a->nights);
 		y = panel_head(w, y, "Keep");
 		y = panel_line(w, y, l, lm_theme.text);
 		float f = a->keep_hp / KEEP_HP;
@@ -4453,6 +5216,14 @@ static void paint_panel(struct app *a)
 		snprintf(l, sizeof l, "Their keep %.0f of %.0f      Material %d", a->rhp, RIVAL_HP, a->rstock);
 		y = panel_line(w, y, l, lm_theme.text_dim);
 		y = panel_bar(w, y, a->rhp / RIVAL_HP, 0xd02828u);
+		{
+			const int ci = bl_mobs_chief(&a->mobs);
+			if (ci >= 0)
+				snprintf(l, sizeof l, "%s %.0f: %s, %s", CHIEF_NAME, ceilf(a->mobs.mob[ci].hp), a->mobs.mob[ci].raider ? "raiding" : "at camp", bl_weapon(a->mobs.mob[ci].weapon)->name);
+			else
+				snprintf(l, sizeof l, "%s is away: back in %.0f s", CHIEF_NAME, ceilf(fmaxf(a->chief_t, 0.0f)));
+			y = panel_line(w, y, l, 0xff8a7au);
+		}
 		int n = 0;
 		float near = 1e9f, nx = 0.0f, nz = 0.0f;
 		for (int i = 0; i < BL_MOBS_MAX; i++) {
@@ -4500,7 +5271,7 @@ static void paint_panel(struct app *a)
 		y = panel_line(w, y, l, lm_theme.text_dim);
 	}
 	static const char *const k_keys[][2] = {
-		{ "Left", "choose; box; Shift adds" }, { "Right", "go, or break (1 / 2)" }, { "3 - 6", "build; R turns it" }, { "Delete", "give a plan up" },
+		{ "Left", "choose; box; Shift adds" }, { "Right", "go, or break (1 / 2)" }, { "3 - 0", "build; R turns it" }, { "Delete", "give a plan up" },
 		{ "B / V", "a worker / a soldier" }, { "WASD", "move; arrows turn" }, { "Wheel", "nearer, farther" }, { "Home / End", "to him / their camp" }, { "Tab, Esc", "back to him" },
 	};
 	const int nkeys = (int)(sizeof k_keys / sizeof k_keys[0]);
@@ -4577,7 +5348,10 @@ static void paint(struct wlwin *w)
 		bl_pets_pose(&a->pets, a->world, a->pet_t, dtp, eye, a->time_h);
 		v.pets = &a->pets;
 	}
-	if (bl_mobs_count(&a->mobs) > 0) {
+	bool flies = false;
+	for (int i = 0; i < BL_ARROWS_MAX; i++)
+		flies |= a->mobs.arrow[i].t > 0.0f;
+	if (bl_mobs_count(&a->mobs) > 0 || flies) {
 		bl_mobs_light(&a->mobs, a->world, a->time_h);
 		v.mobs = &a->mobs;
 	}
@@ -4638,8 +5412,11 @@ static void paint(struct wlwin *w)
 	if (!a->cmd || a->prompt != P_NONE)
 		paint_hotbar(a, &L);
 	paint_hearts(a, &L);
-	if (a->survival)
+	if (a->survival) {
 		paint_survival(a);
+		if (!a->cmd && a->prompt == P_NONE)
+			paint_weapon(a, &L);
+	}
 	if (!panel_on(a)) {
 		paint_stock(a);
 		paint_rival(a);
@@ -4694,6 +5471,11 @@ static void open_dialog(struct app *a, enum prompt p)
 	}
 	a->pc_hover = a->pc_down = -1;
 	a->card_msg[0] = 0;
+	if (p == P_NEW) {
+		a->gname[0] = 0;
+		a->new_survival = true;
+		wltext_end(a->gname);
+	}
 	if (p == P_OPEN || p == P_SAVEAS) {
 		mkdirs(a->dir);
 		a->field[0] = 0;
@@ -4727,9 +5509,8 @@ static void card_close(struct app *a, enum prompt p)
 
 static void card_action(struct app *a, int which)
 {
-	if (a->prompt == P_LOST) {                                  /* the game is over: a new world (the lost one stays in its file) */
-		new_world(a);
-		resume_game(a);
+	if (a->prompt == P_LOST) {                                  /* the game is over: a new one (the lost one stays in its file) */
+		open_dialog(a, P_NEW);
 		return;
 	}
 	if (a->prompt == P_DEAD) {
@@ -4737,16 +5518,8 @@ static void card_action(struct app *a, int which)
 		resume_game(a);
 		return;
 	}
-	if (a->prompt == P_PALETTE || a->prompt == P_WON) {
+	if (a->prompt == P_PALETTE || a->prompt == P_WON || a->prompt == P_GOAL || a->prompt == P_ARMS) {
 		resume_game(a);
-		return;
-	}
-	if (a->prompt == P_CLAN) {
-		card_close(a, P_PAUSE);
-		if (which == 1) {
-			rival_start(a);
-			resume_game(a);
-		}
 		return;
 	}
 	if (a->prompt == P_PAUSE) {
@@ -4763,13 +5536,26 @@ static void card_action(struct app *a, int which)
 		return;
 	}
 	if (a->prompt == P_NEW) {
-		if (which == 1) {
-			card_close(a, P_PAUSE);
-			new_world(a);
-			resume_game(a);
-		} else {
-			card_close(a, a->back);
+		if (which == 0) {
+			if (a->new_first)
+				a->win.running = false;
+			else
+				card_close(a, a->back);
+			return;
 		}
+		char path[1024];
+		const char *why = NULL;
+		if (!game_path(a, a->gname, path, sizeof path, &why)) {
+			snprintf(a->card_msg, sizeof a->card_msg, "%s", why);
+			return;
+		}
+		card_close(a, P_PAUSE);
+		a->new_first = false;
+		new_world(a, path, a->new_survival);
+		if (a->survival)
+			pause_game(a, P_GOAL);
+		else
+			resume_game(a);
 		return;
 	}
 	if (a->prompt == P_OPEN) {
@@ -4853,12 +5639,7 @@ static void rail_action(struct app *a, int id)
 		a->sound_on = !a->sound_on;
 		say(a, a->sound_on ? "Sound on" : "Sound off");
 		break;
-	case RB_CLAN:
-		if (a->rival == 1)
-			rival_switch(a);
-		else
-			pause_game(a, P_CLAN);
-		break;
+	case RB_GOAL: pause_game(a, P_GOAL); break;
 	case RB_HELP:
 		pause_game(a, P_HELP);
 		wlhelp_open(&a->help);
@@ -4916,6 +5697,58 @@ static void file_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 	a->win.redraw = true;
 }
 
+/* the pointer on the card of a new game */
+static void name_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+	struct wlcard c;
+	int fx, fy, fw, my, mw;
+	name_layout(a, &c, &fx, &fy, &fw, &my, &mw);
+	if (op == LM_WL_POINTER_EVT_MOTION) {
+		if (!wlcard_drag_motion(&a->win, &c, a->px, a->py))
+			a->pc_hover = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+	} else if (op == LM_WL_POINTER_EVT_BUTTON) {
+		uint32_t button = args[2].u, state = args[3].u;
+		int k = wlcard_button_at(&c, 2, (int)a->px, (int)a->py);
+		bool on_field = a->px >= fx && a->px < fx + fw && a->py >= fy && a->py < fy + 28;
+		a->clip.serial = args[0].u;
+		if (button == 273 && state == 1 && on_field) {
+			wlwin_menu(&a->win, wltext_menu(a->gname));
+		} else if (button != 272) {
+			return;
+		} else if (state == 0) {
+			wlcard_drag_release(&a->win);
+			if (a->pc_down >= 0 && a->pc_down == k)
+				card_action(a, k);
+			a->pc_down = -1;
+		} else if (k >= 0) {
+			a->pc_down = k;
+		} else if (wlcard_drag_press(&a->win, &c, a->px, a->py)) {
+			;
+		} else if (on_field) {
+			wltext_click(a->gname, (int)a->px - (fx + 12), (a->win.mods & LM_MOD_SHIFT) != 0);
+		} else if (a->py >= my && a->py < my + MODE_H && a->px >= fx && a->px < fx + fw) {
+			a->new_survival = a->px < fx + mw + 5;
+		}
+	}
+	a->win.redraw = true;
+}
+
+/* the keys of the card of a new game: the name's field has them */
+static void name_key(struct app *a, uint32_t code)
+{
+	uint32_t ks = lm_keymap_keysym(code, a->win.mods);
+	if (ks == LM_KS_Escape) {
+		if (!a->new_first)                                      /* (at the first start there is nothing to go back to) */
+			card_action(a, 0);
+	} else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
+		card_action(a, 1);
+	} else if (ks == LM_KS_Tab) {
+		a->new_survival = !a->new_survival;
+	} else if (wltext_edit(&a->clip, a->gname, sizeof a->gname, ks, a->win.mods)) {
+		a->card_msg[0] = 0;
+	}
+}
+
 /* the keys of the open / save as card */
 static void file_key(struct app *a, uint32_t code)
 {
@@ -4953,6 +5786,10 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		file_pointer(a, op, args);
 		return;
 	}
+	if (a->prompt == P_NEW) {
+		name_pointer(a, op, args);
+		return;
+	}
 	struct wlcard c;
 	int nb;
 	card_rect(a, &c, &nb);
@@ -4967,7 +5804,7 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		if (a->prompt == P_HELP)
 			wlhelp_motion(&a->help, &c, a->px, a->py);
 		a->pc_hover = wlcard_button_at(&c, nb, (int)a->px, (int)a->py);
-		a->pal_hover = pal_cell_at(a, a->px, a->py);
+		a->pal_hover = a->prompt == P_ARMS ? arms_at(a, a->px, a->py) : pal_cell_at(a, a->px, a->py);
 		a->win.redraw = true;
 		return;
 	}
@@ -4983,6 +5820,12 @@ static void card_pointer(struct app *a, uint32_t op, const union lm_arg *args)
 		if (pc >= 0) {                                       /* a block of the palette goes into the slot in the hand */
 			a->hotbar[a->slot] = k_palette[pc];
 			a->name_until = now_ms() + 1800;
+			a->win.redraw = true;
+			return;
+		}
+		const int arm = arms_at(a, a->px, a->py);
+		if (arm >= 0) {
+			arms_choose(a, arm);
 			a->win.redraw = true;
 			return;
 		}
@@ -5172,8 +6015,12 @@ static void keys_release(struct app *a)
 /* keys of the command view; true = used up here */
 static bool cmd_key(struct app *a, uint32_t code)
 {
+	if (code >= KEY_PLAN0 && code < KEY_PLAN0 + BL_PLAN_COUNT) {
+		choose_plan(a, (int)code - KEY_PLAN0);
+		return true;
+	}
 	switch (code) {
-	case K_G: case K_M: case K_P: case K_H: case K_I: case K_E: case K_F1: case K_F3: case K_X: case K_K:
+	case K_G: case K_I: case K_E: case K_F1: case K_F3: case K_X:
 		return false;
 	case K_TAB:
 		leave_cmd(a);
@@ -5185,9 +6032,6 @@ static bool cmd_key(struct app *a, uint32_t code)
 		} else {
 			leave_cmd(a);
 		}
-		return true;
-	case KEY_PLAN0: case KEY_PLAN0 + 1: case KEY_PLAN0 + 2: case KEY_PLAN0 + 3:
-		choose_plan(a, (int)code - KEY_PLAN0);
 		return true;
 	case K_R:
 		a->plan_rot = (a->plan_rot + 1) % 4;
@@ -5253,8 +6097,11 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 	bool down = args[3].u != 0;
 	if (down)
 		a->clip.serial = args[0].u;
-	if (down && file_card(a) && !((w->mods & LM_MOD_CTRL) && code == K_Q)) {     /* the keys are the text field's */
-		file_key(a, code);
+	if (down && (file_card(a) || a->prompt == P_NEW) && !((w->mods & LM_MOD_CTRL) && code == K_Q)) {     /* the keys are the text field's */
+		if (a->prompt == P_NEW)
+			name_key(a, code);
+		else
+			file_key(a, code);
 		w->redraw = true;
 		return;
 	}
@@ -5314,6 +6161,18 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			choose_slot(a, (int)(code - K_1));
 		return;
 	}
+	if (a->prompt == P_ARMS) {
+		if (code == K_ESC || code == K_R || code == K_ENTER)
+			resume_game(a);
+		else if (code >= K_1 && code < K_1 + BL_WP_COUNT)
+			arms_choose(a, (int)(code - K_1));
+		return;
+	}
+	if (a->prompt == P_GOAL) {
+		if (code == K_ESC || code == K_ENTER || code == K_SPACE || code == K_G)
+			resume_game(a);
+		return;
+	}
 	if (a->prompt == P_DEAD) {                                  /* the only way on is back to the start */
 		if (code == K_ENTER || code == K_SPACE || code == K_ESC)
 			card_action(a, 0);
@@ -5362,7 +6221,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		if (code == K_ESC) {
 			if (a->prompt == P_PAUSE)
 				resume_game(a);
-			else if (a->prompt == P_NEW || a->prompt == P_CLAN || a->prompt == P_WON)
+			else if (a->prompt == P_WON)
 				card_action(a, 0);
 			else {
 				a->prompt = P_PAUSE;
@@ -5372,7 +6231,7 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			if (a->prompt == P_PAUSE)
 				resume_game(a);
 			else
-				card_action(a, a->prompt == P_NEW || a->prompt == P_CLAN ? 1 : 0);
+				card_action(a, 0);
 		}
 		return;
 	}
@@ -5396,15 +6255,17 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 		pause_game(a, P_PALETTE);
 		return;
 	}
-	if (code == K_G && a->playing) {                            /* survival <-> creative */
-		a->survival = !a->survival;
-		a->dig_on = false;
-		a->dig_t = 0.0f;
-		if (a->survival)
-			ensure_keep(a, a->pl.x, a->pl.z);
-		else
-			keep_sync(a);
-		say(a, a->survival ? "Survival: blocks take time and are used up, defend the keep" : "Creative: every block, at once");
+	if (code == K_G && a->playing) {
+		pause_game(a, P_GOAL);
+		return;
+	}
+	if (code == K_R && a->playing && !a->cmd) {
+		a->msg[0] = 0;
+		pause_game(a, P_ARMS);
+		return;
+	}
+	if (code == K_Q && a->playing && !a->cmd) {
+		arms_next(a);
 		return;
 	}
 	if (code == K_X && a->playing) {
@@ -5412,36 +6273,6 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
 			craft_hand(a);
 		else
 			say(a, "Nothing to make in creative: every block is there");
-		return;
-	}
-	if (code == K_K && a->playing) {
-		if (a->rival == 1)
-			rival_switch(a);
-		else
-			pause_game(a, P_CLAN);                              /* (it changes the world: asked first) */
-		return;
-	}
-	if (code == K_M && a->playing) {
-		a->mobs_on = !a->mobs_on;
-		a->mobs.enabled = a->mobs_on;
-		if (!a->mobs_on)
-			bl_mobs_clear_kind(&a->mobs, BL_MOB_GOBLIN);
-		say(a, a->mobs_on ? "The goblins come out at night" : "No goblins");
-		return;
-	}
-	if (code == K_H && a->playing) {
-		a->body = !a->body;
-		say(a, a->body ? "You can see yourself" : "Your body is hidden");
-		return;
-	}
-	if (code == K_P && a->playing) {
-		a->pets_on = !a->pets_on;
-		a->pets.on = a->pets_on;
-		if (a->pets_on && !a->pets.placed) {                /* the first time: a yard near where the player is now (and a pond if there is no water) */
-			float near[3] = { a->pl.x, a->pl.y, a->pl.z };
-			pets_setup(a, near, false);
-		}
-		say(a, a->pets_on ? "Tom and Filip are here" : "Tom and Filip have gone");
 		return;
 	}
 	if (code >= K_1 && code <= K_9) {
@@ -5474,6 +6305,8 @@ static void menu_event(struct wlwin *w, int index)
 	struct app *a = w->data;
 	if (file_card(a))
 		wltext_menu_do(&a->clip, a->field, sizeof a->field, index);
+	else if (a->prompt == P_NEW)
+		wltext_menu_do(&a->clip, a->gname, sizeof a->gname, index);
 	w->redraw = true;
 }
 
@@ -5627,6 +6460,7 @@ static int selftest(void)
 		snprintf(castle, sizeof castle, "%s/My castle.bl", w.dir);
 		CHECK(mkdirs(w.dir) == 0 && free_world_path(&w, got, sizeof got) && !strcmp(got, one), "the first world's file is world.bl");
 		CHECK(make_world(&w, 5, true), "a flat world");
+		state_reset(&w);
 		snprintf(w.path, sizeof w.path, "%s", one);
 		world_begin(&w, false, 1, -1, -1);
 		CHECK(w.survival && w.have_keep && nworkers(&w) == 2, "it starts with a keep and two workers");
@@ -5638,7 +6472,7 @@ static int selftest(void)
 		w.sens = 0.004f;
 		CHECK(save_all(&w, false) && free_world_path(&w, got, sizeof got) && !strcmp(got, two), "the next free name is world-2.bl");
 		uint32_t seed1 = w.world->seed;
-		new_world(&w);
+		new_world(&w, NULL, 1);
 		CHECK(!strcmp(w.path, two) && access(two, F_OK) == 0 && access(one, F_OK) == 0, "a new world has a file of its own beside the first (%s)", w.path);
 		CHECK(w.inv[BL_COBBLE] == 0 && w.nights == 0 && w.world->seed != seed1 && !w.world->kind, "and nothing of the first");
 		/* open the first again */
@@ -5739,14 +6573,20 @@ static int selftest(void)
 			int walls = 0;
 			for (int k = -CAMP_WALL; k <= CAMP_WALL; k++)
 				walls += (bl_get(rv.world, rv.rkeep[0] + k, rv.rkeep[1], rv.rkeep[2] - CAMP_WALL) == BL_COBBLE) + (bl_get(rv.world, rv.rkeep[0] - CAMP_WALL, rv.rkeep[1], rv.rkeep[2] + k) == BL_COBBLE);
-			CHECK(bl_get(rv.world, rv.rkeep[0], rv.rkeep[1] + 2, rv.rkeep[2]) == BL_REDKEEP && walls >= 20 && walls < 26, "seed %u: the keep stands in a wall with a gateway (%d)", seed, walls);
+			CHECK(bl_get(rv.world, rv.rkeep[0], rv.rkeep[1] + 2, rv.rkeep[2]) == BL_REDKEEP && walls >= 36 && walls < 42, "seed %u: the keep stands in a wall with a gateway (%d)", seed, walls);
+			CHECK(bl_get(rv.world, rv.rkeep[0] + BL_KEEP_R, rv.rkeep[1] + 5, rv.rkeep[2] + BL_KEEP_R) == BL_REDKEEP && bl_mobs_chief(&rv.mobs) >= 0, "seed %u: it is a castle, and the Captain is there", seed);
+			CHECK(rv.ndeposits >= 1 && rv.rgold == RIVAL_GOLD, "seed %u: they have %d gold (deposits %d)", seed, rv.rgold, rv.ndeposits);
+			rv.rgold = 0;
+			bl_mobs_clear_kind(&rv.mobs, BL_MOB_CHIEF);             /* (without their Captain: with him it takes your own hand as well) */
+			rv.chief_was = false;
+			rv.chief_t = 1e9f;
 			/* eight soldiers sent from the keep: they find the way there and strike it */
 			bl_mobs_clear_kind(&rv.mobs, BL_MOB_WORKER);
 			rv.mobs.enabled = false;
 			int sent = 0;
 			for (int k = 0; k < BL_SOLDIER_MAX; k++) {
 				float sp[3];
-				if (worker_spot(&rv, (float)rv.keep[0], (float)rv.keep[2], 3.0f, (float)rv.keep[1] + 2.5f, sp) && bl_mobs_add(&rv.mobs, rv.world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]))
+				if (worker_spot(&rv, (float)rv.keep[0] + 0.5f, (float)rv.keep[2] + 0.5f, BL_KEEP_EDGE + 2.4f, (float)rv.keep[1] + 2.5f, sp) && bl_mobs_add(&rv.mobs, rv.world, BL_MOB_SOLDIER, sp[0], sp[1], sp[2]))
 					sent++;
 			}
 			for (int k = 0; k < BL_MOBS_MAX; k++)
@@ -5776,19 +6616,12 @@ static int selftest(void)
 		snprintf(camp, sizeof camp, "%s", rv.path);
 		CHECK(world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 1 && rv.rival_on && rv.rkeep[0] == kx && rv.rkeep[2] == kz && rv.rhp == 33.0f &&
 		      rival_count(&rv, false) == RIVAL_GUARDS && rival_count(&rv, true) == 1 && rv.mobs.rival_on, "the camp comes back: its place, what its keep takes, its men");
-		/* K: they stand down, and come back as they were */
+		CHECK(bl_mobs_chief(&rv.mobs) >= 0 && rv.rgold == RIVAL_GOLD, "the Captain and their gold come back too");
 		for (int k = 0, killed = 0; k < BL_MOBS_MAX && killed < 2; k++)
 			if (rv.mobs.mob[k].alive && rv.mobs.mob[k].kind == BL_MOB_GUARD && !rv.mobs.mob[k].posted) {
 				rv.mobs.mob[k].alive = false;
 				killed++;
 			}
-		rival_switch(&rv);
-		CHECK(!rv.rival_on && rival_count(&rv, false) == 0 && !rv.mobs.rival_on, "switched off: nobody there");
-		rival_hit(&rv, 10.0f);
-		CHECK(rv.rhp == 33.0f, "and the keep takes no harm");
-		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 1 && !rv.rival_on && rival_count(&rv, false) == 0, "saved switched off");
-		rival_switch(&rv);
-		CHECK(rv.rival_on && rival_count(&rv, false) == RIVAL_GUARDS - 2, "back again, the two that fell still missing (%d)", rival_count(&rv, false));
 		rv.rstock = 0;
 		rv.rguard_t = RIVAL_REINFORCE;
 		rival_step(&rv, RIVAL_REINFORCE - 1.0f);
@@ -5798,21 +6631,29 @@ static int selftest(void)
 		rv.rstock = RIVAL_GUARD_COST + 1;
 		rival_step(&rv, 0.1f);
 		CHECK(rival_count(&rv, false) == RIVAL_GUARDS - 1 && rv.rstock == 1, "with material one does, and is paid for (%d)", rv.rstock);
-		/* the sword on the keep, and the end */
+		/* the keep falls: with the gold it is built again, without it the game is won */
 		rv.playing = true;
-		rival_strike(&rv, 1000);
-		rival_strike(&rv, 1100);
-		CHECK(rv.rhp == 30.0f, "a blow takes three, and the next must wait (%.0f)", rv.rhp);
-		rival_hit(&rv, 100.0f);
-		CHECK(rv.rival == 2 && !rv.rival_on && rv.prompt == P_WON && rival_count(&rv, false) == 0 && bl_get(rv.world, rv.rkeep[0], rv.rkeep[1], rv.rkeep[2]) == BL_AIR && !rv.mobs.rival_on,
-		      "at nought the keep is gone, their men too, and the game is won");
+		rv.rgold = KEEP_GOLD + 3;
+		rival_hit(&rv, RIVAL_HP + 1.0f);
+		CHECK(rv.rival == 1 && rv.rkeep_back == RIVAL_BACK && rv.rgold == 3 && bl_get(rv.world, rv.rkeep[0], rv.rkeep[1] + 3, rv.rkeep[2]) == BL_AIR && rv.mobs.rkeep_down,
+		      "with gold their keep is only down for a while (%d gold left)", rv.rgold);
+		rival_hit(&rv, 10.0f);
+		CHECK(rv.rkeep_back == RIVAL_BACK && rv.rhp == 0.0f, "a keep that is down takes no blows");
+		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.rkeep_back > 40.0f && rv.rgold == 3, "saved while it is down");
+		rv.playing = true;
+		rival_step(&rv, RIVAL_BACK + 1.0f);
+		CHECK(rv.rkeep_back == 0.0f && rv.rhp == RIVAL_HP && bl_get(rv.world, rv.rkeep[0], rv.rkeep[1] + 3, rv.rkeep[2]) == BL_REDKEEP, "and it stands again");
+		rival_hit(&rv, RIVAL_HP + 1.0f);
+		CHECK(rv.rival == 2 && !rv.rival_on && rv.prompt == P_WON && rival_count(&rv, false) == 0 && bl_mobs_chief(&rv.mobs) < 0 &&
+		      bl_get(rv.world, rv.rkeep[0], rv.rkeep[1] + 3, rv.rkeep[2]) == BL_AIR && !rv.mobs.rival_on, "without gold it is gone, their men too, and the game is won");
 		CHECK(save_all(&rv, false) && world_load(&rv, camp, &why, -1, -1, -1) && rv.rival == 2 && !rv.rival_on && rival_count(&rv, false) == 0, "and stays won");
 		/* a new survival world has them from the start */
 		rv.test_seed = 10;                                      /* (what follows depends on the land: in some worlds the keep stands where raiders do not get to) */
 		rv.cli_no_rival = false;
 		rv.survival = true;
-		new_world(&rv);
+		new_world(&rv, NULL, 1);
 		CHECK(rv.rival == 1 && rv.rival_on && rival_count(&rv, false) == RIVAL_GUARDS, "a new world has the camp");
+#define NO_CHIEF() (bl_mobs_clear_kind(&rv.mobs, BL_MOB_CHIEF), rv.chief_was = false, rv.chief_t = 1e9f)
 
 		/* their raiding parties: by day, in time, bigger each time; saved; to the keep over real ground */
 		CHECK(rv.raids == 0 && rv.raid_t == RAID_FIRST && !rv.raid_out, "the first one in five minutes of survival (%.0f)", rv.raid_t);
@@ -5820,6 +6661,7 @@ static int selftest(void)
 		rv.hp = MAX_HP;
 		rv.time_h = 1.0f;
 		rv.raid_t = 1.0f;
+		NO_CHIEF();
 		rival_step(&rv, 5.0f);
 		CHECK(!rv.raid_out && rv.raid_t == 1.0f, "not by night");
 		rv.time_h = 12.0f;
@@ -5838,6 +6680,7 @@ static int selftest(void)
 		rv.time_h = 12.0f;
 		rv.mobs.enabled = false;
 		rv.pl.flying = true;
+		NO_CHIEF();
 		bl_mobs_clear_kind(&rv.mobs, BL_MOB_WORKER);
 		for (int i = 0; i < 30 * 120 && !rv.raid_here; i++) {
 			rv.pl.y = 60.0f;
@@ -5849,11 +6692,11 @@ static int selftest(void)
 			mobs_advance(&rv, 1.0f / 30.0f);
 		}
 		CHECK(rv.prompt == P_LOST && !rv.have_keep, "nobody to hold them: the keep falls (%.0f)", rv.keep_hp);
-		/* K takes a party away; the next one is a man bigger */
-		rival_switch(&rv);
-		CHECK(!rv.raid_out && bl_mobs_count_raiders(&rv.mobs) == 0, "switched off: they are gone");
+		/* the next party is a man bigger */
+		bl_mobs_clear_kind(&rv.mobs, BL_MOB_GUARD);
+		rv.raid_out = false;
 		rv.prompt = P_NONE;
-		rival_switch(&rv);
+		NO_CHIEF();
 		rv.rstock = RIVAL_STOCK_MAX;
 		rv.raid_t = 0.1f;
 		rival_step(&rv, 0.2f);
@@ -5884,35 +6727,75 @@ static int selftest(void)
 		rv.raid_t = 0.1f;
 		rival_step(&rv, 0.2f);
 		CHECK(!rv.raid_out && rv.raid_t == 30.0f, "nothing to pay two with: no party yet");
-		/* creative: the keep takes no harm and they go home */
-		rv.survival = false;
-		keep_sync(&rv);
-		new_world(&rv);                                         /* (a new world of survival: no camp in creative) */
-		rv.survival = false;
-		keep_sync(&rv);
-		CHECK(rival_start(&rv) || rv.rival == 1, "a camp");
-		CHECK(rv.raid_t == RAID_FIRST_CREATIVE, "in creative the first one in two minutes (%.0f)", rv.raid_t);
-		rv.playing = true;
-		rv.hp = MAX_HP;
-		rv.time_h = 12.0f;
-		rv.mobs.enabled = false;
-		rv.pl.flying = true;
-		bl_mobs_clear_kind(&rv.mobs, BL_MOB_WORKER);
-		rv.raid_t = 0.1f;
-		float khp = rv.keep_hp;
-		for (int i = 0; i < 30 * 400 && !(rv.raids == 1 && !rv.raid_out); i++) {
-			rv.pl.y = 60.0f;
-			mobs_advance(&rv, 1.0f / 30.0f);
-		}
-		CHECK(rv.raids == 1 && !rv.raid_out && rv.raid_home && rv.keep_hp == khp && rv.prompt != P_LOST, "they find nobody and go home");
-		/* a death sends them home */
+		/* the Captain leads every second party; a death sends them home */
+		bl_mobs_clear_kind(&rv.mobs, BL_MOB_GUARD);
+		rival_step(&rv, 0.1f);
+		rv.chief_t = 0.0f;
+		rv.raid_t = 100.0f;
+		rival_step(&rv, 0.1f);
+		CHECK(bl_mobs_chief(&rv.mobs) >= 0, "the Captain is back");
+		rv.raids = 1;
+		rv.rstock = RIVAL_STOCK_MAX;
 		rv.raid_t = 0.1f;
 		rival_step(&rv, 0.2f);
+		CHECK(rv.raid_out && rv.mobs.mob[bl_mobs_chief(&rv.mobs)].raider, "he leads the second one");
 		respawn(&rv);
-		int back = 0;
+		int back = 0, out = 0;
 		for (int k = 0; k < BL_MOBS_MAX; k++)
-			back += rv.mobs.mob[k].alive && rv.mobs.mob[k].raider && rv.mobs.mob[k].retreat;
-		CHECK(back == RAID_SMALL + 1, "respawn: they turn back (%d)", back);
+			if (rv.mobs.mob[k].alive && rv.mobs.mob[k].raider) {
+				out++;
+				back += rv.mobs.mob[k].retreat;
+			}
+		CHECK(out > 1 && back == out, "respawn: they turn back (%d of %d)", back, out);
+
+		/* gold, the buildings, the weapons, the keep that is paid for */
+		new_world(&rv, NULL, 1);
+		survey(&rv);
+		int ore = 0;
+		for (int i = 0; i < rv.ndeposits; i++)
+			ore += rv.ore[i];
+		CHECK(rv.ndeposits == DEPOSITS && ore >= 40 && ore <= DEPOSITS * 14, "five deposits of gold (%d, %d pieces)", rv.ndeposits, ore);
+		CHECK(rv.arms == 1u << BL_WP_SWORD && !arms_choose(&rv, BL_WP_BOW), "the sword only, and no bow without a smithy");
+		bl_set(rv.world, 4, 50, 4, BL_SMITHY);
+		bl_set(rv.world, 6, 50, 4, BL_MAGE);
+		CHECK(!arms_choose(&rv, BL_WP_BOW), "nor without the price");
+		rv.inv[BL_GOLD] = 40;
+		rv.inv[BL_PLANKS] = 8;
+		rv.inv[BL_COBBLE] = 8;
+		CHECK(arms_choose(&rv, BL_WP_BOW) && rv.weapon == BL_WP_BOW && rv.inv[BL_GOLD] == 37 && rv.inv[BL_PLANKS] == 2, "a bow for 3 gold and 6 planks");
+		CHECK(arms_choose(&rv, BL_WP_HAMMER) && arms_choose(&rv, BL_WP_FIRE) && rv.inv[BL_GOLD] == 23, "the hammer and the fire staff (%d)", rv.inv[BL_GOLD]);
+		CHECK(arms_shots(&rv, BL_WP_FIRE) == 23 * FIRE_SHOTS, "shots by the gold");
+		arms_spend(&rv, BL_WP_FIRE);
+		CHECK(rv.inv[BL_GOLD] == 22 && rv.charges[BL_WP_FIRE] == FIRE_SHOTS - 1, "a gold pays for five");
+		arms_next(&rv);
+		CHECK(rv.weapon == BL_WP_SWORD, "Q goes round (%d)", rv.weapon);
+		/* a mine digs by itself */
+		const int *dp = rv.deposit[0];
+		bl_set(rv.world, dp[0] + 4, dp[1] + 1, dp[2], BL_MINE);
+		survey(&rv);
+		const int had = rv.inv[BL_GOLD], left = rv.ore[0];
+		rv.mine_t = MINE_EVERY;
+		works_tick(&rv, 0.1f);
+		survey(&rv);
+		CHECK(rv.inv[BL_GOLD] == had + 1 && rv.ore[0] == left - 1, "a mine takes a piece (%d, %d)", rv.inv[BL_GOLD], rv.ore[0]);
+		/* his keep: paid for, it stands again; else the game is over */
+		keep_fall(&rv);
+		CHECK(rv.keep_down && rv.have_keep && rv.inv[BL_GOLD] == had + 1 - KEEP_GOLD && !rv.mobs.keep_on && rv.prompt != P_LOST, "20 gold and it is built again");
+		works_tick(&rv, KEEP_BACK + 1.0f);
+		CHECK(!rv.keep_down && rv.keep_hp == KEEP_HP && bl_get(rv.world, rv.keep[0] + BL_KEEP_R, rv.keep[1] + 5, rv.keep[2] + BL_KEEP_R) == BL_KEEP, "it stands");
+		rv.inv[BL_GOLD] = KEEP_GOLD - 1;
+		keep_fall(&rv);
+		CHECK(!rv.have_keep && rv.prompt == P_LOST, "without the gold it is lost");
+		/* the name of a new game */
+		char np[600];
+		const char *nw = NULL;
+		CHECK(!game_path(&rv, "  ", np, sizeof np, &nw) && !game_path(&rv, "a/b", np, sizeof np, &nw) && !game_path(&rv, ".x", np, sizeof np, &nw), "bad names");
+		CHECK(game_path(&rv, " Lucas two ", np, sizeof np, &nw) && strstr(np, "/Lucas two.bl"), "a name is a file (%s)", np);
+		new_world(&rv, np, 0);
+		CHECK(!strcmp(rv.path, np) && access(np, F_OK) == 0 && !game_path(&rv, "Lucas two", np, sizeof np, &nw), "and taken once");
+		/* free building: nobody and nothing to pay */
+		CHECK(!rv.survival && rv.rival == 0 && !rv.mobs_on && !rv.have_keep && rv.ndeposits == 0 && rv.arms == (1u << BL_WP_COUNT) - 1 && arms_shots(&rv, BL_WP_BOW) < 0,
+		      "free building has no clan, no goblins and no keep");
 		bl_world_free(rv.world);
 	}
 
@@ -6087,9 +6970,10 @@ static int selftest(void)
 		survival_setup(&sa, sa.pl.x, sa.pl.z);
 		CHECK(sa.have_keep && sa.keep_hp == KEEP_HP, "a keep is made at the start");
 		float kd = hypotf((float)sa.keep[0] + 0.5f - sa.pl.x, (float)sa.keep[2] + 0.5f - sa.pl.z);
-		CHECK(kd >= 3.9f && kd <= 10.0f, "4 to 10 blocks from where he starts (%.1f)", kd);
-		CHECK(bl_get(sa.world, sa.keep[0], sa.keep[1], sa.keep[2]) == BL_KEEP && bl_get(sa.world, sa.keep[0], sa.keep[1] + 2, sa.keep[2]) == BL_KEEP &&
-		      bl_get(sa.world, sa.keep[0], sa.keep[1] + 3, sa.keep[2]) == BL_AIR && bl_get(sa.world, sa.keep[0], sa.keep[1] - 1, sa.keep[2]) != BL_AIR, "three blocks high, on the ground");
+		CHECK(kd >= 7.9f && kd <= 20.0f, "8 to 20 blocks from where he starts (%.1f)", kd);
+		CHECK(bl_get(sa.world, sa.keep[0], sa.keep[1], sa.keep[2]) == BL_KEEP && bl_get(sa.world, sa.keep[0], sa.keep[1] + BL_KEEP_TALL - 1, sa.keep[2]) == BL_KEEP &&
+		      bl_get(sa.world, sa.keep[0] + BL_KEEP_R, sa.keep[1], sa.keep[2] + BL_KEEP_R) == BL_KEEP && bl_get(sa.world, sa.keep[0], sa.keep[1], sa.keep[2] - BL_KEEP_R) == BL_AIR &&
+		      bl_get(sa.world, sa.keep[0], sa.keep[1] - 1, sa.keep[2]) != BL_AIR, "a castle with a door, on the ground");
 		CHECK(sa.mobs.keep_on && fabsf(sa.mobs.keep[0] - ((float)sa.keep[0] + 0.5f)) < 0.01f, "the goblins know where it is");
 		int ninv = 0;
 		for (int b = 0; b < BL_COUNT; b++)
@@ -6213,11 +7097,11 @@ static int selftest(void)
 		sa.pl.x = 5.0f;
 		sa.pl.z = 5.0f;
 		sa.pl.y = 20.0f;
-		bl_mobs_add(&sa.mobs, sa.world, BL_MOB_GOBLIN, (float)sa.keep[0] + 3.5f, (float)sa.keep[1], (float)sa.keep[2] + 0.5f);
+		CHECK(bl_mobs_add(&sa.mobs, sa.world, BL_MOB_GOBLIN, (float)sa.keep[0] + 6.5f, (float)sa.keep[1], (float)sa.keep[2] + 0.5f), "a goblin beside it");
 		for (int i = 0; i < 30 * 12 && sa.have_keep; i++)
 			mobs_advance(&sa, 1.0f / 30.0f);
 		CHECK(!sa.have_keep && sa.prompt == P_LOST && !sa.playing, "a goblin at the keep pulls it down: the game is over");
-		CHECK(bl_get(sa.world, sa.keep[0], sa.keep[1], sa.keep[2]) == BL_AIR && bl_get(sa.world, sa.keep[0], sa.keep[1] + 2, sa.keep[2]) == BL_AIR && !sa.mobs.keep_on, "its blocks are gone and the goblins have no keep to go to");
+		CHECK(bl_get(sa.world, sa.keep[0], sa.keep[1] + 2, sa.keep[2]) == BL_AIR && bl_get(sa.world, sa.keep[0], sa.keep[1] + BL_KEEP_TALL - 1, sa.keep[2]) == BL_AIR && !sa.mobs.keep_on, "its blocks are gone and the goblins have no keep to go to");
 		/* a keep is made again when there is none and he is in survival */
 		ensure_keep(&sa, sa.pl.x, sa.pl.z);
 		CHECK(sa.have_keep && sa.keep_hp == KEEP_HP && sa.mobs.keep_on, "ensure_keep makes a new one");
@@ -6395,11 +7279,11 @@ static int selftest(void)
 		struct bl_site ps;
 		const char *why = NULL;
 		bool any = false;
-		wa.inv[BL_COBBLE] = 19;
-		wa.inv[BL_PLANKS] = 16;
-		CHECK(!plan_at_pointer(&wa, &ps, &why, &any) && any && strstr(why, "costs 20 cobble"), "19 cobble are not enough (%s)", why ? why : "-");
-		CHECK(!build_place(&wa) && bl_mobs_count_sites(&wa.mobs) == 0 && wa.inv[BL_COBBLE] == 19, "nothing is planned or paid");
-		wa.inv[BL_COBBLE] = 25;
+		wa.inv[BL_COBBLE] = 11;
+		wa.inv[BL_PLANKS] = 8;
+		CHECK(!plan_at_pointer(&wa, &ps, &why, &any) && any && strstr(why, "costs 12 cobble"), "11 cobble are not enough (%s)", why ? why : "-");
+		CHECK(!build_place(&wa) && bl_mobs_count_sites(&wa.mobs) == 0 && wa.inv[BL_COBBLE] == 11, "nothing is planned or paid");
+		wa.inv[BL_COBBLE] = 17;
 		CHECK(build_place(&wa) && bl_mobs_count_sites(&wa.mobs) == 1 && wa.inv[BL_COBBLE] == 5 && wa.inv[BL_PLANKS] == 0 && wa.plan == -1, "the barracks is planned and paid for (%d %d)", wa.inv[BL_COBBLE], wa.inv[BL_PLANKS]);
 		int sent = 0;
 		for (int i = 0; i < BL_MOBS_MAX; i++)
@@ -6457,15 +7341,6 @@ static int selftest(void)
 			hero_pose(&wa, &hc);
 			CHECK(!wa.hero.first, "whole in the command view");
 			wa.cmd = was;
-			wa.body = false;
-			conf_save(&wa);
-			static struct app wh;
-			memset(&wh, 0, sizeof wh);
-			memcpy(wh.dir, wa.dir, sizeof wh.dir);
-			wh.body = true;
-			conf_load(&wh, true);
-			CHECK(!wh.body, "a hidden body stays hidden");
-			wa.body = true;
 		}
 		/* soldiers: at the barracks that was built they stand on the ground, not on its roof */
 		wa.inv[BL_COBBLE] = 100;
@@ -6628,11 +7503,9 @@ int main(int argc, char **argv)
 	a.clockm = 1;
 	a.sound_on = true;
 	a.pal_hover = -1;
-	a.pets_on = true;
-	a.mobs_on = true;
+	state_reset(&a);
 	a.body = true;
 	a.panel = true;
-	a.survival = true;
 	int clock_cli = -1;
 	bool no_pets = false, no_mobs = false, no_body = false, no_panel = false;
 	int workers_cli = -1;                                   /* --workers N */
@@ -6781,6 +7654,7 @@ int main(int argc, char **argv)
 	a.cli_clock = clock_cli;
 	a.cli_no_pets = no_pets;
 	a.cli_no_mobs = no_mobs;
+	a.cli_goblins = ngob > 0;
 	a.cli_no_save = no_save;
 	conf_load(&a, false);                                   /* the person's choices, and which world was open */
 	a.conf_read = false;
@@ -6805,6 +7679,8 @@ int main(int argc, char **argv)
 				fprintf(stderr, "mellagui-blocks: %s: %s (the file is left alone and a new world is not saved)\n", path, err ? err : "cannot be read");
 				bad_file = true;
 			}
+		} else {
+			a.new_first = true;                                 /* there is no game yet: its name is asked first */
 		}
 		if (gone[0])
 			say(&a, "The world %s is not there any more", gone);
@@ -6814,13 +7690,13 @@ int main(int argc, char **argv)
 			fprintf(stderr, "mellagui-blocks: cannot make a world\n");
 			return 1;
 		}
-		if ((fresh && !want_save) || bad_file)
+		if ((fresh && !want_save) || bad_file || a.new_first)
 			a.nosave = true;                                    /* (no file: Save as gives it one) */
 		else
 			world_path(&a, a.path, sizeof a.path);
 		if (no_save)
 			a.nosave = true;
-		world_begin(&a, false, mode_cli, workers_cli, soldiers_cli);
+		world_begin(&a, false, a.new_first ? 0 : mode_cli < 0 ? 1 : mode_cli, workers_cli, soldiers_cli);   /* (behind the card of the first game: just a landscape) */
 	}
 	if (a.cli_rival && a.rival != 1)
 		rival_start(&a);
@@ -6865,6 +7741,12 @@ int main(int argc, char **argv)
 	arrow_cursor(cur, 24, 24);
 	wlwin_cursor(&a.win, cur, 24, 24, 1, 1);
 	a.prompt = P_PAUSE;
+	if (a.new_first) {
+		a.prompt = P_NEW;
+		a.new_survival = mode_cli != 0;
+		a.gname[0] = 0;
+		wltext_end(a.gname);
+	}
 	a.last_save_ms = now_ms();
 	a.fps_t0 = now_ms();
 

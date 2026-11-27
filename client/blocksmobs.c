@@ -33,6 +33,21 @@
 #define GATHER_FACTOR 1.5f              /* a worker takes this many times the player's time */
 #define GATHER_RADIUS 6                 /* it goes on to the next block of the kind within this many blocks */
 
+static const struct bl_weapon_info k_weapons[BL_WP_COUNT] = {
+	/*  name        dmg   reach  cool   keep splash  shot            chief: dmg cool keep */
+	{ "sword",      4.0f,  3.6f, 0.40f,  3.0f, 0.0f, -1,             3.0f, 1.0f, 2.0f },
+	{ "spear",      3.5f,  5.5f, 0.45f,  2.5f, 0.0f, -1,             3.0f, 1.1f, 2.0f },
+	{ "war hammer", 9.0f,  3.2f, 0.90f, 10.0f, 0.0f, -1,             6.0f, 1.6f, 5.0f },
+	{ "bow",        4.0f, 30.0f, 0.80f,  1.0f, 0.0f, BL_SHOT_ARROW,  3.0f, 1.8f, 1.0f },
+	{ "fire staff", 7.0f, 26.0f, 1.40f,  8.0f, 3.0f, BL_SHOT_FIRE,   4.0f, 2.8f, 4.0f },
+	{ "laser",      2.0f, 44.0f, 0.15f,  1.2f, 0.0f, BL_SHOT_LASER,  3.0f, 1.2f, 2.0f },
+};
+
+const struct bl_weapon_info *bl_weapon(int weapon)
+{
+	return &k_weapons[weapon > 0 && weapon < BL_WP_COUNT ? weapon : BL_WP_SWORD];
+}
+
 static float rf(uint32_t *s)
 {
 	uint32_t x = *s ? *s : 2463534242u;
@@ -66,6 +81,7 @@ void bl_mobs_init(struct bl_mobs *m, uint32_t seed)
 	m->cap = 6;
 	m->rng = seed * 2246822519u + 374761393u;
 	m->spawn_t = 3.0f;
+	m->chief_arms = 1u << BL_WP_SWORD | 1u << BL_WP_BOW;
 }
 
 void bl_mobs_set_keep(struct bl_mobs *m, bool on, float x, float y, float z)
@@ -156,6 +172,65 @@ int bl_mobs_count_raiders(const struct bl_mobs *m)
 	return n;
 }
 
+void bl_mobs_set_deposits(struct bl_mobs *m, const int (*at)[3], int n)
+{
+	m->ndeposits = n < 0 ? 0 : n > BL_DEPOSITS_MAX ? BL_DEPOSITS_MAX : n;
+	for (int i = 0; i < m->ndeposits; i++) {
+		m->deposit[i].x = at[i][0];
+		m->deposit[i].y = at[i][1];
+		m->deposit[i].z = at[i][2];
+	}
+}
+
+int bl_mobs_chief(const struct bl_mobs *m)
+{
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		if (m->mob[i].alive && m->mob[i].kind == BL_MOB_CHIEF)
+			return i;
+	return -1;
+}
+
+bool bl_mobs_chief_raid(struct bl_mobs *m)
+{
+	int i = bl_mobs_chief(m);
+	if (i < 0)
+		return false;
+	struct bl_mob *b = &m->mob[i];
+	b->raider = true;
+	b->retreat = false;
+	b->raid0 = b->age;
+	b->idle = b->lost = 0.0f;
+	b->best_d = 1e9f;
+	return true;
+}
+
+void bl_mobs_shot(struct bl_mobs *m, const float a[3], const float b[3], int kind)
+{
+	int ai = 0;
+	for (int k = 1; k < BL_ARROWS_MAX; k++)
+		if (m->arrow[k].t < m->arrow[ai].t)
+			ai = k;
+	m->arrow[ai].kind = kind;
+	m->arrow[ai].t = kind == BL_SHOT_FIRE ? BL_FIRE_TIME : kind == BL_SHOT_LASER ? BL_LASER_TIME : BL_ARROW_TIME;
+	memcpy(m->arrow[ai].a, a, sizeof m->arrow[ai].a);
+	memcpy(m->arrow[ai].b, b, sizeof m->arrow[ai].b);
+}
+
+int bl_mobs_splash(struct bl_mobs *m, const float at[3], float radius, float damage, int spare)
+{
+	int dead = 0;
+	for (int i = 0; i < BL_MOBS_MAX; i++) {
+		const struct bl_mob *b = &m->mob[i];
+		if (!b->alive || i == spare || !bl_mob_is_foe(b->kind))
+			continue;
+		const float dx = b->x - at[0], dy = b->y + 0.8f - at[1], dz = b->z - at[2];
+		if (dx * dx + dy * dy + dz * dz > radius * radius)
+			continue;
+		dead += bl_mobs_hurt(m, i, damage, dx, dz);
+	}
+	return dead;
+}
+
 static void turn_back(struct bl_mob *b)
 {
 	if (b->retreat)
@@ -191,6 +266,16 @@ struct goal {
 	bool any_height;                /* ... at its height give or take 3, or at any */
 };
 
+static float clampf(float v, float lo, float hi);
+
+/* the goal of one who walks to a keep: the point of its side that is nearest to him */
+static struct goal keep_goal(const float keep[3], const struct bl_mob *b, float radius)
+{
+	const float x = b->x < keep[0] - BL_KEEP_EDGE ? keep[0] - BL_KEEP_EDGE : b->x > keep[0] + BL_KEEP_EDGE ? keep[0] + BL_KEEP_EDGE : b->x;
+	const float z = b->z < keep[2] - BL_KEEP_EDGE ? keep[2] - BL_KEEP_EDGE : b->z > keep[2] + BL_KEEP_EDGE ? keep[2] + BL_KEEP_EDGE : b->z;
+	return (struct goal){ true, x, keep[1], z, radius, false };
+}
+
 static void path_forget(struct bl_mob *b)
 {
 	b->nway = b->iway = 0;
@@ -204,7 +289,7 @@ static void path_forget(struct bl_mob *b)
 /* where the mob went (an index of M->mob), or -1 */
 static int place_mob_i(struct bl_mobs *M, const struct bl_world *w, int kind, bool brute, bool raider, float x, float y, float z)
 {
-	if (kind < BL_MOB_GOBLIN || kind > BL_MOB_RWORKER || (brute && kind != BL_MOB_GOBLIN) || !bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) ||
+	if (kind < BL_MOB_GOBLIN || kind > BL_MOB_CHIEF || (kind == BL_MOB_CHIEF && bl_mobs_chief(M) >= 0) || (brute && kind != BL_MOB_GOBLIN) || !bl_inside(w, (int)floorf(x), (int)floorf(y), (int)floorf(z)) ||
 	    (bl_mob_is_foe(kind) ? bl_box_hits_foe : bl_box_hits_unit)(w, x, y, z, BL_GOBLIN_HW, brute ? BL_BRUTE_H : bl_mob_h(kind)))
 		return -1;
 	if (kind == BL_MOB_WORKER && bl_mobs_count_kind(M, BL_MOB_WORKER) >= BL_WORKER_MAX)
@@ -228,7 +313,7 @@ static int place_mob_i(struct bl_mobs *M, const struct bl_world *w, int kind, bo
 			b->raider = raider;
 			b->best_d = 1e9f;
 			b->site = -1;
-			b->hp = brute ? BL_BRUTE_HP : kind == BL_MOB_RWORKER ? BL_RWORKER_HP : kind == BL_MOB_WORKER ? BL_WORKER_HP : kind == BL_MOB_SOLDIER ? BL_SOLDIER_HP : kind == BL_MOB_GUARD ? BL_GUARD_HP : BL_GOBLIN_HP;
+			b->hp = brute ? BL_BRUTE_HP : kind == BL_MOB_RWORKER ? BL_RWORKER_HP : kind == BL_MOB_WORKER ? BL_WORKER_HP : kind == BL_MOB_SOLDIER ? BL_SOLDIER_HP : kind == BL_MOB_GUARD ? BL_GUARD_HP : kind == BL_MOB_CHIEF ? BL_CHIEF_HP : BL_GOBLIN_HP;
 			b->tx = x;                                  /* (a soldier's post is where it stands) */
 			b->tz = z;
 			b->rng = M->rng ^ (uint32_t)(i * 7919 + 13);
@@ -257,6 +342,11 @@ bool bl_mobs_add(struct bl_mobs *m, const struct bl_world *w, int kind, float x,
 bool bl_mobs_add_brute(struct bl_mobs *m, const struct bl_world *w, float x, float y, float z)
 {
 	return place_mob_i(m, w, BL_MOB_GOBLIN, true, false, x, y, z) >= 0;
+}
+
+bool bl_mobs_add_chief(struct bl_mobs *m, const struct bl_world *w, float x, float y, float z)
+{
+	return place_mob(m, w, BL_MOB_CHIEF, x, y, z);
 }
 
 bool bl_mobs_add_raider(struct bl_mobs *m, const struct bl_world *w, float x, float y, float z)
@@ -813,6 +903,8 @@ static void strike(struct bl_mobs *M, const struct bl_mob *by, struct bl_mob *at
 		if (at->kind == BL_MOB_GOBLIN) {
 			M->kills++;
 			R->slain++;
+		} else if (at->kind == BL_MOB_CHIEF) {
+			R->chief_slain++;
 		} else if (at->kind == BL_MOB_RWORKER) {
 			R->rworkers_slain++;
 		} else {
@@ -825,7 +917,7 @@ static void strike(struct bl_mobs *M, const struct bl_mob *by, struct bl_mob *at
 /* whom the one fights: the player's own the goblins and the rival clan, a guard everybody who is not of his clan */
 static bool fights(int kind, int other)
 {
-	return kind == BL_MOB_GUARD ? !bl_mob_is_rival(other) : bl_mob_is_foe(other);
+	return bl_mob_is_rival(kind) ? !bl_mob_is_rival(other) : bl_mob_is_foe(other);
 }
 
 /* a soldier (or a rival guard) on a watchtower: the nearest enemy it can see gets an arrow; a guard's may be meant for the player (`pl`, NULL for the player's own) */
@@ -866,13 +958,7 @@ static void archer(struct bl_mobs *M, const struct bl_world *w, struct bl_mob *b
 	b->attack_cd = BL_BOW_COOLDOWN;
 	b->swing = 1.0f;
 	R->shots++;
-	int ai = 0;
-	for (int k = 1; k < BL_ARROWS_MAX; k++)
-		if (M->arrow[k].t < M->arrow[ai].t)
-			ai = k;
-	M->arrow[ai].t = BL_ARROW_TIME;
-	memcpy(M->arrow[ai].a, from, sizeof from);
-	memcpy(M->arrow[ai].b, to, sizeof to);
+	bl_mobs_shot(M, from, to, BL_SHOT_ARROW);
 	if (best == -2) {
 		R->damage += BL_BOW_DAMAGE;
 		R->hits++;
@@ -1131,7 +1217,7 @@ static float soldier_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 	}
 	/* the nearest enemy that fights, and the nearest of their workers: one of those is gone after only when there is nobody else, and not by a soldier who was
 	 * sent to their keep (that is what he is there for) */
-	const bool at_keep = M->rival_on && hypotf(b->tx - M->rkeep[0], b->tz - M->rkeep[2]) < BL_RIVAL_AT_KEEP;
+	const bool at_keep = M->rival_on && !M->rkeep_down && hypotf(b->tx - M->rkeep[0], b->tz - M->rkeep[2]) < BL_RIVAL_AT_KEEP;
 	int found[2] = { -1, -1 };
 	float near[2] = { 1e9f, 1e9f };
 	for (int k = 0; k < BL_MOBS_MAX; k++) {
@@ -1150,7 +1236,7 @@ static float soldier_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 	const float gdx = gi >= 0 ? M->mob[gi].x - b->x : 0.0f, gdz = gi >= 0 ? M->mob[gi].z - b->z : 0.0f;
 	if (gi >= 0) {
 		*want = atan2f(gdx, gdz);
-		if (gd < BL_SOLDIER_REACH && b->attack_cd <= 0.0f) {
+		if (gd < BL_SOLDIER_REACH && fabsf(M->mob[gi].y - b->y) < 2.0f && b->attack_cd <= 0.0f) {       /* (a chief in the air is out of reach) */
 			struct bl_mob *o = &M->mob[gi];
 			b->attack_cd = BL_SOLDIER_COOLDOWN;
 			b->swing = 1.0f;
@@ -1168,9 +1254,9 @@ static float soldier_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 		return clampf(3.0f * (gd - 0.9f), 0.0f, BL_SOLDIER_SPEED);
 	}
 	if (at_keep) {                                                                          /* sent to the rival keep: at it */
-		float kx = M->rkeep[0] - b->x, kz = M->rkeep[2] - b->z, kd = hypotf(kx, kz);
+		float kx = M->rkeep[0] - b->x, kz = M->rkeep[2] - b->z, kd = bl_keep_dist(M->rkeep, b->x, b->z);
 		*want = atan2f(kx, kz);
-		if (kd < 1.7f && fabsf(M->rkeep[1] - b->y) < 2.6f) {
+		if (kd < 1.2f && fabsf(M->rkeep[1] - b->y) < 2.6f) {
 			if (b->attack_cd <= 0.0f) {
 				b->attack_cd = BL_SOLDIER_COOLDOWN;
 				b->swing = 1.0f;
@@ -1178,8 +1264,8 @@ static float soldier_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 			}
 			return 0.0f;
 		}
-		*g = (struct goal){ true, M->rkeep[0], M->rkeep[1], M->rkeep[2], 1.5f, false };
-		return clampf(3.0f * (kd - 1.1f), 0.0f, BL_SOLDIER_SPEED);
+		*g = keep_goal(M->rkeep, b, 0.7f);
+		return clampf(3.0f * (kd - 0.6f), 0.0f, BL_SOLDIER_SPEED);
 	}
 	float dx = b->tx - b->x, dz = b->tz - b->z, d = hypotf(dx, dz);
 	if (d > 1.0f) {
@@ -1271,7 +1357,7 @@ static void raid_progress(struct bl_mob *b, float d)
  * near there); with nothing to do, or getting nowhere, it goes home. */
 static float raider_think(struct bl_mobs *M, struct bl_mob *b, const float pl[3], bool pl_alive, struct bl_mobs_result *R, float *want, struct goal *g)
 {
-	if (!b->retreat && b->age > BL_RAID_LIMIT)
+	if (!b->retreat && b->age - b->raid0 > BL_RAID_LIMIT)
 		turn_back(b);
 	float gd, at[3] = { 0 };
 	int gi = guard_enemy(M, b, pl, pl_alive, b->retreat ? 3.0f : BL_GUARD_SEE, 0.0f, &gd, at);    /* (on the way home: only who is at its side) */
@@ -1298,9 +1384,9 @@ static float raider_think(struct bl_mobs *M, struct bl_mob *b, const float pl[3]
 		return BL_GUARD_SPEED;
 	}
 	if (M->keep_on) {
-		float kx = M->keep[0] - b->x, kz = M->keep[2] - b->z, kd = hypotf(kx, kz);
+		float kx = M->keep[0] - b->x, kz = M->keep[2] - b->z, kd = bl_keep_dist(M->keep, b->x, b->z);
 		*want = atan2f(kx, kz);
-		if (kd < 1.7f && fabsf(M->keep[1] - b->y) < 2.6f) {
+		if (kd < 1.2f && fabsf(M->keep[1] - b->y) < 2.6f) {
 			b->idle = b->lost = 0.0f;
 			if (b->attack_cd <= 0.0f) {
 				b->attack_cd = BL_GUARD_COOLDOWN;
@@ -1313,8 +1399,8 @@ static float raider_think(struct bl_mobs *M, struct bl_mob *b, const float pl[3]
 		raid_progress(b, kd);
 		if (b->lost > BL_RAID_IDLE)
 			turn_back(b);
-		*g = (struct goal){ true, M->keep[0], M->keep[1], M->keep[2], 1.5f, false };
-		return clampf(3.0f * (kd - 1.1f), 0.0f, BL_GUARD_SPEED);
+		*g = keep_goal(M->keep, b, 0.7f);
+		return clampf(3.0f * (kd - 0.6f), 0.0f, BL_GUARD_SPEED);
 	}
 	/* no keep to strike: the nearest of the player and his people who is near where the raid is bound */
 	float best = 1e9f, tx = M->raid_at[0], ty = M->raid_at[1], tz = M->raid_at[2];
@@ -1347,6 +1433,182 @@ static float raider_think(struct bl_mobs *M, struct bl_mob *b, const float pl[3]
 	*want = atan2f(dx, dz);
 	*g = (struct goal){ true, tx, ty, tz, somebody ? 0.9f : 3.0f, !somebody };
 	return clampf(3.0f * (d - 0.9f), 0.0f, BL_GUARD_SPEED);
+}
+
+/* ---- the rival chief --------------------------------------------------------------------------------------------------- */
+
+/* how many of the player's side are within `r` of the place */
+static int crowd(const struct bl_mobs *M, const float at[3], float r, const float pl[3], bool pl_alive)
+{
+	int n = pl_alive && hypotf(pl[0] - at[0], pl[2] - at[2]) < r;
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		n += M->mob[i].alive && bl_mob_is_unit(M->mob[i].kind) && hypotf(M->mob[i].x - at[0], M->mob[i].z - at[2]) < r;
+	return n;
+}
+
+static bool chief_sees(const struct bl_world *w, const struct bl_mob *b, const float to[3])
+{
+	const float a[3] = { b->x, b->y + 1.6f, b->z }, dir[3] = { to[0] - a[0], to[1] + 1.0f - a[1], to[2] - a[2] };
+	const float len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+	struct bl_hit h;
+	return len < 0.8f || !bl_pick(w, a, dir, len - 0.5f, &h);
+}
+
+static void chief_shot(struct bl_mobs *M, const struct bl_mob *b, const float to[3], float up, int weapon)
+{
+	const struct bl_weapon_info *wi = bl_weapon(weapon);
+	if (wi->shot < 0)
+		return;
+	const float a[3] = { b->x + b->ysin * 0.4f, b->y + 1.35f, b->z + b->ycos * 0.4f }, t[3] = { to[0], to[1] + up, to[2] };
+	bl_mobs_shot(M, a, t, wi->shot);
+}
+
+/* what he has done to the one he struck (-2: the player), and to those beside him */
+static void chief_hit(struct bl_mobs *M, struct bl_mob *b, int gi, const float at[3], const float pl[3], bool pl_alive, struct bl_mobs_result *R)
+{
+	const struct bl_weapon_info *wi = bl_weapon(b->weapon);
+	const float dx = at[0] - b->x, dz = at[2] - b->z, d = hypotf(dx, dz), inv = d > 0.01f ? 1.0f / d : 0.0f;
+	for (int k = pl_alive ? -1 : 0; k < BL_MOBS_MAX; k++) {
+		const int who = k < 0 ? -2 : k;
+		const struct bl_mob *o = k < 0 ? NULL : &M->mob[k];
+		if (o && (!o->alive || bl_mob_is_rival(o->kind)))
+			continue;
+		if (who != gi && (wi->splash <= 0.0f || (o && !bl_mob_is_unit(o->kind)) || hypotf((o ? o->x : pl[0]) - at[0], (o ? o->z : pl[2]) - at[2]) > wi->splash ||
+		                  fabsf((o ? o->y : pl[1]) - at[1]) > wi->splash))
+			continue;
+		if (!o) {
+			R->damage += wi->c_damage;
+			R->hits++;
+			R->chief_hits++;
+			R->kbx += dx * inv * 5.0f;
+			R->kbz += dz * inv * 5.0f;
+		} else {
+			M->mob[k].kx += dx * inv * 4.0f;
+			M->mob[k].kz += dz * inv * 4.0f;
+			strike(M, b, &M->mob[k], wi->c_damage, R);
+		}
+	}
+}
+
+/* The chief: whom he sees he goes for, with the weapon that suits the distance; else he guards his keep, or, leading a raid, strikes the player's. He flies when
+ * he has somewhere to get to, over walls and water. Returns the speed along the ground he asks for; *up is the height he wants to fly at (b->flying). */
+static float chief_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_world *w, const float pl[3], bool pl_alive, struct bl_mobs_result *R, float *want,
+                         float *up)
+{
+	if (b->raider && !b->retreat && (b->age - b->raid0 > BL_RAID_LIMIT || b->hp < BL_CHIEF_HP * 0.35f))
+		turn_back(b);
+	float gd, at[3] = { 0 };
+	const float see = b->retreat ? 6.0f : BL_CHIEF_SEE;
+	int gi = guard_enemy(M, b, pl, pl_alive, see, 0.0f, &gd, at);
+	if (gi == -1 && pl_alive && !b->retreat && hypotf(pl[0] - b->x, pl[2] - b->z) < see) {  /* (the player in the air, too) */
+		gi = -2;
+		gd = hypotf(pl[0] - b->x, pl[2] - b->z);
+		memcpy(at, pl, sizeof at);
+	}
+	if (gi != -1 && !b->raider && M->rival_on && hypotf(at[0] - M->rkeep[0], at[2] - M->rkeep[2]) > BL_CHIEF_LEASH)
+		gi = -1;                                                    /* guarding: not far from home */
+	float tx = b->tx, ty = (float)bl_top(w, (int)floorf(b->tx), (int)floorf(b->tz)) + 1.0f, tz = b->tz, stop = 0.8f;
+	bool keep_attack = false;
+	const bool has_hammer = M->chief_arms & 1u << BL_WP_HAMMER, has_spear = M->chief_arms & 1u << BL_WP_SPEAR, has_bow = M->chief_arms & 1u << BL_WP_BOW,
+	           has_fire = M->chief_arms & 1u << BL_WP_FIRE, has_laser = M->chief_arms & 1u << BL_WP_LASER;
+	const int melee = has_hammer ? BL_WP_HAMMER : has_spear ? BL_WP_SPEAR : BL_WP_SWORD;
+	if (gi != -1) {
+		const float d = hypotf(gd, at[1] - b->y);
+		const bool sees = chief_sees(w, b, at);
+		int wp = melee;
+		if (d > 3.0f && sees) {
+			if (has_fire && d < bl_weapon(BL_WP_FIRE)->reach && (!has_laser || crowd(M, at, 3.0f, pl, pl_alive) > 1))
+				wp = BL_WP_FIRE;
+			else if (has_laser && d < bl_weapon(BL_WP_LASER)->reach)
+				wp = BL_WP_LASER;
+			else if (has_bow && d < bl_weapon(BL_WP_BOW)->reach)
+				wp = BL_WP_BOW;
+		}
+		b->weapon = wp;
+		const struct bl_weapon_info *wi = bl_weapon(wp);
+		tx = at[0];
+		ty = at[1];
+		tz = at[2];
+		if (wi->shot >= 0) {
+			stop = 9.0f;                                            /* he keeps his distance, a little off the ground: those who get to him can strike him */
+			ty = at[1] + 1.2f;
+			if (b->attack_cd <= 0.0f) {
+				b->attack_cd = wi->c_cooldown;
+				b->swing = 1.0f;
+				chief_shot(M, b, at, 1.0f, wp);
+				chief_hit(M, b, gi, at, pl, pl_alive, R);
+			}
+		} else {
+			stop = 1.0f;
+			const float reach = wp == BL_WP_SPEAR ? 2.4f : 1.6f;
+			if (gd < reach && fabsf(at[1] - b->y) < 2.0f && b->attack_cd <= 0.0f) {
+				b->attack_cd = wi->c_cooldown;
+				b->swing = 1.0f;
+				chief_hit(M, b, gi, at, pl, pl_alive, R);
+			}
+		}
+	} else if (b->raider && b->retreat) {
+		const float hd = hypotf(M->rkeep[0] - b->x, M->rkeep[2] - b->z);
+		if (hd < BL_RAID_HOME) {                                    /* home: he guards again */
+			b->raider = b->retreat = false;
+			R->raiders_home++;
+		}
+		tx = b->tx;
+		tz = b->tz;
+	} else if (b->raider) {
+		const float *to = M->keep_on ? M->keep : M->raid_at;
+		const float edge = M->keep_on ? bl_keep_dist(M->keep, b->x, b->z) : hypotf(to[0] - b->x, to[2] - b->z);
+		tx = to[0];
+		ty = to[1];
+		tz = to[2];
+		b->weapon = has_fire ? BL_WP_FIRE : has_laser ? BL_WP_LASER : melee;
+		const struct bl_weapon_info *wi = bl_weapon(b->weapon);
+		const float reach = wi->shot >= 0 ? 12.0f : 1.4f;
+		stop = (M->keep_on ? BL_KEEP_EDGE : 0.0f) + reach - 0.3f;
+		keep_attack = M->keep_on && edge < reach && (wi->shot >= 0 || fabsf(M->keep[1] - b->y) < 2.6f);
+		if (keep_attack) {
+			b->idle = b->lost = 0.0f;
+			if (b->attack_cd <= 0.0f) {
+				b->attack_cd = wi->c_cooldown;
+				b->swing = 1.0f;
+				chief_shot(M, b, M->keep, 2.5f, b->weapon);
+				R->keep_damage += wi->c_keep;
+				R->keep_hits++;
+			}
+		} else {
+			raid_progress(b, edge);
+			if (!M->keep_on && edge < 6.0f) {
+				b->idle += STEP;
+				if (b->idle > BL_RAID_IDLE * 0.5f)
+					turn_back(b);
+			}
+			if (b->lost > BL_RAID_IDLE)
+				turn_back(b);
+		}
+	} else {
+		b->weapon = melee;
+	}
+	const float dx = tx - b->x, dz = tz - b->z, d = hypotf(dx, dz);
+	if (d > 0.3f)
+		*want = atan2f(dx, dz);
+	/* up he goes when it is some way, when what he is after is above him, or when something is in the way */
+	b->flying = b->in_water || b->blocked > 0.15f || d > stop + 5.0f || ty > b->y + 1.5f || (gi != -1 && bl_weapon(b->weapon)->shot >= 0) ||
+	            (b->flying && !b->ground && d > stop + 1.0f);
+	if (b->flying) {
+		const float gy = (float)bl_top(w, (int)floorf(b->x), (int)floorf(b->z)) + 1.0f;
+		float ay = gy;                                          /* the highest thing under him and just ahead: he clears it */
+		for (float s = 0.5f; s <= 3.0f && s <= d; s += 0.5f)
+			ay = fmaxf(ay, (float)bl_top(w, (int)floorf(b->x + sinf(*want) * s), (int)floorf(b->z + cosf(*want) * s)) + 1.0f);
+		float h = ay + (d > stop + 4.0f ? 4.0f : 0.0f);
+		h = d > stop + 4.0f ? fmaxf(h, ty + 2.0f) : ty;
+		h = fmaxf(h, ay + (d > stop + 1.5f ? 1.2f : 0.0f));
+		if (b->blocked > 0.15f)
+			h = b->y + 4.0f;
+		*up = fminf(h, (float)w->h + 4.0f);
+	}
+	if (d <= stop)
+		return 0.0f;
+	return clampf(3.0f * (d - stop), 0.0f, b->flying ? BL_CHIEF_FLY : BL_CHIEF_SPEED);
 }
 
 /* ---- the rival clan's labourers ------------------------------------------------------------------------------------------- */
@@ -1456,6 +1718,48 @@ static bool rworker_find(struct bl_mobs *M, struct bl_mob *b, const struct bl_wo
 	return false;
 }
 
+/* a piece of gold of one of the deposits, the one nearest their keep that nobody else is at and that is not dangerous */
+static bool rworker_gold(struct bl_mobs *M, struct bl_mob *b, const struct bl_world *w, const float pl[3], bool pl_alive)
+{
+	float best = 1e9f;
+	int at[3] = { 0 };
+	for (int k = 0; k < M->ndeposits; k++) {
+		const int x0 = M->deposit[k].x, z0 = M->deposit[k].z;
+		if (hypotf((float)x0 - M->rkeep[0], (float)z0 - M->rkeep[2]) > BL_RWORKER_GOLD_RANGE)
+			continue;
+		for (int z = z0 - 3; z <= z0 + 3; z++)
+			for (int x = x0 - 3; x <= x0 + 3; x++) {
+				const int top = bl_top(w, x, z);
+				if (top < 1 || bl_get(w, x, top, z) != BL_GOLD)
+					continue;
+				float score = hypotf((float)x - M->rkeep[0], (float)z - M->rkeep[2]) + 3.0f * rf(&b->rng);
+				bool skip = score >= best || rjob_taken(M, b, x, z) || rworker_danger(M, (float)x + 0.5f, (float)top, (float)z + 0.5f, BL_RWORKER_FEAR + 3.0f, pl, pl_alive);
+				for (int i = 0; !skip && i < BL_RSKIP_MAX && i < M->nrskip; i++)
+					skip = M->rskip[i].x == x && M->rskip[i].z == z;
+				if (skip)
+					continue;
+				best = score;
+				at[0] = x;
+				at[1] = top;
+				at[2] = z;
+			}
+	}
+	float spot[3];
+	if (best >= 1e9f)
+		return false;
+	if (!stand_spot(w, at[0], at[1], at[2], b->x, b->z, spot)) {
+		rskip_add(M, at[0], at[2]);
+		return false;
+	}
+	b->gx = at[0];
+	b->gy = at[1];
+	b->gz = at[2];
+	b->gblock = BL_GOLD;
+	b->tx = spot[0];
+	b->tz = spot[2];
+	return true;
+}
+
 static void rworker_order(struct bl_mob *b, int order)
 {
 	b->order = b->errand = order;
@@ -1471,8 +1775,8 @@ static float rworker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
                            struct goal *g)
 {
 	const float dt = STEP;
-	float kx = M->rkeep[0] - b->x, kz = M->rkeep[2] - b->z, kd = hypotf(kx, kz);
-	const bool at_keep = kd < 2.4f && fabsf(M->rkeep[1] - b->y) < 3.5f;
+	float kx = M->rkeep[0] - b->x, kz = M->rkeep[2] - b->z;
+	const bool at_keep = bl_keep_dist(M->rkeep, b->x, b->z) < 2.0f && fabsf(M->rkeep[1] - b->y) < 3.5f;
 	if (b->order == BL_ORDER_IDLE && b->errand != BL_ORDER_IDLE) {          /* it has given up (mob_step) */
 		if (b->errand == BL_ORDER_GATHER)
 			rskip_add(M, b->gx, b->gz);
@@ -1486,9 +1790,10 @@ static float rworker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 		b->order = b->errand = BL_ORDER_IDLE;
 		return 0.0f;
 	}
-	if (b->load > 0 && at_keep) {
+	if (b->load + b->gold_load > 0 && at_keep) {
 		R->delivered += b->load;
-		b->load = b->fails = 0;
+		R->delivered_gold += b->gold_load;
+		b->load = b->gold_load = b->fails = 0;
 		b->order = b->errand = BL_ORDER_IDLE;
 		b->wait = 1.5f;
 	}
@@ -1501,7 +1806,8 @@ static float rworker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 		if (at_keep)
 			return 0.0f;
 		*want = atan2f(kx, kz);
-		*g = (struct goal){ true, M->rkeep[0], M->rkeep[1], M->rkeep[2], 1.8f, true };
+		*g = keep_goal(M->rkeep, b, 1.4f);
+		g->any_height = true;
 		return BL_RWORKER_SPEED;
 	}
 	if (b->order == BL_ORDER_IDLE) {
@@ -1512,12 +1818,17 @@ static float rworker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 		for (int i = 0; i < BL_MOBS_MAX; i++)
 			builders += M->mob[i].alive && M->mob[i].kind == BL_MOB_RWORKER && M->mob[i].order == BL_ORDER_BUILD;
 		float spot[2];
-		if (b->load > 0) {
+		int miners = 0;
+		for (int i = 0; i < BL_MOBS_MAX; i++)
+			miners += M->mob[i].alive && M->mob[i].kind == BL_MOB_RWORKER && M->mob[i].order == BL_ORDER_GATHER && M->mob[i].gblock == BL_GOLD;
+		if (b->load + b->gold_load > 0) {
 			rworker_order(b, BL_ORDER_MOVE);
 		} else if (M->rsite.on && builders < BL_RWORKER_BUILDERS && bl_site_missing(w, &M->rsite) > 0 && site_spot(M, w, &M->rsite, b, spot)) {
 			rworker_order(b, BL_ORDER_BUILD);
 			b->tx = spot[0];
 			b->tz = spot[1];
+		} else if (M->rgold_wanted && miners < BL_RWORKER_MINERS && rworker_gold(M, b, w, pl, pl_alive)) {
+			rworker_order(b, BL_ORDER_GATHER);
 		} else if (rworker_find(M, b, w, pl, pl_alive)) {
 			rworker_order(b, BL_ORDER_GATHER);
 		} else {
@@ -1529,8 +1840,9 @@ static float rworker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 		b->tx = M->rkeep[0];
 		b->tz = M->rkeep[2];
 		*want = atan2f(kx, kz);
-		*g = (struct goal){ true, M->rkeep[0], M->rkeep[1], M->rkeep[2], 1.8f, true };
-		return clampf(3.0f * (kd - 1.0f), 0.0f, BL_RWORKER_SPEED);
+		*g = keep_goal(M->rkeep, b, 1.4f);
+		g->any_height = true;
+		return clampf(3.0f * (bl_keep_dist(M->rkeep, b->x, b->z) - 1.0f), 0.0f, BL_RWORKER_SPEED);
 	}
 	if (b->order == BL_ORDER_BUILD) {
 		if (!M->rsite.on || bl_site_missing(w, &M->rsite) == 0) {
@@ -1557,7 +1869,7 @@ static float rworker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 	b->work += dt;
 	if (fmodf(b->work, 0.55f) < dt)
 		b->swing = 1.0f;
-	const float need = b->gblock == BL_LOG ? BL_RWORKER_TREE_TIME : b->gblock == BL_STONE ? BL_RWORKER_STONE_TIME : BL_RWORKER_FORAGE_TIME;
+	const float need = b->gblock == BL_LOG ? BL_RWORKER_TREE_TIME : b->gblock == BL_STONE ? BL_RWORKER_STONE_TIME : b->gblock == BL_GOLD ? BL_RWORKER_GOLD_TIME : BL_RWORKER_FORAGE_TIME;
 	const int max = (int)(sizeof R->raze / sizeof R->raze[0]);
 	if (b->work < need || R->nraze + 40 > max)
 		return 0.0f;
@@ -1566,7 +1878,10 @@ static float rworker_think(struct bl_mobs *M, struct bl_mob *b, const struct bl_
 		gather_time(w, b->gx, b->gy, b->gz, &stack);
 		take_stack(w, b, stack, R->raze, &R->nraze, max);
 	}
-	b->load = b->gblock == BL_LOG ? BL_RWORKER_TREE_LOAD : 1;
+	if (b->gblock == BL_GOLD)
+		b->gold_load = 1;
+	else
+		b->load = b->gblock == BL_LOG ? BL_RWORKER_TREE_LOAD : 1;
 	rworker_order(b, BL_ORDER_MOVE);
 	b->tx = M->rkeep[0];
 	b->tz = M->rkeep[2];
@@ -1624,8 +1939,10 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	int cx = (int)floorf(b->x), cz = (int)floorf(b->z);
 	b->in_water = bl_water(bl_get(w, cx, (int)floorf(b->y + 0.4f), cz));
 
-	/* falling, and floating in water */
-	if (b->in_water)
+	/* falling, and floating in water; the chief in the air goes to the height he wants */
+	if (b->flying)
+		b->vy = ap(b->vy, clampf((b->wyaw - b->y) * 3.0f, -8.0f, 8.0f), 40.0f, dt);        /* (a chief does not wander: `wyaw` is his height) */
+	else if (b->in_water)
 		b->vy = ap(b->vy, 1.6f, 14.0f, dt);
 	else
 		b->vy = fmaxf(b->vy - GRAV * dt, -40.0f);
@@ -1643,6 +1960,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	/* what it wants */
 	float dx = pl[0] - b->x, dz = pl[2] - b->z, d = hypotf(dx, dz);
 	float kx = M->keep[0] - b->x, kz = M->keep[2] - b->z, dk = hypotf(kx, kz);
+	const float dke = bl_keep_dist(M->keep, b->x, b->z);
 	float want = b->yaw, vmax = 0.0f;
 	bool to_keep = false, to_worker = false, chase = false;
 	int wi = -1;
@@ -1686,8 +2004,8 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 			goal = (struct goal){ true, M->mob[wi].x, M->mob[wi].y, M->mob[wi].z, 0.9f, false };
 		} else if (to_keep) {                                                   /* the player is not near: the keep is what it came for */
 			want = atan2f(kx, kz);
-			vmax = clampf(3.0f * (dk - 1.0f), 0.0f, cspeed);                /* it stops at the foot of it */
-			goal = (struct goal){ true, M->keep[0], M->keep[1], M->keep[2], 1.6f, false };
+			vmax = clampf(3.0f * (dke - 0.45f), 0.0f, cspeed);              /* it stops at the foot of it */
+			goal = keep_goal(M->keep, b, 0.8f);
 		} else if (chase) {
 			want = atan2f(dx, dz);
 			vmax = clampf(3.0f * (d - 0.85f), 0.0f, cspeed);               /* it slows down as it gets there and stops at arm's length */
@@ -1706,6 +2024,10 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		vmax = soldier_think(M, b, w, R, &want, &goal);
 		if (b->posted)
 			return;
+	} else if (b->kind == BL_MOB_CHIEF) {
+		float up = b->y;
+		vmax = chief_think(M, b, w, pl, pl_alive, R, &want, &up);
+		b->wyaw = up;
 	} else if (b->raider) {
 		vmax = raider_think(M, b, pl, pl_alive, R, &want, &goal);
 		if (!b->alive)
@@ -1724,7 +2046,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		b->pathing = steer(M, b, w, &goal, &want);
 	b->sieging = false;
 	const bool raiding = b->raider && !b->retreat && goal.on && hypotf(goal.x - b->x, goal.z - b->z) > goal.radius + 0.3f;
-	if (!b->pathing && (raiding || (goblin && (to_worker || to_keep || chase) && (to_worker ? wd : to_keep ? dk : d) > (to_keep ? 1.6f : reach)))) {
+	if (!b->pathing && (raiding || (goblin && (to_worker || to_keep || chase) && (to_worker ? wd : to_keep ? dke : d) > (to_keep ? 1.1f : reach)))) {
 		int c[3];
 		bool found = siege_cell(w, b, want, H, c);
 		for (int k = 0; k < 4 && !found && b->blocked > 0.1f; k++) {        /* slid along it: the side of the world's axes that leads towards the target */
@@ -1747,7 +2069,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		}
 	}
 	float da = angdiff(want, b->yaw);
-	if (b->blocked > (b->pathing ? 1.2f : 0.1f)) {                              /* something in the way: turn to one side until it is clear */
+	if (b->kind != BL_MOB_CHIEF && b->blocked > (b->pathing ? 1.2f : 0.1f)) {                              /* something in the way: turn to one side until it is clear */
 		if (b->steer == 0.0f)
 			b->steer = rf(&b->rng) < 0.5f ? 1.0f : -1.0f;
 		b->yaw += b->steer * 3.5f * dt;
@@ -1764,7 +2086,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	b->ysin = sinf(b->yaw);
 	if (fabsf(da) > 1.2f)
 		vmax *= 0.3f;
-	if (b->in_water)
+	if (b->in_water && !b->flying)
 		vmax *= 0.6f;
 	b->speed = ap(b->speed, vmax, 8.0f, dt);
 
@@ -1784,7 +2106,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 	float ox = b->x, oz = b->z;
 	bool bx = mob_move(w, b, 0, sx, H);
 	bool bz = mob_move(w, b, 2, sz, H);
-	if ((bx || bz) && (b->ground || b->in_water) && b->jump_cd <= 0.0f && b->speed > 0.1f) {    /* a block one high in the way is climbed (also out of water, onto the bank), two high is a wall */
+	if ((bx || bz) && !b->flying && (b->ground || b->in_water) && b->jump_cd <= 0.0f && b->speed > 0.1f) {    /* a block one high in the way is climbed (also out of water, onto the bank), two high is a wall */
 		float nx = b->x + b->ysin * 0.4f, nz = b->z + b->ycos * 0.4f;
 		if (mob_hits(w, b, nx, b->y, nz, BL_GOBLIN_HW, H) && !mob_hits(w, b, nx, b->y + 1.05f, nz, BL_GOBLIN_HW, H) && !mob_hits(w, b, b->x, b->y + 1.05f, b->z, BL_GOBLIN_HW, H)) {
 			b->vy = b->in_water ? 6.5f : 8.4f;
@@ -1798,7 +2120,9 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		b->blocked += dt;
 	else
 		b->blocked = fmaxf(0.0f, b->blocked - dt);
-	if (goblin) {
+	if (b->kind == BL_MOB_CHIEF) {
+		;
+	} else if (goblin) {
 		if (b->blocked > 2.5f && !chase) {
 			b->wander_t = 0.0f;
 			b->blocked = 0.0f;
@@ -1828,7 +2152,7 @@ static void mob_step(struct bl_mobs *M, struct bl_mob *b, const struct bl_world 
 		strike(M, b, &M->mob[wi], hit_p, R);
 	}
 	/* a blow at the keep */
-	if (to_keep && b->attack_cd <= 0.0f && dk < 1.45f && fabsf(M->keep[1] - b->y) < 2.6f) {
+	if (to_keep && b->attack_cd <= 0.0f && dke < 0.95f && fabsf(M->keep[1] - b->y) < 2.6f) {
 		b->attack_cd = cool;
 		b->swing = 1.0f;
 		R->keep_damage += hit_k;
@@ -2185,6 +2509,62 @@ static const struct bbox k_guard[] = {
 	{ 0.05f, 0.11f, 1.14f, 1.20f, 0.165f, 0.18f, 0x20180fu, LIMB_NONE, false },
 };
 
+/* the rival chief: black armour with gold, a long red cape, a gold crown */
+static const struct bbox k_chief[] = {
+	{ -0.20f, -0.02f, 0.00f, 0.55f, -0.09f, 0.09f, 0x1c1a22u, LIMB_LEG_L, false },
+	{ 0.02f, 0.20f, 0.00f, 0.55f, -0.09f, 0.09f, 0x1c1a22u, LIMB_LEG_R, false },
+	{ -0.25f, 0.25f, 0.55f, 1.04f, -0.14f, 0.14f, 0x2a2630u, LIMB_NONE, false },
+	{ -0.25f, 0.25f, 0.55f, 0.63f, -0.145f, 0.145f, 0xe0b030u, LIMB_NONE, false },
+	{ -0.07f, 0.07f, 0.72f, 0.88f, 0.14f, 0.155f, 0xd02828u, LIMB_NONE, false },
+	{ -0.30f, 0.30f, 0.15f, 1.04f, -0.23f, -0.17f, 0xa81414u, LIMB_NONE, false },       /* the cape */
+	{ -0.40f, -0.25f, 0.62f, 1.06f, -0.09f, 0.09f, 0x3a3642u, LIMB_ARM_L, false },
+	{ 0.25f, 0.40f, 0.62f, 1.06f, -0.09f, 0.09f, 0x3a3642u, LIMB_ARM_R, false },
+	{ -0.18f, 0.18f, 1.04f, 1.36f, -0.17f, 0.17f, 0xd9a066u, LIMB_NONE, false },
+	{ -0.20f, 0.20f, 1.34f, 1.40f, -0.19f, 0.19f, 0xf0c030u, LIMB_NONE, false },        /* the crown ... */
+	{ -0.20f, -0.14f, 1.40f, 1.50f, 0.11f, 0.19f, 0xf0c030u, LIMB_NONE, false },
+	{ -0.03f, 0.03f, 1.40f, 1.50f, 0.13f, 0.19f, 0xffe060u, LIMB_NONE, false },
+	{ 0.14f, 0.20f, 1.40f, 1.50f, 0.11f, 0.19f, 0xf0c030u, LIMB_NONE, false },
+	{ -0.11f, -0.05f, 1.18f, 1.24f, 0.165f, 0.18f, 0xff5018u, LIMB_NONE, true },
+	{ 0.05f, 0.11f, 1.18f, 1.24f, 0.165f, 0.18f, 0xff5018u, LIMB_NONE, true },
+};
+#define CHIEF_SCALE 1.27f
+
+/* what he holds, and the flames under his boots when he flies; how many boxes were added */
+static int chief_extra(const struct bl_mob *b, struct bbox *o)
+{
+	int n = 0;
+	switch (b->weapon) {
+	case BL_WP_SPEAR:
+		o[n++] = (struct bbox){ 0.30f, 0.34f, 0.30f, 1.55f, 0.02f, 0.06f, 0x6a4a2au, LIMB_ARM_R, false };
+		o[n++] = (struct bbox){ 0.28f, 0.36f, 1.55f, 1.75f, 0.01f, 0.07f, 0xd8dee6u, LIMB_ARM_R, false };
+		break;
+	case BL_WP_HAMMER:
+		o[n++] = (struct bbox){ 0.30f, 0.34f, 0.60f, 1.35f, 0.02f, 0.06f, 0x6a4a2au, LIMB_ARM_R, false };
+		o[n++] = (struct bbox){ 0.22f, 0.44f, 1.35f, 1.58f, -0.10f, 0.18f, 0x7a808au, LIMB_ARM_R, false };
+		break;
+	case BL_WP_BOW:
+		o[n++] = (struct bbox){ 0.30f, 0.34f, 0.55f, 1.35f, 0.18f, 0.22f, 0x8a5a2au, LIMB_ARM_R, false };
+		o[n++] = (struct bbox){ 0.31f, 0.33f, 0.55f, 1.35f, 0.08f, 0.09f, 0xe8e8e0u, LIMB_ARM_R, false };
+		break;
+	case BL_WP_FIRE:
+		o[n++] = (struct bbox){ 0.30f, 0.34f, 0.30f, 1.45f, 0.02f, 0.06f, 0x3a2418u, LIMB_ARM_R, false };
+		o[n++] = (struct bbox){ 0.25f, 0.39f, 1.45f, 1.59f, -0.03f, 0.11f, 0xffa020u, LIMB_ARM_R, true };
+		break;
+	case BL_WP_LASER:
+		o[n++] = (struct bbox){ 0.28f, 0.37f, 0.68f, 0.80f, 0.05f, 0.45f, 0x9aa2aeu, LIMB_ARM_R, false };
+		o[n++] = (struct bbox){ 0.29f, 0.36f, 0.70f, 0.78f, 0.45f, 0.50f, 0xff2020u, LIMB_ARM_R, true };
+		break;
+	default:
+		o[n++] = (struct bbox){ 0.30f, 0.35f, 0.95f, 1.58f, 0.00f, 0.05f, 0xf0f4f8u, LIMB_ARM_R, false };
+		break;
+	}
+	if (b->flying) {
+		o[n++] = (struct bbox){ -0.17f, -0.05f, -0.22f, -0.01f, -0.06f, 0.06f, 0xff8818u, LIMB_LEG_L, true };
+		o[n++] = (struct bbox){ 0.05f, 0.17f, -0.22f, -0.01f, -0.06f, 0.06f, 0xffc030u, LIMB_LEG_R, true };
+	}
+	return n;
+}
+
 bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], float tmax, struct bl_mob_hit *hit)
 {
 	bool found = false;
@@ -2196,10 +2576,11 @@ bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], fl
 		const bool rworker = b->kind == BL_MOB_RWORKER, worker = b->kind == BL_MOB_WORKER, soldier = b->kind == BL_MOB_SOLDIER, guard = b->kind == BL_MOB_GUARD;
 		const struct bbox *tab = rworker ? k_rworker : guard ? k_guard : soldier ? k_soldier : worker ? k_worker : b->brute ? k_brute : k_goblin;
 		const int ntab = rworker ? (int)(sizeof k_rworker / sizeof k_rworker[0]) : guard ? (int)(sizeof k_guard / sizeof k_guard[0]) : soldier ? (int)(sizeof k_soldier / sizeof k_soldier[0]) : worker ? (int)(sizeof k_worker / sizeof k_worker[0]) : b->brute ? (int)(sizeof k_brute / sizeof k_brute[0]) : (int)(sizeof k_goblin / sizeof k_goblin[0]);
-		const float scale = soldier || guard ? SOLDIER_SCALE : worker || rworker ? WORKER_SCALE : b->brute ? BRUTE_SCALE : GOBLIN_SCALE;
+		const bool chief = b->kind == BL_MOB_CHIEF;
+		const float scale = chief ? CHIEF_SCALE : soldier || guard ? SOLDIER_SCALE : worker || rworker ? WORKER_SCALE : b->brute ? BRUTE_SCALE : GOBLIN_SCALE;
 		/* the box round the whole creature (arms, ears and a swinging leg reach 0.55 sideways and 0.6 forward) */
-		const float rr = b->brute ? 0.92f : 0.66f;
-		float lo[3] = { b->x - rr, b->y, b->z - rr }, hi[3] = { b->x + rr, b->y + bl_mob_height(b) + 0.06f, b->z + rr };
+		const float rr = b->brute ? 0.92f : chief ? 0.80f : 0.66f;
+		float lo[3] = { b->x - rr, b->y - (chief ? 0.35f : 0.0f), b->z - rr }, hi[3] = { b->x + rr, b->y + bl_mob_height(b) + (chief ? 0.4f : 0.06f), b->z + rr };
 		float tb = ray_box(o, d, lo, hi, best);
 		if (tb < 0.0f)
 			continue;
@@ -2208,8 +2589,11 @@ bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], fl
 		const float is = 1.0f / scale;                                           /* (scaling the origin and the direction alike leaves the distance as it is) */
 		float lo_[3] = { (rx * b->ycos - rz * b->ysin) * is, ry * is, (rx * b->ysin + rz * b->ycos) * is };
 		float ld[3] = { (d[0] * b->ycos - d[2] * b->ysin) * is, d[1] * is, (d[0] * b->ysin + d[2] * b->ycos) * is };
-		for (int k = 0; k < ntab; k++) {
-			const struct bbox *bx = &tab[k];
+		struct bbox extra[4];
+		const int nextra = chief ? chief_extra(b, extra) : 0;
+		const int nbase = chief ? (int)(sizeof k_chief / sizeof k_chief[0]) : ntab;
+		for (int k = 0; k < nbase + nextra; k++) {
+			const struct bbox *bx = k >= nbase ? &extra[k - nbase] : chief ? &k_chief[k] : &tab[k];
 			float dz, dy;
 			limb_offset(b, bx->limb, &dz, &dy);
 			float blo[3] = { bx->x0, bx->y0 + dy, bx->z0 + dz }, bhi[3] = { bx->x1, bx->y1 + dy, bx->z1 + dz };
@@ -2268,6 +2652,61 @@ bool bl_mobs_ray(const struct bl_mobs *m, const float o[3], const float d[3], fl
 		const struct bl_arrow *ar = &m->arrow[i];
 		if (ar->t <= 0.0f)
 			continue;
+		if (ar->kind == BL_SHOT_LASER) {            /* a thin red beam: where the ray passes nearest to it */
+			const float u[3] = { ar->b[0] - ar->a[0], ar->b[1] - ar->a[1], ar->b[2] - ar->a[2] };
+			const float r0[3] = { o[0] - ar->a[0], o[1] - ar->a[1], o[2] - ar->a[2] };
+			const float uu = u[0] * u[0] + u[1] * u[1] + u[2] * u[2], ud = u[0] * d[0] + u[1] * d[1] + u[2] * d[2];
+			const float ur = u[0] * r0[0] + u[1] * r0[1] + u[2] * r0[2], dr = d[0] * r0[0] + d[1] * r0[1] + d[2] * r0[2];
+			const float den = uu - ud * ud;
+			if (den < 1e-6f || uu < 1e-6f)
+				continue;
+			const float s = clampf((ur - ud * dr) / den, 0.0f, 1.0f), t = s * ud - dr;
+			if (t < 0.0f || t >= best)
+				continue;
+			float e = 0.0f;
+			for (int a = 0; a < 3; a++) {
+				const float q = r0[a] + d[a] * t - u[a] * s;
+				e += q * q;
+			}
+			if (e > 0.045f * 0.045f)
+				continue;
+			best = t;
+			found = true;
+			hit->t = t;
+			hit->id = -1;
+			hit->rgb[0] = 1.0f;
+			hit->rgb[1] = e < 0.018f * 0.018f ? 0.85f : 0.12f;
+			hit->rgb[2] = e < 0.018f * 0.018f ? 0.80f : 0.10f;
+			continue;
+		}
+		if (ar->kind == BL_SHOT_FIRE) {             /* a ball that flies, then bursts */
+			const float age = BL_FIRE_TIME - ar->t, f = clampf(age / 0.3f, 0.0f, 1.0f);
+			const float rad = age < 0.3f ? 0.22f : 0.22f + (age - 0.3f) / (BL_FIRE_TIME - 0.3f) * 1.0f;
+			float c[3], oc[3];
+			for (int a = 0; a < 3; a++) {
+				c[a] = ar->a[a] + (ar->b[a] - ar->a[a]) * f;
+				oc[a] = o[a] - c[a];
+			}
+			const float bq = oc[0] * d[0] + oc[1] * d[1] + oc[2] * d[2];
+			const float cq = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - rad * rad;
+			const float disc = bq * bq - cq;
+			if (disc <= 0.0f)
+				continue;
+			const float t = -bq - sqrtf(disc);
+			if (t < 0.0f || t >= best)
+				continue;
+			const float core = sqrtf(disc) / rad;
+			if (age >= 0.3f && core < 0.55f && ((int)((o[0] + d[0] * t) * 7.0f) + (int)((o[1] + d[1] * t) * 7.0f) + (int)((o[2] + d[2] * t) * 7.0f)) % 3 == 0)
+				continue;                               /* (the burst is ragged) */
+			best = t;
+			found = true;
+			hit->t = t;
+			hit->id = -1;
+			hit->rgb[0] = 1.0f;
+			hit->rgb[1] = 0.25f + 0.7f * core * core;
+			hit->rgb[2] = 0.55f * core * core * core;
+			continue;
+		}
 		float f = 1.0f - ar->t / BL_ARROW_TIME;
 		for (int k = 0; k < 3; k++) {
 			float u = clampf(f + 0.2f - 0.07f * (float)k, 0.0f, 1.0f);

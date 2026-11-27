@@ -122,7 +122,7 @@ static void test_world(void)
 	}
 	CHECK(bad == 0, "%d cells hold a number that is no block", bad);
 	for (int k = BL_GRASS; k < BL_COUNT; k++)
-		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && k != BL_BARRACKS && k != BL_GATE && k != BL_TOWERPOST && k != BL_REDKEEP && !(k >= BL_FLOW1 && k <= BL_FLOW7))
+		if (k != BL_GLASS && k != BL_PLANKS && k != BL_BRICK && k != BL_TORCH && k != BL_LAMP && k != BL_KEEP && k != BL_BARRACKS && k != BL_GATE && k != BL_TOWERPOST && k != BL_REDKEEP && k != BL_GOLD && k != BL_SMITHY && k != BL_MAGE && k != BL_INFIRMARY && k != BL_MINE && k != BL_KEEPFLAG && k != BL_REDFLAG && !(k >= BL_FLOW1 && k <= BL_FLOW7))
 			CHECK(count[k] > 0, "the world has no %s", bl_block_name(k));
 	CHECK(count[BL_GLASS] == 0 && count[BL_PLANKS] == 0 && count[BL_TORCH] == 0 && count[BL_LAMP] == 0 && count[BL_KEEP] == 0 && count[BL_BARRACKS] == 0 && count[BL_GATE] == 0 && count[BL_TOWERPOST] == 0, "glass / planks / torches / lamps are only for the player to put, the keep for the game");
 	long flowing = 0;
@@ -2336,7 +2336,8 @@ static void test_keep(void)
 		}
 		CHECK(opaque == 256 && same < 100, "the keep's picture (%d) is opaque and not the brick's (%d of 256 the same)", f, same);
 	}
-	const uint32_t *side = bl_texture(BL_KEEP, BL_FACE_SIDE);
+	const uint32_t *side = bl_texture(BL_KEEPFLAG, BL_FACE_SIDE);
+	CHECK(!bl_breakable(BL_KEEPFLAG) && !bl_breakable(BL_REDFLAG) && bl_own_keep(BL_KEEPFLAG) && bl_red_keep(BL_REDFLAG), "the shields are parts of the keeps");
 	int red = 0, gold = 0;
 	for (int i = 0; i < 256; i++) {
 		int r = (int)((side[i] >> 16) & 255), g = (int)((side[i] >> 8) & 255), b = (int)(side[i] & 255);
@@ -2418,7 +2419,8 @@ static void test_keep(void)
 		CHECK(hits >= 24 && hits <= 38 && mingap >= 0.95f && fabsf(dmg - 2.0f * (float)hits) < 0.01f, "then a blow a second on it, two hit points each (%d blows, %.0f hit points, never closer than %.2f s)", hits, dmg, mingap);
 		CHECK(bad == 0, "and the player, far away, is not touched (%d)", bad);
 		const struct bl_mob *g = first_mob(&M);
-		CHECK(g && hypotf(g->x - 80.5f, g->z - 64.5f) > 0.9f && hypotf(g->x - 80.5f, g->z - 64.5f) < 1.5f, "it stands at the foot of it (%.2f m)", g ? hypotf(g->x - 80.5f, g->z - 64.5f) : 0);
+		const float kat[3] = { 80.5f, 20.0f, 64.5f }, ke = g ? bl_keep_dist(kat, g->x, g->z) : -1.0f;
+		CHECK(ke > 0.1f && ke < 1.0f, "it stands at the foot of its wall (%.2f m)", ke);
 	}
 	{                                                                       /* two goblins hit twice as much */
 		bl_mobs_clear(&M);
@@ -2466,9 +2468,9 @@ static void test_keep(void)
 		CHECK(dmg == 0.0f && first_mob(&M) && first_mob(&M)->x < 40.0f, "a keep 70 blocks away is not seen");
 	}
 	{                                                                       /* a wall round the keep (three high, a ring two blocks out) keeps them off it */
-		for (int dx = -3; dx <= 3; dx++)
-			for (int dz = -3; dz <= 3; dz++)
-				if (abs(dx) == 3 || abs(dz) == 3)
+		for (int dx = -6; dx <= 6; dx++)
+			for (int dz = -6; dz <= 6; dz++)
+				if (abs(dx) == 6 || abs(dz) == 6)
 					for (int y = 20; y < 23; y++)
 						bl_set(wk, 80 + dx, y, 64 + dz, BL_STONE);
 		bl_mobs_clear(&M);
@@ -2756,6 +2758,106 @@ static int count_block(const struct bl_site *s, int block)
 	return n;
 }
 
+static void test_chief(void)
+{
+	struct bl_world *w = bl_world_flat(128, 128, 64, 20);
+	static struct bl_mobs M;
+	bl_mobs_init(&M, 9);
+	M.enabled = false;
+	CHECK(bl_weapon(BL_WP_SWORD)->damage == BL_SWORD_DAMAGE && bl_weapon(BL_WP_SPEAR)->reach > bl_weapon(BL_WP_SWORD)->reach &&
+	      bl_weapon(BL_WP_HAMMER)->keep_damage > bl_weapon(BL_WP_SWORD)->keep_damage && bl_weapon(BL_WP_BOW)->shot == BL_SHOT_ARROW && bl_weapon(BL_WP_FIRE)->splash > 0 &&
+	      bl_weapon(BL_WP_LASER)->reach > bl_weapon(BL_WP_BOW)->reach && bl_weapon(99) == bl_weapon(0), "the six weapons");
+	bl_mobs_set_rival(&M, true, 90.5f, 20.0f, 64.5f);
+	CHECK(bl_mobs_add_chief(&M, w, 90.5f, 20.0f, 58.5f) && !bl_mobs_add_chief(&M, w, 94.5f, 20.0f, 58.5f), "there is one chief");
+	int ci = bl_mobs_chief(&M);
+	CHECK(ci >= 0 && M.mob[ci].hp == BL_CHIEF_HP && bl_mob_is_foe(BL_MOB_CHIEF) && bl_mob_is_rival(BL_MOB_CHIEF), "a foe with %d hit points", (int)BL_CHIEF_HP);
+	/* a wall in his way: he flies over it to the player and hits him */
+	for (int z = 40; z < 90; z++)
+		for (int y = 20; y < 25; y++)
+			bl_set(w, 80, y, z, BL_STONE);
+	float pl[3] = { 70.5f, 20.0f, 58.5f }, dmg = 0, high = 0;
+	int bad = 0;
+	for (int i = 0; i < 30 * 20; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(&M, w, pl, true, 12.0f, 1.0f / 30.0f, &R);
+		dmg += R.damage;
+		high = fmaxf(high, M.mob[ci].y);
+		bad += box_in_solid(w, M.mob[ci].x, M.mob[ci].y, M.mob[ci].z, BL_GOBLIN_HW, BL_CHIEF_H);
+	}
+	CHECK(M.mob[ci].alive && M.mob[ci].x < 80.0f && high > 24.5f && bad == 0, "he flies over a wall five high (x %.1f, up to %.1f, %d in blocks)", M.mob[ci].x, high, bad);
+	CHECK(dmg >= 9.0f, "and strikes the player (%.0f)", dmg);
+	/* far from home he lets be and goes back */
+	pl[0] = 20.5f;
+	for (int i = 0; i < 30 * 20; i++) {
+		struct bl_mobs_result R;
+		bl_mobs_step(&M, w, pl, true, 12.0f, 1.0f / 30.0f, &R);
+	}
+	CHECK(fabsf(M.mob[ci].x - 90.5f) < 3.0f && fabsf(M.mob[ci].z - 58.5f) < 3.0f && M.mob[ci].y < 21.0f, "back at his post, on the ground (%.1f %.1f %.1f)", M.mob[ci].x, M.mob[ci].y, M.mob[ci].z);
+	/* on a raid he strikes the keep */
+	bl_mobs_set_keep(&M, true, 40.5f, 20.0f, 100.5f);
+	bl_mobs_set_raid(&M, 40.5f, 20.0f, 100.5f);
+	M.chief_arms = 1u << BL_WP_SWORD | 1u << BL_WP_FIRE;
+	CHECK(bl_mobs_chief_raid(&M) && bl_mobs_count_raiders(&M) == 1, "he leads a raid");
+	float kd = 0;
+	for (int i = 0; i < 30 * 30; i++) {
+		struct bl_mobs_result R;
+		const float far[3] = { 5.5f, 20.0f, 5.5f };
+		bl_mobs_step(&M, w, far, false, 12.0f, 1.0f / 30.0f, &R);
+		kd += R.keep_damage;
+	}
+	CHECK(kd >= 12.0f && M.mob[ci].weapon == BL_WP_FIRE, "the keep is under his fire (%.0f)", kd);
+	bl_mobs_raid_retreat(&M);
+	for (int i = 0; i < 30 * 40; i++) {
+		struct bl_mobs_result R;
+		const float far[3] = { 5.5f, 20.0f, 5.5f };
+		bl_mobs_step(&M, w, far, false, 12.0f, 1.0f / 30.0f, &R);
+	}
+	CHECK(M.mob[ci].alive && !M.mob[ci].raider, "home again, he is no raider");
+	/* the sword finds him, a splash hurts those near, soldiers and archers count him */
+	float o[3] = { M.mob[ci].x, M.mob[ci].y + 1.0f, M.mob[ci].z - 3.0f }, d[3] = { 0, 0, 1 }, t = 0;
+	CHECK(bl_mobs_pick(&M, o, d, 5.0f, &t) == ci, "the sword finds him");
+	bl_mobs_add(&M, w, BL_MOB_GUARD, M.mob[ci].x + 1.5f, M.mob[ci].y, M.mob[ci].z);
+	bl_mobs_add(&M, w, BL_MOB_WORKER, M.mob[ci].x - 1.5f, M.mob[ci].y, M.mob[ci].z);
+	const float at[3] = { M.mob[ci].x, M.mob[ci].y + 0.8f, M.mob[ci].z };
+	const float whp = BL_WORKER_HP;
+	CHECK(bl_mobs_splash(&M, at, 3.0f, 100.0f, -1) == 2 && bl_mobs_chief(&M) < 0 && bl_mobs_count_kind(&M, BL_MOB_GUARD) == 0, "a splash takes the enemies near");
+	int wi = -1;
+	for (int i = 0; i < BL_MOBS_MAX; i++)
+		if (M.mob[i].alive && M.mob[i].kind == BL_MOB_WORKER)
+			wi = i;
+	CHECK(wi >= 0 && M.mob[wi].hp == whp, "and none of the player's own");
+	/* shots are pictures that end */
+	const float a0[3] = { 10, 22, 10 }, a1[3] = { 10, 22, 20 };
+	bl_mobs_shot(&M, a0, a1, BL_SHOT_LASER);
+	struct bl_mob_hit hit;
+	const float ro[3] = { 5, 22, 15 }, rd[3] = { 1, 0, 0 };
+	CHECK(bl_mobs_ray(&M, ro, rd, 30.0f, &hit) && fabsf(hit.t - 5.0f) < 0.1f && hit.rgb[0] > 0.9f, "a beam is seen (%.2f)", hit.t);
+	/* their diggers bring gold home */
+	bl_mobs_init(&M, 4);
+	M.enabled = false;
+	bl_mobs_set_rival(&M, true, 40.5f, 20.0f, 40.5f);
+	for (int x = 63; x <= 65; x++)
+		for (int z = 39; z <= 41; z++)
+			bl_set(w, x, 19, z, BL_GOLD);
+	const int dep[1][3] = { { 64, 19, 40 } };
+	bl_mobs_set_deposits(&M, dep, 1);
+	M.rgold_wanted = true;
+	for (int k = 0; k < 3; k++)
+		bl_mobs_add(&M, w, BL_MOB_RWORKER, 46.5f, 20.0f, 36.5f + 2.0f * (float)k);
+	int gold = 0, taken = 0;
+	for (int i = 0; i < 30 * 120; i++) {
+		struct bl_mobs_result R;
+		const float far[3] = { 5.5f, 20.0f, 5.5f };
+		bl_mobs_step(&M, w, far, false, 12.0f, 1.0f / 30.0f, &R);
+		gold += R.delivered_gold;
+		for (int k = 0; k < R.nraze; k++)
+			if (bl_get(w, R.raze[k].x, R.raze[k].y, R.raze[k].z) == BL_GOLD)
+				taken += bl_set(w, R.raze[k].x, R.raze[k].y, R.raze[k].z, BL_AIR);
+	}
+	CHECK(gold >= 2 && gold <= 5 && taken >= gold && taken <= 6, "one of their diggers at a time brings the gold in (%d brought, %d taken)", gold, taken);
+	bl_world_free(w);
+}
+
 static void test_plans(void)
 {
 	struct bl_world *w = bl_world_flat(96, 96, 64, 20);
@@ -2763,18 +2865,18 @@ static void test_plans(void)
 	const char *why = NULL;
 	int cob, pl;
 	bl_plan_cost(BL_PLAN_BARRACKS, &cob, &pl);
-	CHECK(cob == 20 && pl == 16 && !strcmp(bl_plan_name(BL_PLAN_TOWER), "watchtower") && !strcmp(bl_plan_name(9), "?"), "the plans have names and a price");
-	CHECK(bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 40, 20, 40, NULL, 0, &s, &why) && s.n == 60 && count_block(&s, BL_BARRACKS) == 1, "a barracks is 60 blocks with one banner (%d, %s)", s.n, why ? why : "-");
+	CHECK(cob == 12 && pl == 8 && bl_plan_gold(BL_PLAN_MAGE) == 8 && !strcmp(bl_plan_name(BL_PLAN_TOWER), "watchtower") && !strcmp(bl_plan_name(BL_PLAN_COUNT), "?"), "the plans have names and a price");
+	CHECK(bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 40, 20, 40, NULL, 0, &s, &why) && s.n == 23 && count_block(&s, BL_BARRACKS) == 1, "a barracks is 23 blocks with one banner (%d, %s)", s.n, why ? why : "-");
 	int lo[3], hi[3];
 	bl_site_box(&s, lo, hi);
-	CHECK(lo[0] == 38 && hi[0] == 42 && lo[2] == 39 && hi[2] == 42 && lo[1] == 20 && hi[1] == 23, "5 wide, 4 deep, 4 high (%d..%d, %d..%d, %d..%d)", lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+	CHECK(lo[0] == 39 && hi[0] == 41 && lo[2] == 39 && hi[2] == 41 && lo[1] == 20 && hi[1] == 22, "3 wide, 3 deep, 3 high (%d..%d, %d..%d, %d..%d)", lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
 	bool door = true;
 	for (int i = 0; i < s.n; i++)
 		door &= !(s.c[i].x == 40 && s.c[i].z == 39 && s.c[i].y < 22);
 	CHECK(door, "there is a door in the front, two high");
 	CHECK(bl_plan_lay(w, BL_PLAN_BARRACKS, 1, 40, 20, 40, NULL, 0, &t, NULL), "turned once");
 	bl_site_box(&t, lo, hi);
-	CHECK(hi[0] - lo[0] == 3 && hi[2] - lo[2] == 4 && lo[0] == 39, "it is 4 wide and 5 deep, its front towards -x (%d..%d, %d..%d)", lo[0], hi[0], lo[2], hi[2]);
+	CHECK(hi[0] - lo[0] == 2 && hi[2] - lo[2] == 2 && lo[0] == 39, "turned it is 3 by 3, its front towards -x (%d..%d, %d..%d)", lo[0], hi[0], lo[2], hi[2]);
 	CHECK(bl_plan_lay(w, BL_PLAN_TOWER, 0, 60, 20, 60, NULL, 0, &t, NULL) && t.n == 29 && count_block(&t, BL_TOWERPOST) == 1, "a watchtower is 29 blocks with one post");
 	CHECK(bl_plan_lay(w, BL_PLAN_GATE, 0, 60, 20, 70, NULL, 0, &t, NULL) && t.n == 8 && count_block(&t, BL_GATE) == 2, "a gate: two posts and two blocks of gate");
 	CHECK(!bl_plan_lay(w, BL_PLAN_BARRACKS, 0, 42, 20, 41, &s, 1, &t, &why) && t.n > 0 && why, "not over a planned building (%s), the cells are there for the red preview", why ? why : "-");
@@ -2833,7 +2935,23 @@ static void test_builders(void)
 			done_t = t;
 	}
 	CHECK(bl_site_missing(w, &s) == 0 && sum.nbuilt == 1 && bl_mobs_count_sites(&M) == 0, "two workers build the barracks (%d missing, %d reports)", bl_site_missing(w, &s), sum.nbuilt);
-	CHECK(done_t > 14.0f && done_t < 35.0f, "60 blocks, two builders, half a second a block: %.1f s", done_t);
+	CHECK(done_t > 4.0f && done_t < 22.0f, "23 blocks, two builders, half a second a block: %.1f s", done_t);
+	{                                                       /* the other buildings, and the castle */
+		struct bl_site o;
+		const int sign[4] = { BL_SMITHY, BL_MAGE, BL_INFIRMARY, BL_MINE };
+		for (int k = 0; k < 4; k++)
+			CHECK(bl_plan_lay(w, BL_PLAN_SMITHY + k, k, 20, 20, 70, NULL, 0, &o, NULL) && o.n > 15 && o.n <= BL_SITE_CELLS && count_block(&o, sign[k]) == 1, "%s: laid out, one sign (%d blocks)", bl_plan_name(BL_PLAN_SMITHY + k), o.n);
+		struct bl_cell kc[BL_KEEP_CELLS];
+		const int kn = bl_keep_cells(kc, 40, 20, 40, BL_KEEP);
+		int out = 0, door = 0, top = 0, core = 0;
+		for (int i = 0; i < kn; i++) {
+			out += abs(kc[i].x - 40) > BL_KEEP_R || abs(kc[i].z - 40) > BL_KEEP_R || kc[i].y < 20 || kc[i].y >= 20 + BL_KEEP_TALL;
+			door += kc[i].x == 40 && kc[i].z == 40 - BL_KEEP_R && kc[i].y < 22;
+			top += kc[i].y == 20 + BL_KEEP_TALL - 1;
+			core += kc[i].x == 40 && kc[i].z == 40 && kc[i].y == 20;
+		}
+		CHECK(kn > 150 && kn < BL_KEEP_CELLS && !out && !door && top == 1 && core == 1, "the castle: %d blocks in its box, a doorway, one spire (%d %d %d)", kn, out, door, top);
+	}
 	CHECK(bad == 0 && in_block == 0, "no block is put into a body, no worker ends up inside one (%d, %d)", bad, in_block);
 	CHECK(M.mob[0].order == BL_ORDER_IDLE && M.mob[1].order == BL_ORDER_IDLE, "then they are idle");
 
@@ -4747,6 +4865,8 @@ int main(int argc, char **argv)
 	test_soldiers();
 	test_brutes();
 	printf("building\n");
+	printf("the chief, weapons, gold\n");
+	test_chief();
 	test_plans();
 	test_builders();
 	test_gates_and_siege();

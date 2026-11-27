@@ -13,7 +13,7 @@ const int8_t bl_face_n[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1
 
 static const char *const k_names[BL_COUNT] = {
 	"air", "grass", "dirt", "stone", "sand", "log", "leaves", "planks", "glass", "water", "bedrock", "brick", "snow", "cobble", "torch", "lamp",
-	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep", "barracks", "gate", "watchpost", "redkeep",
+	"flow1", "flow2", "flow3", "flow4", "flow5", "flow6", "flow7", "keep", "barracks", "gate", "watchpost", "redkeep", "gold", "smithy", "magetower", "infirmary", "mine", "keepflag", "redflag",
 };
 
 const char *bl_block_name(int block)
@@ -35,7 +35,8 @@ float bl_hardness(int block)
 	case BL_LOG: return 1.2f;
 	case BL_STONE: case BL_COBBLE: return 2.0f;
 	case BL_BRICK: return 2.2f;
-	case BL_BARRACKS: return 2.4f;
+	case BL_BARRACKS: case BL_SMITHY: case BL_MAGE: case BL_INFIRMARY: case BL_MINE: return 2.4f;
+	case BL_GOLD: return 2.5f;
 	case BL_GATE: return 1.5f;
 	case BL_TOWERPOST: return 2.0f;
 	default: return 0.0f;
@@ -48,7 +49,7 @@ int bl_drop(int block)
 	case BL_GRASS: return BL_DIRT;
 	case BL_STONE: return BL_COBBLE;
 	case BL_LEAVES: case BL_GLASS: return BL_AIR;
-	case BL_DIRT: case BL_SAND: case BL_LOG: case BL_PLANKS: case BL_BRICK: case BL_SNOW: case BL_COBBLE: case BL_TORCH: case BL_LAMP: case BL_BARRACKS: case BL_GATE: case BL_TOWERPOST: return block;
+	case BL_DIRT: case BL_SAND: case BL_LOG: case BL_PLANKS: case BL_BRICK: case BL_SNOW: case BL_COBBLE: case BL_TORCH: case BL_LAMP: case BL_BARRACKS: case BL_GATE: case BL_TOWERPOST: case BL_GOLD: case BL_SMITHY: case BL_MAGE: case BL_INFIRMARY: case BL_MINE: return block;
 	default: return BL_AIR;
 	}
 }
@@ -797,7 +798,7 @@ bool bl_break(struct bl_world *w, const struct bl_hit *h)
 
 bool bl_place(struct bl_world *w, const struct bl_hit *h, int block, const struct bl_player *p)
 {
-	if (!h || !h->hit || block <= BL_AIR || block >= BL_COUNT || block == BL_BEDROCK || block == BL_KEEP || block == BL_REDKEEP || (block >= BL_FLOW1 && block <= BL_FLOW7))
+	if (!h || !h->hit || block <= BL_AIR || block >= BL_COUNT || block == BL_BEDROCK || bl_own_keep(block) || bl_red_keep(block) || (block >= BL_FLOW1 && block <= BL_FLOW7))
 		return false;
 	if (!bl_inside(w, h->px, h->py, h->pz))
 		return false;

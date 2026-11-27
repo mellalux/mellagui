@@ -15,7 +15,8 @@
 #define BL_HERO_CHEST 1.16f     /* ... and how high it goes */
 #define BL_HERO_SNEAK 0.12f     /* how much lower the upper body is while he sneaks */
 
-#define BL_HERO_BOXES 20
+#define BL_HERO_BOXES 22
+#define BL_HERO_ARM 8                   /* the boxes of the arm and what it holds */
 
 /* a box of the figure for one frame, with the rectangle of the picture it can be seen in (in x / z and y / z of the camera's frame) */
 struct bl_hero_box {
@@ -36,7 +37,8 @@ struct bl_hero {
 	float hurt;                     /* 0 .. 1: red from a blow */
 	bool sneak;
 	bool first;                     /* seen from his own eyes */
-	bool sword;                     /* the sword is in the hand, else the block */
+	bool sword;                     /* a weapon is in the hand, else the block */
+	int weapon;                     /* which (enum bl_weapon of blocksmobs.h: 0 sword, 1 spear, 2 war hammer, 3 bow, 4 fire staff, 5 laser) */
 	int held;                       /* the block in the hand, 0 = an empty hand */
 	float eye[3];                   /* first: the camera */
 	float fov, aspect;              /* first: the camera's vertical angle and the picture's width / height */
@@ -47,7 +49,7 @@ struct bl_hero {
 	float arm[3];                   /* the arm's pivot in the camera's frame ... */
 	float ac, as, bc, bs;           /* ... and how it is turned (cos / sin of its yaw and pitch) */
 	int nbody, narm;
-	struct bl_hero_box body[BL_HERO_BOXES], vm[5];  /* the figure (in his own frame) and the arm with what it holds (in the arm's) */
+	struct bl_hero_box body[BL_HERO_BOXES], vm[BL_HERO_ARM];  /* the figure (in his own frame) and the arm with what it holds (in the arm's) */
 	float vo[3];                    /* the camera in the arm's frame */
 };
 

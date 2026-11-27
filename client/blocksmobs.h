@@ -27,8 +27,9 @@
 #include "blocks.h"
 #include "blocksbuild.h"
 #include "blockspath.h"
+#include <math.h>
 
-#define BL_MOBS_MAX 64                  /* goblins, workers, soldiers and the rival clan's people together */
+#define BL_MOBS_MAX 72                  /* goblins, workers, soldiers and the rival clan's people together */
 #define BL_GOBLIN_HW 0.30f              /* half the width of its box, and its height */
 #define BL_GOBLIN_H 1.70f
 #define BL_GOBLIN_HP 10.0f
@@ -72,7 +73,7 @@
 #define BL_GUARD_SPEED 2.8f
 #define BL_GUARD_SEE 14.0f              /* how far a guard sees an enemy ... */
 #define BL_GUARD_LEASH 20.0f            /* ... and how far from its post it goes after one */
-#define BL_RIVAL_AT_KEEP 10.0f          /* a soldier of the player whose post is this near the rival keep attacks it when no enemy is about */
+#define BL_RIVAL_AT_KEEP 14.0f          /* a soldier of the player whose post is this near the middle of the rival keep attacks it when no enemy is about */
 #define BL_SOLDIER_KEEP_HIT 4.0f        /* what a blow of his takes from it */
 
 /* Their raiding parties: guards that march from the camp to a place the caller names (bl_mobs_set_raid), fight whom they meet on the way, hammer at made blocks
@@ -84,7 +85,7 @@
 #define BL_RAID_IDLE 60.0f              /* seconds with nothing to strike, or without getting nearer, after which a raider goes home */
 #define BL_RAID_LIMIT 300.0f            /* seconds a party stays out at most before it turns back ... */
 #define BL_RAID_BACK 180.0f             /* ... and seconds more after which one that has not got home is gone */
-#define BL_RAID_HOME 9.0f               /* this near their keep a raider that goes home is back */
+#define BL_RAID_HOME 14.0f              /* this near their keep a raider that goes home is back */
 
 /* Their labourers: they fetch material to the camp's keep (a tree is felled, else stone that sticks out of the ground is cut, else they forage) and build what
  * the camp is building (bl_mobs_set_rsite). They do not fight: with an enemy near they run for the keep. */
@@ -94,7 +95,7 @@
 #define BL_RWORKER_FEAR 7.0f            /* an enemy this near sends one running home ... */
 #define BL_RWORKER_SCARE 8.0f           /* ... for this many seconds, and work this near an enemy (and 3 more) is not taken */
 #define BL_RWORKER_RANGE 56             /* how far from their keep they look for trees and stone ... */
-#define BL_RWORKER_CAMP 12              /* ... and how near it they leave the ground alone (their camp) */
+#define BL_RWORKER_CAMP 18              /* ... and how near it they leave the ground alone (their camp) */
 #define BL_RWORKER_TREE_TIME 8.0f       /* seconds at a tree, at stone, foraging */
 #define BL_RWORKER_STONE_TIME 6.0f
 #define BL_RWORKER_FORAGE_TIME 14.0f
@@ -103,22 +104,61 @@
 #define BL_RWORKER_BUILDERS 2           /* how many of them build at a time, the others fetch */
 #define BL_RWORKER_FAILS 4              /* one that has given up this often without bringing anything in is gone (another comes) */
 #define BL_RSKIP_MAX 12                 /* places they could not get to and do not try again for a while */
+#define BL_RWORKER_GOLD_TIME 25.0f      /* seconds at a piece of gold (a trip brings one) */
+#define BL_RWORKER_MINERS 1             /* how many of them go for gold at a time, while it is wanted */
+#define BL_RWORKER_GOLD_RANGE 160.0f    /* a deposit this far from their keep is still worked */
+#define BL_DEPOSITS_MAX 8
+
+/* The weapons of the chiefs: the player and the one of the rival clan, who is called the Red Captain. */
+enum bl_weapon { BL_WP_SWORD = 0, BL_WP_SPEAR, BL_WP_HAMMER, BL_WP_BOW, BL_WP_FIRE, BL_WP_LASER, BL_WP_COUNT };
+enum { BL_SHOT_ARROW = 0, BL_SHOT_FIRE, BL_SHOT_LASER };
+
+struct bl_weapon_info {
+	const char *name;
+	float damage;                   /* in the player's hand: what a blow takes from a body ... */
+	float reach;                    /* ... how far it goes ... */
+	float cooldown;                 /* ... and the seconds between two */
+	float keep_damage;              /* what it takes from the rival keep */
+	float splash;                   /* > 0: everybody this near the one hit is hurt, too */
+	int shot;                       /* what flies (BL_SHOT_*), -1: a blow at arm's (or shaft's) length */
+	float c_damage, c_cooldown, c_keep;     /* the same in the Red Captain's hand */
+};
+
+const struct bl_weapon_info *bl_weapon(int weapon);     /* the sword for a number that is none */
+
+/* The Red Captain: he flies, takes the best of the weapons he has for the distance, guards the camp and leads raiding parties. */
+#define BL_CHIEF_HP 70.0f
+#define BL_CHIEF_H 1.90f
+#define BL_CHIEF_SPEED 3.2f             /* on foot ... */
+#define BL_CHIEF_FLY 6.5f               /* ... and in the air */
+#define BL_CHIEF_SEE 30.0f              /* how far he sees an enemy ... */
+#define BL_CHIEF_LEASH 38.0f            /* ... and how far from his keep he goes after one when he guards it */
+
+/* the distance along the ground from (x, z) to the side of a keep whose middle is at `keep` (0 inside its square) */
+#define BL_KEEP_EDGE ((float)BL_KEEP_R + 0.5f)
+static inline float bl_keep_dist(const float keep[3], float x, float z)
+{
+	const float dx = (x > keep[0] ? x - keep[0] : keep[0] - x) - BL_KEEP_EDGE, dz = (z > keep[2] ? z - keep[2] : keep[2] - z) - BL_KEEP_EDGE;
+	return sqrtf((dx > 0.0f ? dx * dx : 0.0f) + (dz > 0.0f ? dz * dz : 0.0f));
+}
 
 #define BL_BUILD_TIME 0.5f              /* seconds a worker takes to put one block of a building */
 #define BL_BOW_RANGE 20.0f              /* a soldier on a watchtower shoots the goblins this near (horizontally) that it can see */
 #define BL_BOW_DAMAGE 3.0f              /* four arrows kill a goblin */
 #define BL_BOW_COOLDOWN 1.5f
-#define BL_ARROWS_MAX 8                 /* arrows in the air (their picture only: the hit counts at once) */
+#define BL_ARROWS_MAX 16                /* arrows, fireballs and beams in the air (their picture only: the hit counts at once) */
 #define BL_ARROW_TIME 0.25f
+#define BL_FIRE_TIME 0.50f              /* a fireball flies for 0.3 s and bursts */
+#define BL_LASER_TIME 0.14f
 #define BL_DAMAGED_MAX 24               /* blocks the goblins have started on */
 #define BL_PATH_BUDGET 5000             /* places that all the searches for a way may look at in one call of bl_mobs_step */
 
-enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER, BL_MOB_SOLDIER, BL_MOB_GUARD, BL_MOB_RWORKER };    /* (the last: the rival clan's labourer) */
+enum bl_mob_kind { BL_MOB_NONE = 0, BL_MOB_GOBLIN, BL_MOB_WORKER, BL_MOB_SOLDIER, BL_MOB_GUARD, BL_MOB_RWORKER, BL_MOB_CHIEF };    /* (the last two: the rival clan's labourer and its chief) */
 enum bl_order { BL_ORDER_IDLE = 0, BL_ORDER_MOVE, BL_ORDER_GATHER, BL_ORDER_BUILD, BL_ORDER_TOWER };
 
 static inline float bl_mob_h(int kind)                         /* the height of a kind's box */
 {
-	return kind == BL_MOB_WORKER || kind == BL_MOB_RWORKER ? BL_WORKER_H : kind == BL_MOB_SOLDIER || kind == BL_MOB_GUARD ? BL_SOLDIER_H : BL_GOBLIN_H;
+	return kind == BL_MOB_WORKER || kind == BL_MOB_RWORKER ? BL_WORKER_H : kind == BL_MOB_SOLDIER || kind == BL_MOB_GUARD ? BL_SOLDIER_H : kind == BL_MOB_CHIEF ? BL_CHIEF_H : BL_GOBLIN_H;
 }
 
 static inline bool bl_mob_is_unit(int kind)                    /* the player's: a worker or a soldier */
@@ -126,9 +166,9 @@ static inline bool bl_mob_is_unit(int kind)                    /* the player's: 
 	return kind == BL_MOB_WORKER || kind == BL_MOB_SOLDIER;
 }
 
-static inline bool bl_mob_is_rival(int kind)                   /* of the rival clan: a guard (raiders among them) or a labourer */
+static inline bool bl_mob_is_rival(int kind)                   /* of the rival clan: a guard (raiders among them), a labourer or the chief */
 {
-	return kind == BL_MOB_GUARD || kind == BL_MOB_RWORKER;
+	return kind == BL_MOB_GUARD || kind == BL_MOB_RWORKER || kind == BL_MOB_CHIEF;
 }
 
 static inline bool bl_mob_is_foe(int kind)                     /* an enemy of the player: a goblin or one of the rival clan (the sword hits it; a gate stops it) */
@@ -185,6 +225,10 @@ struct bl_mob {
 	float goal_x, goal_z;           /* what the way was found for */
 	float way_d;                    /* the nearest it has been to the turn it walks to */
 	float lost;                     /* seconds an order has not brought it nearer than ever before */
+	int gold_load;                  /* a labourer of the rival clan: the gold it carries */
+	float raid0;                    /* a raider: its age when it set out */
+	int weapon;                     /* the chief: what he holds (enum bl_weapon) */
+	bool flying;                    /* ... and whether he is in the air */
 };
 
 static inline float bl_mob_height(const struct bl_mob *b)       /* the height of this one's box (a brute is taller than a goblin) */
@@ -210,6 +254,11 @@ struct bl_mobs {
 	bool rival_on;                  /* the rival clan's keep stands: the player's soldiers that are sent to it attack it */
 	float rkeep[3];                 /* the middle of the bottom of it */
 	float raid_at[3];               /* where a raiding party of theirs is bound (the player's keep, or him) */
+	bool rkeep_down;                /* their keep is down for now (they are building it again): it cannot be attacked */
+	bool rgold_wanted;              /* their labourers go for gold, too */
+	struct { int x, y, z; } deposit[BL_DEPOSITS_MAX];      /* where gold lies (bl_mobs_set_deposits) */
+	int ndeposits;
+	uint32_t chief_arms;            /* the weapons the chief has, bit 1 << BL_WP_* (the sword always) */
 	struct bl_site rsite;           /* what the rival camp is building (on = something): its labourers put the blocks */
 	struct { int x, z; } rskip[BL_RSKIP_MAX];       /* places they could not get to */
 	int nrskip;                     /* how many have been noted (the oldest are written over) */
@@ -217,8 +266,9 @@ struct bl_mobs {
 	int paths;                      /* ways that have been looked for since the start */
 	struct bl_site site[BL_SITES_MAX];      /* what is being built */
 	struct bl_arrow {
-		float t;                        /* seconds of flight left (0 = none) */
+		float t;                        /* seconds that are left of it (0 = none) */
 		float a[3], b[3];               /* from the bow to the goblin */
+		int kind;                       /* BL_SHOT_* */
 	} arrow[BL_ARROWS_MAX];
 	struct bl_damaged {
 		int x, y, z;
@@ -248,6 +298,9 @@ struct bl_mobs_result {
 	int raiders_home;               /* raiders that went home (they are gone) */
 	int rworkers_slain;             /* labourers of the rival clan the player's soldiers and archers killed (not in guards_slain) */
 	int delivered;                  /* material their labourers brought to their keep */
+	int delivered_gold;             /* ... and gold */
+	int chief_slain;                /* the player's soldiers or archers brought down the rival chief */
+	int chief_hits;                 /* blows and shots of the chief at the player; they are in `hits` and `damage`, too */
 	int rbuilt;                     /* 1: what their camp was building is finished (bl_mobs.rsite is off again) */
 	int nraze;                      /* blocks their labourers have taken from the land: the caller takes them away */
 	struct bl_break raze[64];
@@ -277,6 +330,14 @@ void bl_mobs_end_wave(struct bl_mobs *m);
 int bl_mobs_wave_remaining(const struct bl_mobs *m);        /* goblins still to come + goblins alive */
 void bl_mobs_set_rival(struct bl_mobs *m, bool on, float x, float y, float z);   /* where the rival keep is, or that there is none */
 void bl_mobs_set_raid(struct bl_mobs *m, float x, float y, float z);    /* where the raiders are bound */
+void bl_mobs_set_deposits(struct bl_mobs *m, const int (*at)[3], int n); /* where gold lies, for their labourers */
+bool bl_mobs_add_chief(struct bl_mobs *m, const struct bl_world *w, float x, float y, float z);   /* the rival chief (there is one at most) */
+int bl_mobs_chief(const struct bl_mobs *m);                 /* his index, -1: he is not about */
+bool bl_mobs_chief_raid(struct bl_mobs *m);                 /* he sets out with the raiders (bl_mobs_set_raid); false when he is not about */
+/* something flies from a to b (a picture only): an arrow, a fireball, a beam */
+void bl_mobs_shot(struct bl_mobs *m, const float a[3], const float b[3], int kind);
+/* every enemy of the player within `radius` of `at` takes `damage`; how many died */
+int bl_mobs_splash(struct bl_mobs *m, const float at[3], float radius, float damage, int spare);
 /* what the rival camp is building now (its labourers come and put the blocks, bl_mobs_result.place; rbuilt says when it is whole); NULL: nothing */
 void bl_mobs_set_rsite(struct bl_mobs *m, const struct bl_site *s);
 /* a raider of the rival clan; false when there are BL_RAIDER_MAX already or there is no room for him there */

@@ -35,11 +35,18 @@ enum bl_block {
 	BL_TORCH,               /* a stick with a flame: stands on the floor of its cell, light 14, can be walked through */
 	BL_LAMP,                /* a block that shines (light 15) */
 	BL_FLOW1, BL_FLOW2, BL_FLOW3, BL_FLOW4, BL_FLOW5, BL_FLOW6, BL_FLOW7,   /* water that flows: how far it has come from a source (1 = just left it, 7 = the last cell) */
-	BL_KEEP,                /* the keep: a tower of three of them (made by the game, never put by hand, never broken by the player): what the goblins attack */
+	BL_KEEP,                /* the keep: a castle of them (bl_keep_cells; made by the game, never put by hand, never broken by the player): what the enemies attack */
 	BL_BARRACKS,            /* a block of brick and timber with a banner: soldiers are trained where one stands (the game counts them) */
 	BL_GATE,                /* a wooden lattice: the player and his units walk through it, the goblins do not (bl_box_hits_foe) */
 	BL_TOWERPOST,           /* the post at the top of a watchtower: a soldier stands on it and shoots */
-	BL_REDKEEP,             /* the keep of the rival clan, the Red Banner: three of them; like the player's own it is made and unmade by the game only */
+	BL_REDKEEP,             /* the keep of the rival clan, the Red Banner: a castle of them; like the player's own it is made and unmade by the game only */
+	BL_GOLD,                /* gold ore: lies in a few deposits; mined by hand, by workers or by a mine; it pays for a new keep and for weapons */
+	BL_SMITHY,              /* the sign of a smithy: the spear, the war hammer and the bow are made where one stands */
+	BL_MAGE,                /* the crystal of a mage tower: the fire staff and the laser */
+	BL_INFIRMARY,           /* the red cross of an infirmary: whoever of the player's is near it mends quickly */
+	BL_MINE,                /* the winch of a mine: it takes the gold ore that lies near it, one piece at a time */
+	BL_KEEPFLAG,            /* a block of the player's keep that bears his shield ... */
+	BL_REDFLAG,             /* ... and one of the Red Banner's with its banner: parts of the keeps like the rest */
 	BL_COUNT
 };
 
@@ -63,9 +70,12 @@ static inline int  bl_emission(int b)     { return b == BL_LAMP ? 15 : b == BL_T
 /* The made things a goblin can smash when they are in its way, and what each takes (the keep and the ground are not among them: 0). */
 static inline int  bl_siege_hp(int b)
 {
-	return b == BL_GLASS ? 6 : b == BL_LAMP ? 12 : b == BL_PLANKS ? 24 : b == BL_GATE ? 45 : b == BL_COBBLE ? 60 : b == BL_BRICK || b == BL_BARRACKS || b == BL_TOWERPOST ? 75 : 0;
+	return b == BL_GLASS ? 6 : b == BL_LAMP ? 12 : b == BL_PLANKS ? 24 : b == BL_GATE ? 45 : b == BL_COBBLE ? 60 :
+	       b == BL_BRICK || b == BL_BARRACKS || b == BL_TOWERPOST || b == BL_SMITHY || b == BL_MAGE || b == BL_INFIRMARY || b == BL_MINE ? 75 : 0;
 }
-static inline bool bl_breakable(int b)    { return b != BL_AIR && !bl_water(b) && b != BL_BEDROCK && b != BL_KEEP && b != BL_REDKEEP && b < BL_COUNT; }   /* what the player's hand can take away */
+static inline bool bl_own_keep(int b)     { return b == BL_KEEP || b == BL_KEEPFLAG; }
+static inline bool bl_red_keep(int b)     { return b == BL_REDKEEP || b == BL_REDFLAG; }
+static inline bool bl_breakable(int b)    { return b != BL_AIR && !bl_water(b) && b != BL_BEDROCK && !bl_own_keep(b) && !bl_red_keep(b) && b < BL_COUNT; }   /* what the player's hand can take away */
 
 /* How long it takes to break a block by hand, in seconds (survival; creative breaks at once), and what it leaves behind (0 = nothing; grass leaves dirt, stone leaves
  * cobble, glass and leaves break to nothing). Both 0 for what cannot be broken. */

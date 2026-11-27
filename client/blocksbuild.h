@@ -9,9 +9,15 @@
 
 #include "blocks.h"
 
-enum bl_plan { BL_PLAN_BARRACKS = 0, BL_PLAN_TOWER, BL_PLAN_WALL, BL_PLAN_GATE, BL_PLAN_COUNT };
+enum bl_plan { BL_PLAN_BARRACKS = 0, BL_PLAN_TOWER, BL_PLAN_WALL, BL_PLAN_GATE, BL_PLAN_SMITHY, BL_PLAN_MAGE, BL_PLAN_INFIRMARY, BL_PLAN_MINE, BL_PLAN_COUNT };
 
-#define BL_SITE_CELLS 80                /* the biggest plan (the barracks) has 60 */
+/* The keep: a castle on a square of 2 * BL_KEEP_R + 1 blocks a side - a wall with merlons, a turret at each corner, a tall tower in the middle and a doorway
+ * towards -z. The block (x, y, z) is the middle of its lowest layer. */
+#define BL_KEEP_R 3
+#define BL_KEEP_TALL 10                 /* its highest block is at y + BL_KEEP_TALL - 1 */
+#define BL_KEEP_CELLS 360
+
+#define BL_SITE_CELLS 80                /* the biggest plan (the mage tower) has 48 */
 #define BL_SITES_MAX 12                 /* buildings that may be under way at a time */
 
 struct bl_cell {
@@ -28,9 +34,14 @@ struct bl_site {
 
 const char *bl_plan_name(int plan);                          /* "barracks"; "?" for none */
 void bl_plan_cost(int plan, int *cobble, int *planks);       /* what it takes (survival) */
+int bl_plan_gold(int plan);                                  /* ... and the gold */
+/* the cells of a keep of `block` (BL_KEEP or BL_REDKEEP) round (x, y, z), lowest first; how many (at most BL_KEEP_CELLS) */
+int bl_keep_cells(struct bl_cell out[BL_KEEP_CELLS], int x, int y, int z, int block);
 
-/* Lay a plan out with the block (x, y, z) as its middle at ground level (the first empty cell above the ground there), turned by `rot` quarter turns: with 0 its
- * width runs along +x and its front (the barracks' door) looks towards -z; each turn goes the way the yaw goes. A barracks (5 x 4, 4 high) and a watchtower
+/* The smithy (3 x 3, 4 high), the mage tower (3 x 3, 7 high), the infirmary (3 x 3, 4 high) and the mine (3 x 3, 4 high) want flat, empty ground, too.
+ *
+ * Lay a plan out with the block (x, y, z) as its middle at ground level (the first empty cell above the ground there), turned by `rot` quarter turns: with 0 its
+ * width runs along +x and its front (the barracks' door) looks towards -z; each turn goes the way the yaw goes. A barracks (3 x 3, 3 high) and a watchtower
  * (3 x 3, 6 high) want flat, empty ground; a wall (3 long, 2 high) follows the ground, up to two blocks up or down in each column; a gate (3 wide: two posts and
  * the gate between them) wants flat ground. `others` / `nothers`: the sites that are under way; a wall or a gate may share cells that want the same block (they
  * are left out here), nothing else may overlap. False with *why set when it cannot be built there; `out` still holds the cells (for the red preview). */

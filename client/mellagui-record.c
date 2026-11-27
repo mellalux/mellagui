@@ -23,8 +23,14 @@
  * kept in record.conf (system-sound = 1 by default, microphone = 0), `--sound none|system|mic|both` for one run. $MELLAGUI_RECORD_SYSTEM_SRC / _MIC_SRC
  * name other sources ("format:device", ffmpeg's -f / -i; tests use lavfi:sine=frequency=440), `none` = off.
  *
- * Window: Record / Stop, the output and the frame rate to use (not while recording). Keys: Space or Enter record / stop,
- * O next output, F next frame rate, Esc or Q close (a recording is finished first). SIGINT / SIGTERM also finish the file.
+ * Window: a row of buttons for the output, the frame rate, the sound and what happens at the end, a big Record / Stop button, and at the left a rail
+ * (wlrail.h) with the last recording and the folder. Keys: Space or Enter record / stop, O next output, F next frame rate, S computer sound, M microphone,
+ * V open the video at the end or not, P open the last recording, D the folder, Esc or Q close (a recording is finished first). SIGINT / SIGTERM also finish
+ * the file.
+ *
+ * The choices are kept in record.conf (system-sound, microphone, output = NAME, fps, open = 0|1); the command line is for one run and is not saved.
+ * When the user ends a recording (the button, a key, the bar's item) the file is opened in mellagui-view ($MELLAGUI_RECORD_VIEWER names another program,
+ * "none" = never; $MELLAGUI_RECORD_FILES likewise for the folder). A --duration that runs out or a signal opens nothing.
  * Files: DIR/mellagui-YYYYMMDD-HHMMSS.mp4 (mode 0600), DIR = --dir, $MELLAGUI_RECORD_DIR or ~/Videos. When it is done a
  * notification with the path is shown.
  */
@@ -37,8 +43,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -54,6 +62,7 @@
 #include "theme.h"
 #include "uikit.h"
 #include "util.h"
+#include "wlrail.h"
 #include "wlwin.h"
 
 #define MAX_OUTPUTS 8
@@ -80,8 +89,19 @@ struct output {
     int x, y, w, h;
 };
 
+/* the window's buttons: B_OUTPUT + i, B_FPS + i */
+enum { B_RECORD = 1, B_OUTPUT = 10, B_SYSTEM = 30, B_MIC, B_OPEN, B_FPS = 40 };
+#define MAX_BUTTONS 24
+
 struct button {
-    int x, y, w, h;
+    int id, x, y, w, h;
+};
+
+/* what record.conf keeps: changed only by the window's buttons and keys, never by the command line */
+struct prefs {
+    bool system, mic, open;
+    int fps;
+    char output[32];                /* "" = the first one */
 };
 
 struct app {
@@ -149,8 +169,13 @@ struct app {
     char saved[600];                /* the last finished file */
     char msg[160];                  /* the last problem */
     uint64_t shown_sec;
-    struct button b_rec, b_out, b_fps, b_sys, b_mic;
-    int hover, press;               /* 0 none, 1 record, 2 output, 3 fps, 4 system sound, 5 microphone */
+    struct button btn[MAX_BUTTONS];
+    int nbtn;
+    int hover, press;               /* a button's id, 0 none */
+    int hovertool;                  /* the rail's button under the pointer, -1 none */
+    struct wlrail_anim ran;
+    struct prefs pref;
+    bool open_after;                /* open the video when the user ends the recording */
     double px, py;
     bool has_pointer;
     bool quit;
@@ -215,6 +240,85 @@ static const char *record_dir(const struct app *a, char *buf, size_t n)
         return buf;
     }
     return ".";
+}
+
+static void prefs_load(struct prefs *p)
+{
+    lm_snd_conf_load("record", &p->system, &p->mic);
+    char path[1024], line[256];
+    if (!lm_snd_conf_path("record", path, sizeof(path)))
+        return;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    while (fgets(line, sizeof(line), f)) {
+        int v;
+        char name[32];
+        if (sscanf(line, "fps = %d", &v) == 1)
+            p->fps = v;
+        else if (sscanf(line, "open = %d", &v) == 1)
+            p->open = v != 0;
+        else if (sscanf(line, "output = %31s", name) == 1)
+            snprintf(p->output, sizeof(p->output), "%s", name);
+    }
+    fclose(f);
+}
+
+static void prefs_save(const struct prefs *p)
+{
+    char extra[128];
+    int n = snprintf(extra, sizeof(extra), "fps = %d\nopen = %d\n", p->fps, p->open ? 1 : 0);
+    if (p->output[0])
+        snprintf(extra + n, sizeof(extra) - (size_t)n, "output = %s\n", p->output);
+    lm_snd_conf_save_x("record", p->system, p->mic, extra);
+}
+
+static int fps_index(int fps)
+{
+    int best = 0;
+    for (int k = 1; k < N_FPS; k++)
+        if (abs(FPS_CHOICES[k] - fps) < abs(FPS_CHOICES[best] - fps))
+            best = k;
+    return best;
+}
+
+/* Starts `sibling arg` in a detached child: the program next to this one (else in PATH); $envvar names another program, "none" = nothing. */
+static void spawn_detached(const char *envvar, const char *sibling, const char *arg)
+{
+    const char *v = getenv(envvar);
+    if (v && !strcmp(v, "none"))
+        return;
+    char prog[PATH_MAX];
+    snprintf(prog, sizeof(prog), "%s", v && *v ? v : sibling);
+    if (!v || !*v) {
+        char exe[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 40);
+        char *slash = n > 0 ? (exe[n] = 0, strrchr(exe, '/')) : NULL;
+        if (slash) {
+            snprintf(slash + 1, 32, "%s", sibling);
+            if (access(exe, X_OK) == 0)
+                snprintf(prog, sizeof(prog), "%s", exe);
+        }
+    }
+    pid_t mid = fork();
+    if (mid < 0)
+        return;
+    if (mid > 0) {
+        int st;
+        waitpid(mid, &st, 0);
+        return;
+    }
+    if (fork() != 0)
+        _exit(0);
+    setsid();
+    int nul = open("/dev/null", O_RDWR);
+    if (nul >= 0) {
+        dup2(nul, 0);
+        dup2(nul, 1);
+        dup2(nul, 2);
+    }
+    execlp(prog, prog, arg, (char *)NULL);
+    _exit(127);
 }
 
 /* Picks and creates the next free file (mode 0600, never an existing one): a Motion JPEG writer in *mp4 when `native`, else just an empty
@@ -688,7 +792,8 @@ static bool start_recording(struct app *a)
 
 static void audio_pump(struct app *a);
 
-static void stop_recording(struct app *a)
+/* `by_user`: the user ended it (or the screen changed under it), so the video may be shown; not for a signal, a --duration or a failure. */
+static void stop_recording(struct app *a, bool by_user)
 {
     if (!a->rec)
         return;
@@ -751,6 +856,8 @@ static void stop_recording(struct app *a)
         notify(a, "Recording saved", a->path);
         if (bad)
             set_msg(a, "some pictures could not be written");
+        else if (by_user && a->open_after)
+            spawn_detached("MELLAGUI_RECORD_VIEWER", "mellagui-view", a->saved);
     }
     a->win.redraw = true;
 }
@@ -778,7 +885,7 @@ static void tick(struct app *a)
 {
     audio_pump(a);
     if (g_signalled) {
-        stop_recording(a);
+        stop_recording(a, false);
         a->quit = true;
         return;
     }
@@ -790,7 +897,7 @@ static void tick(struct app *a)
     if (a->tray_clicked) {
         a->tray_clicked = false;
         if (a->rec) {
-            stop_recording(a);
+            stop_recording(a, true);
             if (a->hidden)
                 a->quit = true;                     /* nobody is looking at the window: the program ends with the recording */
         }
@@ -806,7 +913,7 @@ static void tick(struct app *a)
     if (err || (a->duration > 0 && (double)(now - a->t0) >= a->duration * 1000.0)) {
         if (err)
             set_msg(a, "writing the file failed");
-        stop_recording(a);
+        stop_recording(a, false);
         if (a->duration > 0)
             a->quit = true;
         return;
@@ -903,7 +1010,7 @@ static void capture_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         snprintf(a->fail_reason, sizeof(a->fail_reason), "%s", why);
         if (!strcmp(why, "size") || !strcmp(why, "no-output")) {
             set_msg(a, "the output changed, the recording ended");
-            stop_recording(a);
+            stop_recording(a, true);
             if (a->duration > 0)
                 a->quit = true;
         }
@@ -930,44 +1037,192 @@ static void global_event(struct wlwin *w, uint32_t name, const char *iface, uint
 
 /* ---- window ---------------------------------------------------------------------------------------------------------- */
 
-#define DEF_W 400
-#define DEF_H 200
+/* The look of the other programs: a rail of round drops at the left (the last recording, the folder), a header that says what is going on, a card with
+ * a row of drops for every setting, the big Record / Stop button under it and a status bar at the bottom. */
+
+#define DEF_W 430
+#define DEF_H 330
+#define PAD 14
+#define HEAD_H 62
+#define FOOT_H 30
+#define ROW_H 28
+#define ROW_PITCH 38
+#define LABEL_W 92
+
+static const char *const ROW_LABELS[] = { "Screen", "Frames / s", "Sound", "When done" };
+#define N_ROWS ((int)(sizeof(ROW_LABELS) / sizeof(ROW_LABELS[0])))
+
+static void add_button(struct app *a, int id, int x, int y, int w, int h)
+{
+    if (a->nbtn < MAX_BUTTONS)
+        a->btn[a->nbtn++] = (struct button){ id, x, y, w, h };
+}
+
+/* `n` buttons side by side in the row, `first` is the id of the first one */
+static void add_row(struct app *a, int row, int first, int n)
+{
+    int x = PAD + 10 + LABEL_W, g = 6, avail = a->win.bw - x - PAD - 10;
+    int y = HEAD_H + 10 + row * ROW_PITCH;
+    for (int i = 0; i < n; i++) {
+        int x0 = x + i * (avail + g) / n, x1 = x + (i + 1) * (avail + g) / n - g;
+        add_button(a, first + i, x0, y, x1 - x0, ROW_H);
+    }
+}
 
 static void layout(struct app *a)
 {
-    int m = 16, g = 8, y = 78, h = 40;
-    int avail = a->win.bw - 2 * m;
-    int wf = 72, wr = 112;
-    int wo = LM_MAX(avail - wf - wr - 2 * g, 60);
-    a->b_rec = (struct button){ m, y, wr, h };
-    a->b_out = (struct button){ m + wr + g, y, wo, h };
-    a->b_fps = (struct button){ m + wr + g + wo + g, y, wf, h };
-    int hw = (avail - g) / 2;
-    a->b_sys = (struct button){ m, y + h + g, hw, 28 };
-    a->b_mic = (struct button){ m + hw + g, y + h + g, avail - hw - g, 28 };
+    a->nbtn = 0;
+    add_row(a, 0, B_OUTPUT, LM_MAX(a->nouts, 1));
+    add_row(a, 1, B_FPS, N_FPS);
+    add_row(a, 2, B_SYSTEM, 2);                     /* (B_MIC follows B_SYSTEM) */
+    add_row(a, 3, B_OPEN, 1);
+    int y = HEAD_H + 10 + N_ROWS * ROW_PITCH + 12, w = 190, h = 44;
+    add_button(a, B_RECORD, (a->win.bw - w) / 2, y, w, h);
 }
 
 static int button_at(const struct app *a, double x, double y)
 {
-    const struct button *bs[5] = { &a->b_rec, &a->b_out, &a->b_fps, &a->b_sys, &a->b_mic };
-    for (int i = 0; i < 5; i++)
-        if (x >= bs[i]->x && x < bs[i]->x + bs[i]->w && y >= bs[i]->y && y < bs[i]->y + bs[i]->h)
-            return i + 1;
+    for (int i = 0; i < a->nbtn; i++) {
+        const struct button *b = &a->btn[i];
+        if (x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h)
+            return b->id;
+    }
     return 0;
 }
 
-static void draw_button(struct app *a, const struct button *b, int id, uint32_t base, const char *label, bool dim)
+/* Can the button be used now? (The settings stay as they are while a recording runs.) */
+static bool usable(const struct app *a, int id)
 {
-    uint32_t col = base;
-    if (dim)
-        col = lm_mix_rgb(base, lm_theme.background, 0.55);
-    else if (a->press == id)
+    if (id == B_RECORD)
+        return a->capture != 0;
+    if (id >= B_OUTPUT && id < B_OUTPUT + MAX_OUTPUTS)
+        return !a->rec && id - B_OUTPUT < a->nouts;
+    if (id == B_OPEN)
+        return true;                                /* (what happens at the end may be changed to the last moment) */
+    return !a->rec;
+}
+
+static void button_label(const struct app *a, const struct button *b, char *out, size_t n)
+{
+    int id = b->id;
+    if (id == B_RECORD) {
+        snprintf(out, n, "%s", a->rec ? "Stop" : "Record");
+    } else if (id >= B_OUTPUT && id < B_OUTPUT + MAX_OUTPUTS) {
+        int i = id - B_OUTPUT;
+        if (i >= a->nouts) {
+            snprintf(out, n, "no screen");
+            return;
+        }
+        snprintf(out, n, "%s  %dx%d", a->outs[i].name, a->outs[i].w, a->outs[i].h);
+        if (lm_font_text_width(out) > b->w - 10)
+            snprintf(out, n, "%s", a->outs[i].name);
+    } else if (id >= B_FPS && id < B_FPS + N_FPS) {
+        snprintf(out, n, "%d", FPS_CHOICES[id - B_FPS]);
+    } else if (id == B_SYSTEM) {
+        snprintf(out, n, "%s", "Computer");
+    } else if (id == B_MIC) {
+        snprintf(out, n, "%s", "Microphone");
+    } else {
+        snprintf(out, n, "%s", a->open_after ? "Open the video" : "Only save it");
+    }
+}
+
+static bool button_lit(const struct app *a, int id)
+{
+    if (id >= B_OUTPUT && id < B_OUTPUT + MAX_OUTPUTS)
+        return id - B_OUTPUT == a->out_sel && a->nouts > 0;
+    if (id >= B_FPS && id < B_FPS + N_FPS)
+        return id - B_FPS == a->fps_sel;
+    return (id == B_SYSTEM && a->snd_system) || (id == B_MIC && a->snd_mic) || (id == B_OPEN && a->open_after);
+}
+
+static void draw_button(struct app *a, const struct button *b)
+{
+    bool on = button_lit(a, b->id), can = usable(a, b->id);
+    bool choice = b->id < B_SYSTEM || (b->id >= B_FPS && b->id < B_FPS + N_FPS);
+    uint32_t base = b->id == B_RECORD ? lm_theme.btn_red : !on ? lm_theme.btn_slate : choice && b->id != B_RECORD ? lm_theme.btn_blue : lm_theme.btn_green;
+    uint32_t ink = lm_theme.on_colour, col = base;
+    if (!can) {
+        col = on ? lm_mix_rgb(base, lm_theme.card, 0.45) : lm_theme.control_idle;
+        ink = on ? lm_theme.on_colour : lm_theme.title_text_idle;
+    } else if (a->press == b->id) {
         col = lm_mix_rgb(base, 0x000000, 0.25);
-    else if (a->hover == id)
+    } else if (a->hover == b->id) {
         col = lm_mix_rgb(base, 0xffffff, 0.18);
+    }
     wlwin_drop(&a->win, b->x, b->y, b->w, b->h, lm_button_radius(b->h / 2), col);
-    int tw = lm_font_text_width(label);
-    wlwin_text(&a->win, b->x + (b->w - tw) / 2, b->y + (b->h - LM_FONT_H) / 2, label, 1, dim ? lm_theme.text_dim : lm_theme.on_colour, b->w - 8);
+    char label[64];
+    button_label(a, b, label, sizeof(label));
+    int tw = lm_font_text_width(label), mark = b->id == B_RECORD ? 22 : 0;
+    int x = b->x + LM_MAX((b->w - tw - mark) / 2, 4);
+    if (mark)                                       /* a dot to start, a square to stop */
+        wlwin_round_fill(&a->win, x, b->y + b->h / 2 - 7, 14, 14, a->rec ? 2 : 7, ink);
+    wlwin_text(&a->win, x + mark, b->y + (b->h - LM_FONT_H) / 2, label, 1, ink, b->w - 8 - mark);
+}
+
+enum { R_PLAY, R_FOLDER, R_N };
+
+static void ic_play(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    (void)bg;
+    for (int i = 0; i < 12; i++)
+        wlwin_fill(w, cx - 4 + i, cy - 7 + (i + 1) / 2, 1, 14 - 2 * ((i + 1) / 2), c);
+}
+
+static void record_rail(const struct app *a, struct wlrail *L)
+{
+    memset(L, 0, sizeof(*L));
+    L->y0 = 0;
+    L->y1 = a->win.bh > 0 ? a->win.bh - FOOT_H : DEF_H - FOOT_H;
+    L->n = R_N;
+    L->it[R_PLAY] = (struct wlrail_item){ .tip = "Open the last recording  P", .icon = ic_play, .base = lm_theme.btn_green, .lite = lm_theme.btn_green_lit,
+                                          .show = true, .idle = !a->saved[0] };
+    L->it[R_FOLDER] = (struct wlrail_item){ .tip = "Show the folder  D", .icon = wlrail_ic_open, .base = lm_theme.btn_amber, .lite = lm_theme.btn_amber_lit,
+                                            .show = true };
+}
+
+static int rail_under(const struct app *a)
+{
+    if (!a->has_pointer || a->px >= 0)
+        return -1;
+    struct wlrail L;
+    record_rail(a, &L);
+    int i = wlrail_at(&L, a->win.rpx, a->win.rpy);
+    return i >= 0 && !L.it[i].idle ? i : -1;
+}
+
+/* $MELLAGUI_RECORD_DUMP=FILE: what the window shows, for the tests (window coordinates). */
+static void dump_state(const struct app *a)
+{
+    const char *path = getenv("MELLAGUI_RECORD_DUMP");
+    if (!path || !*path)
+        return;
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    fprintf(f, "state rec=%d out=%d fps=%d system=%d mic=%d open=%d saved=%s\n", a->rec, a->out_sel, FPS_CHOICES[a->fps_sel], a->snd_system, a->snd_mic,
+            a->open_after, a->saved[0] ? a->saved : "-");
+    for (int i = 0; i < a->nbtn; i++) {
+        const struct button *b = &a->btn[i];
+        char name[32];
+        if (b->id == B_RECORD) snprintf(name, sizeof(name), "record");
+        else if (b->id == B_SYSTEM) snprintf(name, sizeof(name), "system");
+        else if (b->id == B_MIC) snprintf(name, sizeof(name), "mic");
+        else if (b->id == B_OPEN) snprintf(name, sizeof(name), "open");
+        else if (b->id >= B_FPS) snprintf(name, sizeof(name), "fps%d", FPS_CHOICES[b->id - B_FPS]);
+        else snprintf(name, sizeof(name), "output%d", b->id - B_OUTPUT);
+        fprintf(f, "btn %s %d %d %d %d\n", name, b->x + a->win.inx, b->y, b->w, b->h);
+    }
+    struct wlrail L;
+    record_rail(a, &L);
+    int y[WLRAIL_MAX];
+    wlrail_layout(&L, y);
+    for (int i = 0; i < L.n; i++)
+        fprintf(f, "rail %s %d %d %d %d idle=%d\n", i == R_PLAY ? "play" : "folder", (WLRAIL_W - WLRAIL_D) / 2, y[i], WLRAIL_D, WLRAIL_D, L.it[i].idle);
+    if (fclose(f) != 0 || rename(tmp, path) < 0)
+        unlink(tmp);
 }
 
 static void paint(struct wlwin *w)
@@ -976,83 +1231,105 @@ static void paint(struct wlwin *w)
     a->drawn = true;
     layout(a);
     wlwin_fill(w, 0, 0, w->bw, w->bh, lm_theme.background);
-    char line[200];
+
+    char line[700];
     if (a->rec) {
         uint64_t s = (lm_now_ms() - a->t0) / 1000;
         if (s % 2 == 0)
-            wlwin_round_fill(w, 16, 18, 14, 14, 7, lm_theme.alert);
+            wlwin_round_fill(w, PAD, 15, 14, 14, 7, lm_theme.alert);
         snprintf(line, sizeof(line), "Recording  %02u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
-        wlwin_text(w, 38, 14, line, 2, lm_theme.text, w->bw - 54);
+        wlwin_text(w, PAD + 22, 6, line, 2, lm_theme.accent, w->bw - 2 * PAD - 22);
         pthread_mutex_lock(&a->lock);
         uint32_t frames = a->enc_frames;
         uint64_t bytes = a->enc_bytes;
         pthread_mutex_unlock(&a->lock);
         snprintf(line, sizeof(line), "%dx%d  %u pictures  %.1f MB%s", a->rw, a->rh, frames, (double)bytes / 1048576.0, a->snd_rec ? "  with sound" : "");
-        wlwin_text(w, 16, 50, line, 1, lm_theme.muted, w->bw - 32);
+        wlwin_text(w, PAD, 40, line, 1, lm_theme.text_dim, w->bw - 2 * PAD);
     } else {
-        wlwin_text(w, 16, 14, a->msg[0] ? "Not recorded" : a->saved[0] ? "Saved" : "Ready", 2, lm_theme.text, w->bw - 32);
+        wlwin_text(w, PAD, 6, a->msg[0] ? "Not recorded" : a->saved[0] ? "Saved" : "Ready", 2, lm_theme.accent, w->bw - 2 * PAD);
         bool snd_ok = (ffpipe_available() && a->codec_opt != 1 && a->codec_opt != 3) || audiocap_available();     /* ffmpeg reads the sound itself, else parec does */
-        const char *info = a->msg[0] ? a->msg : a->saved[0] ? a->saved :
+        const char *base = strrchr(a->saved, '/');
+        const char *info = a->saved[0] ? (base ? base + 1 : a->saved) :
                            !a->capture ? "Screen capture is not available" :
                            (a->snd_system || a->snd_mic) && !snd_ok ? "No sound: it needs ffmpeg or parec (neither was found)" :
-                           (a->snd_system || a->snd_mic) ? "Record one screen and its sound into an MP4 file" : "Record one screen into an MP4 file";
-        wlwin_text(w, 16, 50, info, 1, a->msg[0] ? lm_theme.error : lm_theme.muted, w->bw - 32);
+                           (a->snd_system || a->snd_mic) ? "Records one screen and its sound into an MP4 file" : "Records one screen into an MP4 file";
+        wlwin_text(w, PAD, 40, info, 1, lm_theme.text_dim, w->bw - 2 * PAD);
     }
-    draw_button(a, &a->b_rec, 1, a->rec ? lm_theme.danger : lm_mix_rgb(lm_theme.ok, 0x000000, 0.35), a->rec ? "Stop" : "Record", !a->capture);
-    char ol[64] = "no output";
-    if (a->nouts > 0)
-        snprintf(ol, sizeof(ol), "%s %dx%d", a->outs[a->out_sel].name, a->outs[a->out_sel].w, a->outs[a->out_sel].h);
-    draw_button(a, &a->b_out, 2, lm_theme.button, ol, a->rec || a->nouts == 0);
-    snprintf(line, sizeof(line), "%d fps", FPS_CHOICES[a->fps_sel]);
-    draw_button(a, &a->b_fps, 3, lm_theme.button, line, a->rec);
-    draw_button(a, &a->b_sys, 4, a->snd_system ? lm_mix_rgb(lm_theme.ok, 0x000000, 0.35) : lm_theme.button, a->snd_system ? "Computer sound: on" : "Computer sound: off", a->rec);
-    draw_button(a, &a->b_mic, 5, a->snd_mic ? lm_mix_rgb(lm_theme.ok, 0x000000, 0.35) : lm_theme.button, a->snd_mic ? "Microphone: on" : "Microphone: off", a->rec);
-    char dirbuf[512];
-    snprintf(line, sizeof(line), "Into %s", record_dir(a, dirbuf, sizeof(dirbuf)));
-    wlwin_text(w, 16, w->bh - 28, line, 1, lm_theme.text_dim, w->bw - 32);
+
+    int ch = N_ROWS * ROW_PITCH + 10;
+    wlwin_round_fill(w, PAD - 1, HEAD_H - 1, w->bw - 2 * PAD + 2, ch + 2, 9, lm_theme.border);
+    wlwin_round_fill(w, PAD, HEAD_H, w->bw - 2 * PAD, ch, 8, lm_theme.card);
+    for (int i = 0; i < N_ROWS; i++)
+        wlwin_text(w, PAD + 12, HEAD_H + 10 + i * ROW_PITCH + (ROW_H - LM_FONT_H) / 2, ROW_LABELS[i], 1, lm_theme.text, LABEL_W - 4);
+    for (int i = 0; i < a->nbtn; i++)
+        draw_button(a, &a->btn[i]);
+
+    int sy = w->bh - FOOT_H;
+    wlwin_fill(w, 0, sy, w->bw, FOOT_H, lm_theme.bar);
+    if (a->msg[0]) {
+        wlwin_text(w, PAD, sy + 7, a->msg, 1, lm_theme.error, w->bw - 2 * PAD);
+    } else {
+        char dirbuf[512];
+        snprintf(line, sizeof(line), "Into %s", record_dir(a, dirbuf, sizeof(dirbuf)));
+        wlwin_text(w, PAD, sy + 7, line, 1, lm_theme.text_dim, w->bw - 2 * PAD);
+    }
+
+    struct wlrail L;
+    record_rail(a, &L);
+    wlrail_paint(w, &L, &a->ran, a->hovertool, wlrail_now(), lm_theme.bar, lm_theme.bar, lm_theme.button_hover, lm_theme.text_soft);
+    wlrail_foot(w, &L, lm_theme.bar);
+    dump_state(a);
 }
 
 static void toggle(struct app *a)
 {
     if (a->rec)
-        stop_recording(a);
+        stop_recording(a, true);
     else
         start_recording(a);
 }
 
 static void press_button(struct app *a, int id)
 {
-    switch (id) {
-    case 1:
-        if (a->capture)
-            toggle(a);
-        break;
-    case 2:
-        if (!a->rec && a->nouts > 0)
-            a->out_sel = (a->out_sel + 1) % a->nouts;
-        break;
-    case 3:
-        if (!a->rec)
-            a->fps_sel = (a->fps_sel + 1) % N_FPS;
-        break;
-    case 4:
-    case 5:
-        if (!a->rec) {
-            if (id == 4)
-                a->snd_system = !a->snd_system;
-            else
-                a->snd_mic = !a->snd_mic;
-            lm_snd_conf_save("record", a->snd_system, a->snd_mic);
+    if (!usable(a, id))
+        return;
+    if (id == B_RECORD) {
+        toggle(a);
+    } else {
+        if (id >= B_OUTPUT && id < B_OUTPUT + MAX_OUTPUTS) {
+            a->out_sel = id - B_OUTPUT;
+            snprintf(a->pref.output, sizeof(a->pref.output), "%s", a->outs[a->out_sel].name);
+        } else if (id >= B_FPS && id < B_FPS + N_FPS) {
+            a->fps_sel = id - B_FPS;
+            a->pref.fps = FPS_CHOICES[a->fps_sel];
+        } else if (id == B_SYSTEM) {
+            a->pref.system = a->snd_system = !a->snd_system;
+        } else if (id == B_MIC) {
+            a->pref.mic = a->snd_mic = !a->snd_mic;
+        } else if (id == B_OPEN) {
+            a->pref.open = a->open_after = !a->open_after;
         }
-        break;
+        prefs_save(&a->pref);
     }
     a->win.redraw = true;
+}
+
+static void press_rail(struct app *a, int i)
+{
+    if (i == R_PLAY && a->saved[0]) {
+        spawn_detached("MELLAGUI_RECORD_VIEWER", "mellagui-view", a->saved);
+    } else if (i == R_FOLDER) {
+        char dirbuf[512];
+        const char *dir = record_dir(a, dirbuf, sizeof(dirbuf));
+        mkdir(dir, 0755);
+        spawn_detached("MELLAGUI_RECORD_FILES", "mellagui-files", dir);
+    }
 }
 
 static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args)
 {
     struct app *a = w->data;
-    int before = a->hover;
+    int before = a->hover, before_tool = a->hovertool;
     switch (op) {
     case LM_WL_POINTER_EVT_ENTER:
         a->has_pointer = true;
@@ -1062,6 +1339,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     case LM_WL_POINTER_EVT_LEAVE:
         a->has_pointer = false;
         a->press = 0;
+        wlrail_release(&a->ran);
         break;
     case LM_WL_POINTER_EVT_MOTION:
         a->px = lm_fixed_to_double(args[1].f);
@@ -1071,18 +1349,28 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (args[2].u != 272)                       /* BTN_LEFT */
             break;
         if (args[3].u == 1) {
-            a->press = button_at(a, a->px, a->py);
+            int tool = rail_under(a);
+            if (tool >= 0) {
+                wlrail_press(&a->ran, tool, wlrail_now());
+                press_rail(a, tool);
+            } else {
+                a->press = button_at(a, a->px, a->py);
+            }
         } else {
             int id = button_at(a, a->px, a->py);
             if (id && id == a->press)
                 press_button(a, id);
             a->press = 0;
+            wlrail_release(&a->ran);
         }
         a->win.redraw = true;
         break;
     }
     a->hover = a->has_pointer ? button_at(a, a->px, a->py) : 0;
-    if (a->hover != before)
+    if (a->hover && !usable(a, a->hover))
+        a->hover = 0;
+    a->hovertool = rail_under(a);
+    if (a->hover != before || a->hovertool != before_tool)
         a->win.redraw = true;
 }
 
@@ -1115,23 +1403,30 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     uint32_t ks = lm_keymap_keysym(args[2].u, a->win.mods);
     char txt[8] = "";
     if (ks == LM_KS_Return || ks == LM_KS_KP_Enter) {
-        press_button(a, 1);
+        press_button(a, B_RECORD);
     } else if (ks == LM_KS_Escape) {
         close_or_hide(a);
     } else if (lm_keysym_to_utf8(ks, txt) == 1 && !(a->win.mods & (LM_MOD_ALT | LM_MOD_SUPER | LM_MOD_CTRL))) {
         if (txt[0] == ' ')
-            press_button(a, 1);
-        else if (txt[0] == 'o' || txt[0] == 'O')
-            press_button(a, 2);
+            press_button(a, B_RECORD);
+        else if ((txt[0] == 'o' || txt[0] == 'O') && a->nouts > 0)
+            press_button(a, B_OUTPUT + (a->out_sel + 1) % a->nouts);
         else if (txt[0] == 'f' || txt[0] == 'F')
-            press_button(a, 3);
+            press_button(a, B_FPS + (a->fps_sel + 1) % N_FPS);
         else if (txt[0] == 's' || txt[0] == 'S')
-            press_button(a, 4);
+            press_button(a, B_SYSTEM);
         else if (txt[0] == 'm' || txt[0] == 'M')
-            press_button(a, 5);
+            press_button(a, B_MIC);
+        else if (txt[0] == 'v' || txt[0] == 'V')
+            press_button(a, B_OPEN);
+        else if (txt[0] == 'p' || txt[0] == 'P')
+            press_rail(a, R_PLAY);
+        else if (txt[0] == 'd' || txt[0] == 'D')
+            press_rail(a, R_FOLDER);
         else if (txt[0] == 'q' || txt[0] == 'Q')
             close_or_hide(a);
     }
+    a->win.redraw = true;
 }
 
 /* ---- selftest -------------------------------------------------------------------------------------------------------- */
@@ -1375,9 +1670,13 @@ int main(int argc, char **argv)
 {
     wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     lm_theme_load_env();
-    struct app a = { .fps_sel = 2, .quality = DEFAULT_QUALITY, .grabbing = -1, .snd_system = true };
-    lm_snd_conf_load("record", &a.snd_system, &a.snd_mic);
-    bool want_start = false, list_only = false;
+    struct app a = { .quality = DEFAULT_QUALITY, .grabbing = -1, .hovertool = -1, .pref = { .system = true, .open = true, .fps = DEFAULT_FPS } };
+    prefs_load(&a.pref);
+    a.snd_system = a.pref.system;
+    a.snd_mic = a.pref.mic;
+    a.open_after = a.pref.open;
+    a.fps_sel = fps_index(a.pref.fps);
+    bool want_start = false, list_only = false, output_given = false;
     for (int i = 1; i < argc; i++) {
         const char *s = argv[i];
         const char *val = i + 1 < argc ? argv[i + 1] : NULL;
@@ -1385,7 +1684,7 @@ int main(int argc, char **argv)
         else if (!strcmp(s, "--list")) list_only = true;
         else if (!strcmp(s, "--start")) want_start = true;
         else if (!strcmp(s, "--duration") && val) { a.duration = atof(val); i++; }
-        else if (!strcmp(s, "--output") && val) { a.out_sel = atoi(val); i++; }
+        else if (!strcmp(s, "--output") && val) { a.out_sel = atoi(val); output_given = true; i++; }
         else if (!strcmp(s, "--quality") && val) { a.quality = LM_CLAMP(atoi(val), 1, 100); i++; }
         else if (!strcmp(s, "--dir") && val) { a.dir = val; i++; }
         else if (!strcmp(s, "--name") && val) { a.name = val; i++; }
@@ -1406,18 +1705,13 @@ int main(int argc, char **argv)
             i++;
         }
         else if (!strcmp(s, "--fps") && val) {
-            int f = atoi(val), best = 0;
-            for (int k = 0; k < N_FPS; k++)
-                if (abs(FPS_CHOICES[k] - f) < abs(FPS_CHOICES[best] - f))
-                    best = k;
-            a.fps_sel = best;
+            a.fps_sel = fps_index(atoi(val));
             i++;
         } else {
             usage();
             return 2;
         }
     }
-    (void)DEFAULT_FPS;
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -1443,6 +1737,9 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    for (int i = 0; !output_given && i < a.nouts; i++)      /* the screen chosen last time, when it is there */
+        if (!strcmp(a.outs[i].name, a.pref.output))
+            a.out_sel = i;
     if (list_only) {
         for (int i = 0; i < a.nouts; i++)
             printf("%d %s %dx%d+%d+%d\n", i, a.outs[i].name, a.outs[i].w, a.outs[i].h, a.outs[i].x, a.outs[i].y);
@@ -1454,6 +1751,8 @@ int main(int argc, char **argv)
         wlwin_destroy(&a.win);
         return 1;
     }
+    wlrail_init(&a.ran);
+    wlwin_set_inset(&a.win, WLRAIL_W);                  /* (after the connect, which clears the window; before the open: it makes room) */
     if (wlwin_open(&a.win, "Screen recorder", "mellagui.record", DEF_W, DEF_H, DEF_W, DEF_H) < 0) {
         wlwin_destroy(&a.win);
         return 1;
@@ -1469,11 +1768,14 @@ int main(int argc, char **argv)
             if (a.grabbing >= 0)
                 timeout = LM_MIN(timeout, 5);       /* the answer is on its way */
         }
+        struct wlrail L;
+        record_rail(&a, &L);
+        timeout = wlrail_loop(&a.win, &a.ran, &L, a.hovertool, timeout);
         if (!wlwin_step(&a.win, timeout))
             break;
         tick(&a);
     }
-    stop_recording(&a);
+    stop_recording(&a, false);
     if (want_start && a.msg[0])
         rc = 1;
     wlwin_destroy(&a.win);

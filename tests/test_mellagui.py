@@ -66,6 +66,8 @@ def setUpModule():
     os.environ['MELLAGUI_SEARCH_ROOT'] = os.path.join(tmp, 'no-home')
     os.environ['MELLAGUI_RECORD_SYSTEM_SRC'] = 'none'                 # the recorder and the camera do not record this machine's sound ...
     os.environ['MELLAGUI_RECORD_MIC_SRC'] = 'none'                    # ... (the tests of the sound give them a synthetic source)
+    os.environ['MELLAGUI_RECORD_VIEWER'] = 'none'                     # a finished recording opens no viewer (TestRecord has its own stand-in)
+    os.environ['MELLAGUI_RECORD_FILES'] = 'none'
     os.environ['MELLAGUI_LAUNCHER_DEFAULTS'] = '0'                    # ... nor the built-in launcher buttons (TestLauncherDefaults turns them on)
     os.environ['MELLAGUI_DOCK_LAUNCHER'] = '0'                       # a dock the test wrote is not given the Launcher button (TestDockLauncherPinned turns it on)
     LOG = os.path.join(tmp, 'mellagui.log')
@@ -14068,29 +14070,83 @@ class TestRecord(Base):
         self.assertNotIn('with sound', err)
         self.assertIsNone(audio_tones(path, (440,)))
 
-    def test_the_window_has_switches_for_the_sound_and_remembers_them(self):
-        cfg = tempfile.mkdtemp(prefix='mellagui-reccfg-', dir=tmp)
-        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
-        p = subprocess.Popen([self.REC], env=dict(os.environ, XDG_CONFIG_HOME=cfg), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    def rec_window(self, **env):
+        """The recorder's window with a dump of its buttons: (process, click(name), state())."""
+        d = self.outdir()
+        dump = os.path.join(d, 'dump')
+        p = subprocess.Popen([self.REC, '--dir', d, '--codec', 'mjpeg'], env=dict(os.environ, MELLAGUI_RECORD_DUMP=dump, **env),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         win = wait_for_window('mellagui.record')
         self.assertIsNotNone(win)
+
+        def lines():
+            for _ in range(100):
+                if os.path.exists(dump):
+                    return [l.split() for l in open(dump).read().splitlines()]
+                time.sleep(0.05)
+            self.fail('no dump')
+
+        def click(name):
+            time.sleep(0.3)
+            w = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.record'][0]
+            b = [l for l in lines() if l[:2] == ['btn', name]][0]
+            ctl.click(w['x'] + int(b[2]) + int(b[4]) // 2, w['y'] + int(b[3]) + int(b[5]) // 2)
+            time.sleep(0.4)
+
+        def state():
+            return dict(kv.split('=', 1) for kv in lines()[0][1:])
+
         time.sleep(0.5)
-        win = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.record'][0]
+        return p, click, state
+
+    def test_the_window_remembers_its_settings(self):
+        cfg = tempfile.mkdtemp(prefix='mellagui-reccfg-', dir=tmp)
+        self.addCleanup(shutil.rmtree, cfg, ignore_errors=True)
+        p, click, state = self.rec_window(XDG_CONFIG_HOME=cfg)
         conf = os.path.join(cfg, 'mellagui', 'record.conf')
-        ctl.click(win['x'] + 16 + 20, win['y'] + 126 + 14)                       # "Computer sound": on by default, now off
-        time.sleep(0.4)
-        self.assertIn('system-sound = 0', open(conf).read())
-        ctl.click(win['x'] + win['w'] - 16 - 20, win['y'] + 126 + 14)            # "Microphone": off by default, now on
-        time.sleep(0.4)
+        for name in ('system', 'mic', 'fps24', 'output0', 'open'):
+            click(name)
         text = open(conf).read()
-        self.assertIn('system-sound = 0', text)
-        self.assertIn('microphone = 1', text)
+        for line in ('system-sound = 0', 'microphone = 1', 'fps = 24', 'output = headless-0', 'open = 0'):
+            self.assertIn(line, text)
         p.kill()
         p.wait()
-        p = subprocess.Popen([self.REC, '--list'], env=dict(os.environ, XDG_CONFIG_HOME=cfg), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        p.wait()
+        p, click, state = self.rec_window(XDG_CONFIG_HOME=cfg)
+        s = state()
+        self.assertEqual((s['system'], s['mic'], s['fps'], s['open']), ('0', '1', '24', '0'))
         self.assertEqual(self.run_rec('--sound', 'loud').returncode, 2)
+
+    def test_a_finished_recording_is_opened(self):
+        d = self.outdir()
+        log = os.path.join(d, 'opened')
+        viewer = os.path.join(d, 'viewer.sh')
+        with open(viewer, 'w') as f:
+            f.write('#!/bin/sh\necho "$1" >> "%s"\n' % log)
+        os.chmod(viewer, 0o755)
+        cfg = os.path.join(d, 'cfg')
+        p, click, state = self.rec_window(MELLAGUI_RECORD_VIEWER=viewer, XDG_CONFIG_HOME=cfg)
+        click('record')
+        time.sleep(0.6)
+        w = [w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.record'][0]
+        self.assertIn('minimized', w['flags'])
+        item = re.match(r'item \d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)', ctl.cmd('tray')[1])
+        x, y, bw, bh = (int(v) for v in item.groups())
+        ctl.click(x + bw // 2, y + bh // 2)
+        self.assertEqual(p.wait(timeout=15), 0)
+        for _ in range(60):
+            if os.path.exists(log):
+                break
+            time.sleep(0.05)
+        path = open(log).read().strip()
+        self.assertTrue(path.endswith('.mp4') and os.path.exists(path), path)
+        # a --duration that runs out opens nothing
+        os.remove(log)
+        r = subprocess.run([self.REC, '--start', '--duration', '0.4', '--dir', d, '--codec', 'mjpeg'],
+                           env=dict(os.environ, MELLAGUI_RECORD_VIEWER=viewer, XDG_CONFIG_HOME=cfg), capture_output=True, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        time.sleep(0.5)
+        self.assertFalse(os.path.exists(log))
 
     def test_codec_choice_without_ffmpeg(self):
         d = self.outdir()

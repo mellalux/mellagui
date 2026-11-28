@@ -48,9 +48,11 @@
 #include "img.h"
 #include "ffaudio.h"
 #include "ffdec.h"
+#include "ffpipe.h"
 #include "mdview.h"
 #include "sftp.h"
 #include "smb.h"
+#include "netstream.h"
 #include "metrics.h"
 #include "pathcomp.h"
 #include "theme.h"
@@ -3661,23 +3663,49 @@ static const char *workdir(const struct app *a)
     return h && *h ? h : "/";
 }
 
+/* A video or a sound file of a network place plays straight from the server (netstream.h); false = it is to be fetched like other files. */
+static bool open_streamed(struct app *a, const char *path, char *why, size_t whysz)
+{
+    why[0] = 0;
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    if (!(ext_is(name, "mp4") || ext_is(name, "m4v") || ffaudio_name_is_audio(name)) || !ffpipe_ffmpeg_path())
+        return false;
+    struct netpath np;
+    if (!net_parse(path, &np))
+        return false;
+    const struct smb_conn *c = net_conn(&np, why, whysz);
+    if (!c)
+        return false;
+    char url[1200], err[PATH_MAX + 80];
+    if (!netstream_start(c, np.sftp ? "" : np.share, np.dir, url, sizeof(url), why, whysz))
+        return false;
+    if (!launch("mellagui-view", url, workdir(a), err, sizeof(err)))
+        msg(a, "%s", err);
+    else
+        msg(a, "Playing %s from the server", name);
+    return true;
+}
+
 static void open_path(struct app *a, const char *path)
 {
     struct stat st;
     if (is_net(path)) {
         bool isdir;
         long long size;
-        char err[300], local[PATH_MAX];
+        char err[300], local[PATH_MAX], why[SMB_ERR];
         if (stat_any(path, &isdir, &size, err, sizeof(err)) < 0) {
             msg(a, "%s", err);
         } else if (isdir) {
             go_to(a, cur(a), path, NULL);
+        } else if (open_streamed(a, path, why, sizeof(why))) {
+            return;
         } else if (net_fetch(path, local, sizeof(local), err, sizeof(err))) {
             open_path(a, local);
             if (a->msg[0] == 0)
                 msg(a, "Opened a copy of %s (changes are not sent back)", strrchr(path, '/') + 1);
         } else {
-            msg(a, "%s", err);
+            msg(a, "%s", why[0] ? why : err);                        /* (why it could not be played says more than why it was not copied) */
         }
         return;
     }
@@ -8164,6 +8192,8 @@ int main(int argc, char **argv)
     wlwin_hidpi();                      /* draws through the wlwin_* calls only: sharp on a scaled screen */
     if (getenv("MELLAGUI_ASKPASS"))                                     /* ssh asks for a password through SSH_ASKPASS, which names this program (sftp.h) */
         return sftp_askpass_main();
+    if (argc == 2 && !strcmp(argv[1], "--stream"))                      /* the helper that gives a network file to the viewer (netstream.h) */
+        return netstream_serve_main();
     lm_theme_load_env();
     if (argc > 1 && !strcmp(argv[1], "--register-desktop"))
         return register_desktop();

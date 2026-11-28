@@ -51,6 +51,7 @@
 #include "ffaudio.h"
 #include "ffdec.h"
 #include "ffpipe.h"
+#include "netstream_url.h"
 #include "h264dec.h"
 #include "img.h"
 #include "../src/exif.h"
@@ -163,9 +164,20 @@ struct app {
     struct wlclip clip;
     int c_hover, c_down;                /* the card's buttons: under the pointer / pressed (-1 none) */
     char dump[PATH_MAX];                /* $MELLAGUI_VIEW_DUMP */
+    char url[1200];                     /* a file played from a network drive (netstream.h): its address, "" otherwise; the list is that file alone */
+    int hold;                           /* the connection that keeps its helper running, -1 = none */
 };
 
 /* ---- directory ---------------------------------------------------------------------------------------------------- */
+
+/* Where the file number i of the list is read from. */
+static void item_path(const struct app *a, int i, char *out, size_t n)
+{
+    if (a->url[0])
+        snprintf(out, n, "%s", a->url);
+    else
+        snprintf(out, n, "%s/%s", a->dir, a->names[i]);
+}
 
 static bool is_video_name(const char *n)
 {
@@ -246,7 +258,7 @@ static void scan_dir(struct app *a, const char *keep)           /* keep: name to
 /* ---- image, zoom ---------------------------------------------------------------------------------------------------- */
 
 /* The window, top to bottom: the picture, the strip of small pictures (when it is on and the window has room), the status bar. */
-static int strip_h(const struct app *a) { return a->thumbs_on && a->win.bw >= 260 && a->win.bh >= 300 ? STRIP_H : 0; }
+static int strip_h(const struct app *a) { return a->thumbs_on && !a->url[0] && a->win.bw >= 260 && a->win.bh >= 300 ? STRIP_H : 0; }
 static int bar_y(const struct app *a) { return a->win.bh > BAR_H ? a->win.bh - BAR_H : 0; }
 static int view_w(const struct app *a) { return a->win.bw; }
 static int view_h(const struct app *a) { int h = a->win.bh - BAR_H - strip_h(a); return h > 0 ? h : 1; }
@@ -334,7 +346,7 @@ static void th_make(struct app *a, int i)
         return;
     char path[PATH_MAX + 300], err[120];
     struct lm_image im = { 0 };
-    snprintf(path, sizeof(path), "%s/%s", a->dir, a->names[i]);
+    item_path(a, i, path, sizeof(path));
     if (lm_img_load(path, &im, err, sizeof(err)) == 0)
         th_from_image(a, i, &im);
     lm_img_free(&im);
@@ -385,7 +397,7 @@ static bool poster_step(struct app *a)
                 continue;
             }
             char in[PATH_MAX + 300];
-            snprintf(in, sizeof(in), "%s/%s", a->dir, a->names[i]);
+            item_path(a, i, in, sizeof(in));
             snprintf(a->pj_name, sizeof(a->pj_name), "%s", a->names[i]);
             const char *rt = getenv("XDG_RUNTIME_DIR");
             snprintf(a->pj_out, sizeof(a->pj_out), "%s/mellagui-view-poster-%d.ppm", rt && *rt ? rt : "/tmp", (int)getpid());
@@ -996,11 +1008,11 @@ static void load_current(struct app *a)
     a->nexif = 0;
     if (a->n) {
         char path[PATH_MAX + 300];
-        snprintf(path, sizeof(path), "%s/%s", a->dir, a->names[a->cur]);
+        item_path(a, a->cur, path, sizeof(path));
         if (is_video_name(a->names[a->cur])) {
             char why[160] = "";
             snprintf(g_ff_path, sizeof(g_ff_path), "%s", path);
-            a->vid = lm_mp4r_open(path, why, sizeof(why));          /* our own reader first: Motion JPEG needs nothing else */
+            a->vid = a->url[0] ? NULL : lm_mp4r_open(path, why, sizeof(why));   /* our own reader first: Motion JPEG needs nothing else (a network file is ffmpeg's) */
             if (a->vid && a->vid->h264) {                           /* H.264 of our own making plays without ffmpeg */
                 char herr[160];
                 a->hd = lm_h264dec_create(a->vid->sps, a->vid->sps_n, a->vid->pps, a->vid->pps_n, herr, sizeof(herr));
@@ -1260,6 +1272,26 @@ static void set_target(struct app *a, const char *arg, bool load)
     struct stat st;
     char base[256] = "";
     const char *keep = NULL;
+    if (a->hold >= 0)
+        close(a->hold);
+    a->hold = -1;
+    a->url[0] = 0;
+    if (netstream_is_url(arg) && strlen(arg) < sizeof(a->url)) {         /* a network file: there is no folder to read */
+        netstream_name(arg, base, sizeof(base));
+        free_names(a);
+        a->names = malloc(sizeof(*a->names));
+        if (a->names && (a->names[0] = strdup(base)))
+            a->n = 1;
+        a->cur = 0;
+        snprintf(a->url, sizeof(a->url), "%s", arg);
+        const char *home = getenv("HOME");
+        snprintf(a->dir, sizeof(a->dir), "%s", home && *home ? home : "/");   /* (for the Open card) */
+        a->hold = netstream_hold(arg);
+        th_reset(a);
+        if (load)
+            load_current(a);
+        return;
+    }
     if (stat(arg, &st) == 0 && !S_ISDIR(st.st_mode)) {
         const char *slash = strrchr(arg, '/');
         snprintf(a->dir, sizeof(a->dir), "%.*s", slash ? (int)(slash - arg) : 1, slash ? arg : ".");
@@ -1885,7 +1917,8 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
         a->fit = true;
         w->redraw = true;
     } else if (c == 'r' || c == 'R') {
-        scan_dir(a, NULL);                              /* and on to the newest one */
+        if (!a->url[0])
+            scan_dir(a, NULL);                          /* and on to the newest one */
         load_current(a);
     }
 }
@@ -2304,6 +2337,7 @@ int main(int argc, char **argv)
 
     struct app a = { 0 };
     a.ipc = -1;
+    a.hold = -1;
     a.th_hover = -1;
     a.c_hover = a.c_down = -1;
     const char *arg = argc > 1 ? argv[1] : NULL;

@@ -19,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -6802,6 +6804,89 @@ class TestClients(Base):
         if os.path.exists(n['conf']):
             with open(n['conf']) as f:
                 self.assertNotIn('fakehost', f.read())
+
+    def streamed_video(self, p, n, home, remote, env_keys):
+        """Enter on a video of a network place: the viewer plays it from the server, nothing is copied."""
+        ctl.tap(self.K_HOME)
+        for _ in range(2):
+            ctl.tap(self.K_DOWN)                                         # "..", "sub", then the video
+        ctl.tap(KEY_ENTER)
+        self.assertIsNotNone(wait_for_window('mellagui.view'), 'the viewer did not appear')
+        end = time.time() + 15
+        state = ''
+        while time.time() < end and not ('name=00film.mp4 ' in state and 'vmode=2' in state):
+            time.sleep(0.1)
+            if os.path.exists(env_keys['dump']):
+                with open(env_keys['dump']) as f:
+                    state = f.readline()
+        self.assertIn('name=00film.mp4 ', state)
+        self.assertIn('vmode=2', state)
+        time.sleep(1.0)
+        w = next(w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view')
+        ctl.abs(0, 0)
+        ctl.sync()
+        shot = ctl.dump(os.path.join(n['root'], 'screen.ppm'))
+        x, y = int(w['x']), int(w['y'])
+        colours = [shot.px(x + dx, y + 150) for dx in range(200, 660, 20)]
+        self.assertTrue(any(r > 180 and g < 80 and b < 80 for r, g, b in colours), colours)     # the red film plays
+        self.assertFalse(os.path.exists(os.path.join(n['cache'], 'mellagui', 'network')), 'no copy was made')
+        ctl.tap(16)                                                      # Q: the viewer ends, and with it the helper
+        end = time.time() + 10
+        while time.time() < end and (any(w['app_id'] == 'mellagui.view' for w in ctl.windows()['windows']) or self.stream_helpers() - env_keys['before']):
+            time.sleep(0.1)
+        self.assertFalse([w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.view'])
+        self.assertEqual(self.stream_helpers() - env_keys['before'], set())
+
+    @staticmethod
+    def stream_helpers():
+        found = set()
+        for pid in os.listdir('/proc'):
+            if pid.isdigit():
+                try:
+                    with open('/proc/%s/cmdline' % pid, 'rb') as f:
+                        if f.read() == b'mellagui-files\x00--stream\x00':
+                            found.add(pid)
+                except OSError:
+                    pass
+        return found
+
+    def stream_env(self):
+        if not shutil.which('ffmpeg'):
+            self.skipTest('needs ffmpeg')
+        if not os.path.exists(os.path.join(ROOT, 'build', 'mellagui-view')):
+            self.skipTest('mellagui-view not built')
+        d = tempfile.mkdtemp(prefix='stream-', dir=tmp)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        film = os.path.join(d, 'film.mp4')
+        subprocess.run(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=640x360:r=10:d=30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', film],
+                       check=True, timeout=60)
+        env = {'MELLAGUI_VIEW_DUMP': os.path.join(d, 'view'), 'MELLAGUI_VIEW_SINGLE': '0', 'MELLAGUI_AUDIO_PLAYER': 'none', 'MELLAGUI_STREAM_IDLE_MS': '1000'}
+        return film, env, {'dump': env['MELLAGUI_VIEW_DUMP'], 'before': self.stream_helpers()}
+
+    def test_files_sftp_plays_a_video_from_the_server(self):
+        film, env, keys = self.stream_env()
+        log = film + '.ssh.log'
+        p, d, home, n = self.sftp_start(MELLAGUI_SSH=os.path.join(ROOT, 'tests', 'fake_ssh.py'), FAKE_SSH_LOG=log, **env)
+        shutil.copy(film, os.path.join(home, '00film.mp4'))
+        self.sftp_connect('sftp://me@fakehost')
+        self.wait_title('mellagui.files', 'me - Files')
+        self.streamed_video(p, n, home, '00film.mp4', keys)
+        with open(log) as f:
+            self.assertIn('open /home/me/00film.mp4', f.read())
+
+    def test_files_network_plays_a_video_from_the_share(self):
+        film, env, keys = self.stream_env()
+        if not shutil.which('gcc'):
+            self.skipTest('needs gcc')
+        lib = film + '.smblib.so'
+        subprocess.run(['gcc', '-shared', '-fPIC', '-o', lib, os.path.join(ROOT, 'tests', 'fake_smblib.c')], check=True, timeout=60)
+        p, d, share, n = self.net_start(MELLAGUI_SMBLIB=lib, **env)
+        shutil.copy(film, os.path.join(share, '00film.mp4'))
+        self.net_connect('fakehost')
+        self.wait_title('mellagui.files', 'fakehost - Files')
+        ctl.tap(KEY_ENTER)                                               # "data"
+        self.wait_title('mellagui.files', 'data - Files')
+        self.streamed_video(p, n, share, '00film.mp4', keys)
 
     def test_files_network_forgets_a_server_with_delete(self):
         p, d, share, n = self.net_start()
@@ -33346,6 +33431,91 @@ class TestDesktop(Base):
         self.assertTrue(os.path.exists(outside), 'the original is still there')
         st, items = self.state(lambda s, i: 'from_away.txt' in i)
         self.assertIn('from_away.txt', items)
+
+
+class TestNetStream(unittest.TestCase):
+    """client/netstream.c: `mellagui-files --stream` gives a file of a server out on 127.0.0.1, against tests/fake_ssh.py and tests/fake_smblib.c."""
+    EXE = os.path.join(ROOT, 'build', 'mellagui-files')
+
+    def setUp(self):
+        if not os.path.exists(self.EXE):
+            self.skipTest('mellagui-files not built')
+        self.dir = tempfile.mkdtemp(prefix='netstream-')
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        os.makedirs(os.path.join(self.dir, 'pub', 'a b'))
+        self.data = os.urandom(1500000)
+        with open(os.path.join(self.dir, 'pub', 'a b', 'õ #1.bin'), 'wb') as f:
+            f.write(self.data)
+        self.log = os.path.join(self.dir, 'ssh.log')
+
+    def helper(self, kind, password='', share='', path='pub/a b/õ #1.bin', **env):
+        e = dict(os.environ, MELLAGUI_SSH=os.path.join(ROOT, 'tests', 'fake_ssh.py'), FAKE_SFTP_ROOT=self.dir, FAKE_SSH_LOG=self.log, FAKE_SMB_ROOT=self.dir,
+                 MELLAGUI_STREAM_IDLE_MS='800', **env)
+        if kind == 'smb':
+            lib = os.path.join(self.dir, 'smblib.so')
+            if not shutil.which('gcc'):
+                self.skipTest('needs gcc')
+            subprocess.run(['gcc', '-shared', '-fPIC', '-o', lib, os.path.join(ROOT, 'tests', 'fake_smblib.c')], check=True, timeout=60)
+            e['MELLAGUI_SMBLIB'] = lib
+        fields = [kind, 'host', '0', 'me', password, '0', share, path]
+        q = subprocess.Popen([self.EXE, '--stream'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=e)
+        self.addCleanup(lambda: (q.poll() is None) and (q.kill(), q.wait()))
+        q.stdin.write(b''.join(f.encode() + b'\0' for f in fields))
+        q.stdin.close()
+        line = q.stdout.readline().decode().strip()
+        q.stdout.close()
+        return q, line
+
+    def get(self, url, rng=None):
+        r = urllib.request.Request(url, headers={'Range': rng} if rng else {})
+        with urllib.request.urlopen(r, timeout=20) as a:
+            return a.status, a.read()
+
+    def check(self, q, line):
+        self.assertTrue(line.startswith('ok http://127.0.0.1:'), line)
+        url = line[3:]
+        self.assertTrue(url.endswith('/f/%C3%B5%20%231.bin'), url)
+        size = len(self.data)
+        self.assertEqual(self.get(url), (200, self.data))
+        for a, b in ((0, 0), (100, 70000), (65535, 600000), (size - 10, size - 1)):
+            self.assertEqual(self.get(url, 'bytes=%d-%d' % (a, b)), (206, self.data[a:b + 1]), (a, b))
+        self.assertEqual(self.get(url, 'bytes=1400000-'), (206, self.data[1400000:]))
+        self.assertEqual(self.get(url, 'bytes=-100'), (206, self.data[-100:]))
+        for bad, code in ((url.replace(url.split('/')[3], '0' * 32), 404), (url, 416)):
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                self.get(bad, 'bytes=%d-' % size if code == 416 else None)
+            self.assertEqual(e.exception.code, code)
+            e.exception.close()
+        held = socket.create_connection(('127.0.0.1', int(url.split(':')[2].split('/')[0])))
+        held.sendall(('GET /%s/h HTTP/1.1\r\n\r\n' % url.split('/')[3]).encode())
+        time.sleep(1.6)
+        self.assertIsNone(q.poll(), 'a held helper ends')
+        held.close()
+        self.assertEqual(q.wait(timeout=8), 0)                               # quiet: it ends
+
+    def test_an_ssh_server(self):
+        q, line = self.helper('sftp', password='hunter22', FAKE_SFTP_PASS='hunter22')
+        with open('/proc/%d/cmdline' % q.pid, 'rb') as f:
+            self.assertNotIn(b'hunter22', f.read())
+        self.check(q, line)
+        with open(self.log) as f:
+            log = f.read()
+        self.assertIn('password ok', log)                                    # askpass gave it ...
+        self.assertNotIn('hunter22', log)                                    # ... and it was never an argument
+        self.assertIn('-s -- me@host sftp', log)
+
+    def test_a_windows_share(self):
+        q, line = self.helper('smb', password='hunter22', share='pub', path='a b/õ #1.bin', FAKE_SMB_USER='me', FAKE_SMB_PASS='hunter22')
+        self.check(q, line)
+
+    def test_refusals_say_why(self):
+        q, line = self.helper('sftp', password='wrong', FAKE_SFTP_PASS='hunter22')
+        self.assertTrue(line.startswith('error ') and 'refused' in line.lower(), line)
+        self.assertEqual(q.wait(timeout=8), 1)
+        q, line = self.helper('sftp', path='pub/nothing')
+        self.assertEqual(line, 'error Not found')
+        q, line = self.helper('smb', password='wrong', share='pub', path='a b/õ #1.bin', FAKE_SMB_USER='me', FAKE_SMB_PASS='hunter22')
+        self.assertEqual(line, 'error Access denied')
 
 
 class TestCctv(Base):

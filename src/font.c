@@ -680,25 +680,132 @@ static void strike_twice(uint8_t *px, int w, int h, int n)
     }
 }
 
-static void render_cell(uint32_t cp, int cw, int ch, uint8_t *out, bool bold)
+/* ---- characters the chosen font lacks -------------------------------------------------------------------------- */
+
+/* Other fonts that are asked, in this order, for a character the chosen one does not have (opened when first needed). */
+static const char *const k_fallback[] = {
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf", "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf", "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSerif.ttf", "/usr/share/fonts/gnu-free/FreeSerif.ttf",
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", "/usr/share/fonts/droid/DroidSansFallbackFull.ttf",
+};
+
+#define N_FALLBACK ((int)(sizeof(k_fallback) / sizeof(k_fallback[0])))
+
+static struct lm_ttf *fallback_face(uint32_t cp, int *glyph)
 {
+    static struct lm_ttf *face[N_FALLBACK];
+    static bool tried[N_FALLBACK];
+    for (int i = 0; i < N_FALLBACK; i++) {
+        if (!tried[i]) {
+            tried[i] = true;
+            if (access(k_fallback[i], R_OK) == 0)
+                face[i] = lm_ttf_open(k_fallback[i], NULL);
+        }
+        int g = face[i] ? lm_ttf_glyph(face[i], cp) : 0;
+        if (g) {
+            *glyph = g;
+            return face[i];
+        }
+    }
+    return NULL;
+}
+
+/* The media control signs (U+23F4..23FA), which hardly any font has: drawn here, `size` pixels in the middle of the cell. */
+static bool shape_cell(uint32_t cp, int cw, int ch, int size, uint8_t *out)
+{
+    if (cp < 0x23f4 || cp > 0x23fa)
+        return false;
+    double d = size * 0.95, mx = cw / 2.0, my = ch * 0.56;
+    for (int y = 0; y < ch; y++)
+        for (int x = 0; x < cw; x++) {
+            int hit = 0;
+            for (int sy = 0; sy < 4; sy++)
+                for (int sx = 0; sx < 4; sx++) {
+                    double u = (x + (sx + 0.5) / 4 - mx) / d, v = (y + (sy + 0.5) / 4 - my) / d;
+                    double along = cp == 0x23f4 ? -u : cp == 0x23f6 ? -v : cp == 0x23f7 ? v : u;
+                    double across = cp == 0x23f6 || cp == 0x23f7 ? u : v;
+                    if (cp <= 0x23f7)                           /* a triangle that points `along` */
+                        hit += fabs(along) <= 0.5 && fabs(across) <= 0.55 * (0.5 - along);
+                    else if (cp == 0x23f8)
+                        hit += fabs(v) <= 0.48 && fabs(u) >= 0.13 && fabs(u) <= 0.42;
+                    else if (cp == 0x23f9)
+                        hit += fabs(u) <= 0.42 && fabs(v) <= 0.42;
+                    else
+                        hit += u * u + v * v <= 0.23;
+                }
+            out[y * cw + x] = (uint8_t)(hit * 255 / 16);
+        }
+    return true;
+}
+
+/* A character that stands in for one no font has. 0 = none. */
+static uint32_t stand_in(uint32_t cp)
+{
+    static const uint16_t pair[][2] = {
+        { 0x23bf, 0x2514 }, { 0x2705, 0x2714 }, { 0x274c, 0x2718 }, { 0x274e, 0x2718 }, { 0x2753, '?' }, { 0x2754, '?' },
+        { 0x2755, '!' }, { 0x2757, '!' }, { 0x2b50, 0x2605 },
+    };
+    for (size_t i = 0; i < sizeof(pair) / sizeof(pair[0]); i++)
+        if (pair[i][0] == cp)
+            return pair[i][1];
+    return 0;
+}
+
+/* `wide`: the character has two cells (cw is both), so it is sized by one of them and sits in the middle. */
+static void render_cell(uint32_t cp, int cw, int ch, uint8_t *out, bool bold, bool wide)
+{
+    int one = wide && cw > 1 ? cw / 2 : cw;
     bool lines = cp >= 0x2500 && cp <= 0x259f;
-    int g = F.ttf && !(lines && in_bitmap(cp)) ? lm_ttf_glyph(F.ttf, cp) : 0;
+    struct lm_ttf *t = F.ttf;
+    int g = t && !(lines && in_bitmap(cp)) ? lm_ttf_glyph(t, cp) : 0;
+    bool other = false;
     if (!g) {
         if (F.ttf && (cp == ' ' || cp == 0xa0)) {
             memset(out, 0, (size_t)cw * (size_t)ch);
             return;
         }
-        bitmap_cell(cp, cw, ch, out);
+        if (F.ttf && !in_bitmap(cp)) {
+            t = fallback_face(cp, &g);
+            other = g != 0;
+        }
+    }
+    if (!g) {
+        if (!in_bitmap(cp)) {
+            if (shape_cell(cp, cw, ch, one, out))
+                return;
+            uint32_t sub = stand_in(cp);
+            if (sub) {
+                render_cell(sub, cw, ch, out, bold, wide);
+                return;
+            }
+        }
+        if (one == cw) {
+            bitmap_cell(cp, cw, ch, out);
+            return;
+        }
+        uint8_t *narrow = malloc((size_t)one * (size_t)ch);
+        memset(out, 0, (size_t)cw * (size_t)ch);
+        if (narrow) {
+            bitmap_cell(cp, one, ch, narrow);
+            for (int y = 0; y < ch; y++)
+                memcpy(out + (size_t)y * (size_t)cw + (cw - one) / 2, narrow + (size_t)y * (size_t)one, (size_t)one);
+            free(narrow);
+        }
         return;
     }
-    struct lm_ttf *t = F.ttf;
-    double asc = lm_ttf_ascent(t), desc = -lm_ttf_descent(t);
-    double s = cw / (double)F.adv;                              /* pixels per font unit */
-    int xh = lm_ttf_xheight(t);
+    /* the line (size, baseline) is the chosen font's, whichever font the glyph is from */
+    double asc = lm_ttf_ascent(F.ttf), desc = -lm_ttf_descent(F.ttf);
+    double s = one / (double)F.adv;                             /* pixels per font unit */
+    int xh = lm_ttf_xheight(F.ttf);
     bool strike = bold;
-    if (bold && F.bold && lm_ttf_glyph(F.bold, cp)) {           /* the bold file: the same metrics, its own outlines */
-        double k = lm_ttf_units(t) / (double)lm_ttf_units(F.bold);
+    if (!other && bold && F.bold && lm_ttf_glyph(F.bold, cp)) {     /* the bold file: the same metrics, its own outlines */
+        double k = lm_ttf_units(F.ttf) / (double)lm_ttf_units(F.bold);
         t = F.bold;
         g = lm_ttf_glyph(t, cp);
         s *= k;
@@ -713,25 +820,39 @@ static void render_cell(uint32_t cp, int cw, int ch, uint8_t *out, bool bold)
     double base = floor((ch - (asc + desc) * s) / 2 + asc * s + 0.5);
     /* the x height on whole pixels too: the tops of the small letters are then sharp (all the hinting there is) */
     double sy = s;
-    if (xh > 0) {
+    if (xh > 0 && !other) {
         double px = xh * s, snapped = floor(px + 0.5);
         if (snapped >= 1 && snapped / px > 0.88 && snapped / px < 1.14)
             sy = s * snapped / px;
     }
     double sx = s, ox = 0;
-    int adv = lm_ttf_advance(t, g);
-    if (adv > 0 && adv * s > cw + 0.01)                         /* a wide glyph (not a monospace font): squeezed */
-        sx = cw / (double)adv;
-    else if (adv > 0)
-        ox = (cw - adv * s) / 2;
+    if (other) {
+        sx = sy = s * lm_ttf_units(F.ttf) / (double)lm_ttf_units(t);
+        int a = lm_ttf_advance(t, g);
+        if (a > 0 && a * sx > cw + 0.01) {                      /* too wide for its place: smaller both ways, same middle */
+            double k = cw / (a * sx);
+            base = floor(base - xh * s / 2 * (1 - k) + 0.5);
+            sx *= k;
+            sy *= k;
+        }
+        ox = a > 0 ? (cw - a * sx) / 2 : 0;
+    } else {
+        int adv = lm_ttf_advance(t, g);
+        if (adv > 0 && adv * s > cw + 0.01)                     /* a wide glyph (not a monospace font): squeezed */
+            sx = cw / (double)adv;
+        else if (adv > 0)
+            ox = (cw - adv * s) / 2;
+    }
     if (!lm_ttf_render(t, g, sx, sy, ox, base, out, cw, ch))
         return;                                                 /* no outline: an empty cell */
     if (ch < 40)
         for (int i = 0; i < cw * ch; i++)
             out[i] = F.gamma[out[i]];
     if (strike)
-        strike_twice(out, cw, ch, cw / 12 > 1 ? cw / 12 : 1);
+        strike_twice(out, cw, ch, one / 12 > 1 ? one / 12 : 1);
 }
+
+static const uint8_t *cached_cell(uint32_t cp, int cw, int ch, bool bold, bool wide);
 
 const uint8_t *lm_font_cell(uint32_t cp, int cw, int ch)
 {
@@ -740,10 +861,20 @@ const uint8_t *lm_font_cell(uint32_t cp, int cw, int ch)
 
 const uint8_t *lm_font_cell_styled(uint32_t cp, int cw, int ch, bool bold)
 {
+    return cached_cell(cp, cw, ch, bold, false);
+}
+
+const uint8_t *lm_font_cell_wide(uint32_t cp, int cw, int ch, bool bold)
+{
+    return cached_cell(cp, cw, ch, bold, true);
+}
+
+static const uint8_t *cached_cell(uint32_t cp, int cw, int ch, bool bold, bool wide)
+{
     ensure();
     bold = bold && F.ttf;                                       /* the bitmap font has one weight */
     uint32_t real = cp;
-    cp = (cp & 0x1fffffu) | (bold ? 0x40000000u : 0);
+    cp = (cp & 0x1fffffu) | (bold ? 0x40000000u : 0) | (wide ? 0x20000000u : 0);
     cw = cw < 1 ? 1 : cw > CELL_MAX_W ? CELL_MAX_W : cw;
     ch = ch < 1 ? 1 : ch > CELL_MAX_H ? CELL_MAX_H : ch;
     uint32_t h = (cp * 2654435761u) ^ ((uint32_t)cw * 40503u) ^ ((uint32_t)ch * 2246822519u);
@@ -766,7 +897,7 @@ const uint8_t *lm_font_cell_styled(uint32_t cp, int cw, int ch, bool bold)
         static uint8_t none[CELL_MAX_W * CELL_MAX_H];
         return none;
     }
-    render_cell(real, cw, ch, px, bold);
+    render_cell(real, cw, ch, px, bold, wide);
     F.slot[i] = (struct cell){ cp, (uint16_t)cw, (uint16_t)ch, px };
     F.used++;
     F.bytes += size;

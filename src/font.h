@@ -49,7 +49,9 @@ int lm_font_cells_width(const char *utf8);
  * The font should be monospace: a glyph wider than its cell is squeezed into it.
  *
  * The box-drawing and block characters (U+2500..U+259F) always come from the bitmap, because their lines must meet
- * the cell's edges exactly; so does any character the file lacks and the bitmap has.
+ * the cell's edges exactly; so does any character the file lacks and the bitmap has. What neither has is taken from
+ * other installed fonts (DejaVu, Noto Symbols, Droid Sans Fallback ...; not with "bitmap"), else drawn (the media
+ * control signs), else shown as a similar character, else as the replacement glyph.
  *
  * Not thread safe (one cache): call from one thread. lm_font_glyph() stays safe everywhere.
  */
@@ -58,6 +60,8 @@ int lm_font_cells_width(const char *utf8);
  * top. Static storage, valid until the next call. With the bitmap font a whole multiple of 8 x 16 gives only 0 and
  * 255 (the old crisp pixels). cw is clamped to 1..512, ch to 1..1024 - the picture has the clamped size. */
 const uint8_t *lm_font_cell(uint32_t codepoint, int cw, int ch);
+/* A character that takes two cells (CJK, emoji): cw is both of them; sized by one, in the middle. */
+const uint8_t *lm_font_cell_wide(uint32_t codepoint, int cw, int ch, bool bold);
 
 /* "auto", "bitmap" or a file. False when the file cannot be used (the bitmap is used then; a warning names why). */
 bool lm_font_use(const char *spec);

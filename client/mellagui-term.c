@@ -44,6 +44,7 @@
 #include "util.h"
 #include "wlc.h"
 #include "wlrail.h"
+#include "charwidth.h"
 #include "wltabs.h"
 
 #define PAD 3
@@ -73,6 +74,7 @@ static bool g_rail;
 #define DEFAULT_BG (lm_theme.background)
 enum {
     ATTR_BOLD = 1, ATTR_UNDERLINE = 2, ATTR_REVERSE = 4, ATTR_DIM = 8, ATTR_ITALIC = 16,
+    ATTR_WIDE = 32, ATTR_CONT = 64,         /* the left and the right cell of a character two cells wide */
 };
 
 struct cell {
@@ -124,6 +126,8 @@ struct term {
 };
 
 #define MAX_TABS 16
+#define KBD_DEPTH 8
+enum { MOUSE_1000 = 1, MOUSE_1002 = 2, MOUSE_1003 = 4, MOUSE_SGR = 8, MOUSE_ON = MOUSE_1000 | MOUSE_1002 | MOUSE_1003 };
 struct tab {
     struct term t;
     int pty;
@@ -133,6 +137,14 @@ struct tab {
     bool title_set;             /* title came from the program: the tab shows it, else the folder */
     char cwd[PATH_MAX];         /* the program's working folder, looked at about once a second */
     bool activity;              /* it printed something while another tab was in front */
+    /* what the program asked for or did last; here and not in struct term, which is handed over raw */
+    struct tab_modes {
+        uint8_t mouse;          /* mouse reporting (MOUSE_*) */
+        uint8_t kbd[2][KBD_DEPTH], kbd_n[2];        /* the keyboard protocol's flag stack of the main and the other screen */
+        pid_t pgrp;             /* the foreground process group that asked: the modes go when it is gone (it crashed) */
+    } m;
+    uint32_t last_cp;           /* the last character printed (CSI b repeats it) */
+    bool zwj;                   /* the last thing was a zero width joiner: the next emoji belongs to the one before */
 };
 
 struct app {
@@ -172,6 +184,7 @@ struct app {
     bool fixed_size;            /* maximized / fullscreen: the compositor decides the size, zooming only changes the grid */
     bool grown;                 /* the window was made bigger by a zoom and the new buffer is not committed yet */
     int hover;                  /* button under the pointer (-1 = none) */
+    double wheel_acc;           /* wheel travel not yet reported to a program that watches the mouse */
     struct wlrail_anim ran[2];  /* the springs of the left and the right rail */
     int follow;                 /* a text size button was pressed: the pointer follows it when the window has changed (its place in the right rail, -1 = none) */
     int follow_w;               /* the window's width when it was pressed */
@@ -194,6 +207,17 @@ struct app {
 static struct app A;
 #define CUR (A.tabs[A.cur])
 static struct tab *g_feed;      /* the tab whose output term_feed is working on (its replies and title belong to it) */
+
+static void modes_asked(struct tab *tb)         /* remember who asked, see modes_check() */
+{
+    tb->m.pgrp = tcgetpgrp(tb->pty);
+}
+
+static void modes_check(struct tab *tb)         /* a program that died without taking its modes back leaves a usable shell */
+{
+    if (tb->m.pgrp > 0 && kill(-tb->m.pgrp, 0) < 0 && errno == ESRCH)
+        memset(&tb->m, 0, sizeof(tb->m));
+}
 
 static int want_k(void)
 {
@@ -362,31 +386,100 @@ static void linefeed(struct term *t)
         t->cy++;
 }
 
+static void blank_cell(struct cell *c)          /* empties a cell, keeping its colours */
+{
+    c->cp = ' ';
+    c->attr &= (uint8_t)~(ATTR_WIDE | ATTR_CONT);
+}
+
+/* Cells x0..x1 of row y are about to change: a wide character with only one half inside goes altogether. */
+static void split_wide(struct term *t, int y, int x0, int x1)
+{
+    struct cell *row = t->scr[y].cells;
+    if (x0 > 0 && x0 < t->cols && (row[x0].attr & ATTR_CONT))
+        blank_cell(&row[x0 - 1]);
+    if (x1 >= 0 && x1 + 1 < t->cols && (row[x1].attr & ATTR_WIDE))
+        blank_cell(&row[x1 + 1]);
+}
+
+/* A character that goes with the one before it: an accent, the "show as emoji" selector, a skin tone, a joined emoji. */
+static bool join_char(struct term *t, uint32_t cp, int w)
+{
+    bool joined = g_feed && g_feed->zwj;
+    if (g_feed)
+        g_feed->zwj = cp == 0x200d;
+    struct cell *row = t->scr[t->cy].cells;
+    int x = t->wrap_pending ? t->cx : t->cx - 1;
+    if (x > 0 && (row[x].attr & ATTR_CONT))
+        x--;
+    struct cell *prev = x >= 0 ? &row[x] : NULL;
+    bool emoji = prev && (prev->attr & ATTR_WIDE) && prev->cp >= 0x2300;
+    if (w == 2 && emoji && (joined || (cp >= 0x1f3fb && cp <= 0x1f3ff)))
+        return true;
+    if (w != 0)
+        return false;
+    if (!prev)
+        return true;
+    uint32_t both = lm_compose(prev->cp, cp);
+    if (both) {
+        prev->cp = both;
+    } else if (cp == 0xfe0f && prev->cp >= 0x2100 && !(prev->attr & ATTR_WIDE) && !t->wrap_pending && x == t->cx - 1 && t->cx < t->cols) {
+        split_wide(t, t->cy, t->cx, t->cx);                    /* a symbol shown as an emoji takes two cells */
+        prev->attr |= ATTR_WIDE;
+        row[t->cx] = (struct cell){ ' ', prev->fg, prev->bg, (uint8_t)((prev->attr & ~ATTR_WIDE) | ATTR_CONT) };
+        if (t->cx == t->cols - 1)
+            t->wrap_pending = true;
+        else
+            t->cx++;
+    }
+    return true;
+}
+
 static void put_char(struct term *t, uint32_t cp)
 {
+    int w = lm_char_width(cp);
+    if (join_char(t, cp, w))
+        return;
+    if (g_feed)
+        g_feed->last_cp = cp;
     if (t->wrap_pending && t->autowrap) {
         t->scr[t->cy].wrapped = true;
         t->cx = 0;
         linefeed(t);
     }
     t->wrap_pending = false;
-    if (t->insert) {
-        struct cell *row = t->scr[t->cy].cells;
-        memmove(&row[t->cx + 1], &row[t->cx], (size_t)(t->cols - t->cx - 1) * sizeof(struct cell));
+    if (w == 2 && t->cx == t->cols - 1) {                       /* no room for both halves */
+        if (t->autowrap) {
+            split_wide(t, t->cy, t->cx, t->cx);
+            blank_cell(&t->scr[t->cy].cells[t->cx]);
+            t->scr[t->cy].wrapped = true;
+            t->cx = 0;
+            linefeed(t);
+        } else {
+            t->cx--;
+        }
     }
-    struct cell *c = &t->scr[t->cy].cells[t->cx];
-    c->cp = cp;
-    c->fg = t->fg;
-    c->bg = t->bg;
-    c->attr = t->attr;
-    if (t->cx == t->cols - 1)
+    struct cell *row = t->scr[t->cy].cells;
+    if (t->insert && t->cx + w < t->cols) {
+        split_wide(t, t->cy, t->cx, t->cx - 1);
+        memmove(&row[t->cx + w], &row[t->cx], (size_t)(t->cols - t->cx - w) * sizeof(struct cell));
+    } else {
+        split_wide(t, t->cy, t->cx, t->cx + w - 1);
+    }
+    row[t->cx] = (struct cell){ cp, t->fg, t->bg, (uint8_t)(t->attr | (w == 2 ? ATTR_WIDE : 0)) };
+    if (w == 2)
+        row[t->cx + 1] = (struct cell){ ' ', t->fg, t->bg, (uint8_t)(t->attr | ATTR_CONT) };
+    if (t->cx + w >= t->cols) {
+        t->cx = t->cols - 1;
         t->wrap_pending = true;
-    else
-        t->cx++;
+    } else {
+        t->cx += w;
+    }
 }
 
 static void erase_cells(struct term *t, int y, int x0, int x1)
 {
+    split_wide(t, y, x0, LM_MIN(x1, t->cols - 1));
     for (int x = x0; x <= x1 && x < t->cols; x++)
         t->scr[y].cells[x] = (struct cell){ ' ', t->fg, t->bg, 0 };
 }
@@ -489,6 +582,14 @@ static void set_mode(struct term *t, bool on)
                 else { switch_screen(t, false); t->cx = t->saved_cx; t->cy = t->saved_cy; }
                 break;
             case 2004: t->bracketed = on; break;
+            case 1000: case 1002: case 1003: case 1006:
+                if (g_feed) {
+                    uint8_t bit = p == 1000 ? MOUSE_1000 : p == 1002 ? MOUSE_1002 : p == 1003 ? MOUSE_1003 : MOUSE_SGR;
+                    g_feed->m.mouse = (uint8_t)(on ? g_feed->m.mouse | bit : g_feed->m.mouse & ~bit);
+                    if (on)
+                        modes_asked(g_feed);
+                }
+                break;
             }
         } else if (p == 4) {
             t->insert = on;
@@ -496,10 +597,58 @@ static void set_mode(struct term *t, bool on)
     }
 }
 
+/* The keyboard protocol of kitty (https://sw.kovidgoyal.net/kitty/keyboard-protocol/), of which we speak flag 1: keys that
+ * the old way cannot tell apart (Shift+Enter, Esc, Ctrl+letter) are sent as CSI code ; modifiers u. */
+static void kbd_command(struct term *t)
+{
+    struct tab *tb = g_feed;
+    if (!tb)
+        return;
+    int s = t->alt_active ? 1 : 0, n = tb->m.kbd_n[s];
+    int flags = (t->nparams ? t->params[0] : 0) & 1;
+    if (t->priv_marker == '?') {
+        char buf[16];
+        int l = snprintf(buf, sizeof(buf), "\033[?%du", n ? tb->m.kbd[s][n - 1] : 0);
+        pty_write(buf, (size_t)l);
+        return;
+    }
+    if (t->priv_marker == '>') {                                /* push */
+        if (n == KBD_DEPTH) {
+            memmove(&tb->m.kbd[s][0], &tb->m.kbd[s][1], KBD_DEPTH - 1);
+            n--;
+        }
+        tb->m.kbd[s][n++] = (uint8_t)flags;
+        modes_asked(tb);
+    } else if (t->priv_marker == '<') {                         /* pop */
+        n = LM_MAX(n - param(t, 0, 1), 0);
+    } else if (t->priv_marker == '=') {                         /* change the flags in force */
+        int how = param(t, 1, 1);
+        if (!n)
+            tb->m.kbd[s][n++] = 0;
+        uint8_t *f = &tb->m.kbd[s][n - 1];
+        *f = (uint8_t)(how == 2 ? *f | flags : how == 3 ? *f & ~flags : flags);
+        modes_asked(tb);
+    }
+    tb->m.kbd_n[s] = (uint8_t)n;
+}
+
 static void csi_dispatch(struct term *t, char final)
 {
     int n;
+    /* A prefix makes it another command: CSI ? u (a keyboard protocol query) is not "restore the cursor", CSI > 4 m is not a colour.
+     * Of those only the '?' forms below are ours ('c' looks at the prefix itself). */
+    if (t->priv_marker && final == 'u') {
+        kbd_command(t);
+        return;
+    }
+    if (t->priv_marker && final != 'c' && !(t->priv_marker == '?' && strchr("hlJKn", final)))
+        return;
     switch (final) {
+    case 'b':                                                   /* repeat the character before (ncurses programs use it) */
+        if (g_feed && g_feed->last_cp)
+            for (n = LM_MIN(param(t, 0, 1), t->cols * t->rows); n > 0; n--)
+                put_char(t, g_feed->last_cp);
+        break;
     case 'A': t->cy = LM_MAX(t->cy - param(t, 0, 1), t->cy >= t->top ? t->top : 0); t->wrap_pending = false; break;
     case 'B': t->cy = LM_MIN(t->cy + param(t, 0, 1), t->cy <= t->bot ? t->bot : t->rows - 1); t->wrap_pending = false; break;
     case 'C': t->cx = LM_MIN(t->cx + param(t, 0, 1), t->cols - 1); t->wrap_pending = false; break;
@@ -625,7 +774,11 @@ static void esc_dispatch(struct term *t, char c)
         else if (t->cy > 0) t->cy--;
         break;
     case 'H': t->tabs[t->cx] = true; break;
-    case 'c': term_reset(t); break;
+    case 'c':
+        term_reset(t);
+        if (g_feed)
+            memset(&g_feed->m, 0, sizeof(g_feed->m));
+        break;
     default: break;
     }
 }
@@ -636,7 +789,8 @@ static void term_feed(struct term *t, const unsigned char *buf, size_t n)
         unsigned char b = buf[i];
 
         if (t->ps == P_OSC || t->ps == P_OSC_ESC) {
-            if (b == 0x07 || (t->ps == P_OSC_ESC && b == '\\') || b == 0x9c) {
+            /* not the 8 bit ST (0x9c): the text is UTF-8, where that byte is inside letters (U+2733 is e2 9c b3) */
+            if (b == 0x07 || (t->ps == P_OSC_ESC && b == '\\')) {
                 t->osc[t->osc_len] = 0;
                 if (t->osc_len > 2 && (t->osc[0] == '0' || t->osc[0] == '2') && t->osc[1] == ';')
                     set_title(t->osc + 2);
@@ -651,7 +805,7 @@ static void term_feed(struct term *t, const unsigned char *buf, size_t n)
             continue;
         }
         if (t->ps == P_DCS) {
-            if (b == 0x1b || b == 0x9c || b == 0x07)
+            if (b == 0x1b || b == 0x07)
                 t->ps = b == 0x1b ? P_ESC_SKIP : P_GROUND;
             continue;
         }
@@ -1501,14 +1655,23 @@ static void render(void)
             struct cell blank = { ' ', DEFAULT_FG, DEFAULT_BG, 0 };
             if (!c)
                 c = &blank;
+            int span = 1;
+            uint32_t cp = c->cp;
+            if (c->attr & ATTR_WIDE) {                          /* (half a wide character, cut by a resize, shows as nothing) */
+                const struct cell *r = col + 1 < t->cols ? cell_at_view(t, row, col + 1) : NULL;
+                if (r && (r->attr & ATTR_CONT))
+                    span = 2;
+                else
+                    cp = ' ';
+            }
             uint32_t fg = c->fg, bg = c->bg;
             if (c->attr & ATTR_BOLD)
                 fg = brighten(fg);
             if (c->attr & ATTR_DIM)
                 fg = dim(fg);
             bool rev = (c->attr & ATTR_REVERSE) != 0;
-            bool cursor = t->view_off == 0 && t->cursor_visible && row == t->cy && col == t->cx;
-            if (selected(t, row, col))
+            bool cursor = t->view_off == 0 && t->cursor_visible && row == t->cy && t->cx >= col && t->cx < col + span;
+            if (selected(t, row, col) || (span == 2 && selected(t, row, col + 1)))
                 rev = !rev;
             if (cursor && A.focused)
                 rev = !rev;
@@ -1519,7 +1682,10 @@ static void render(void)
             }
             int k = A.k, cw = CELL_W * k, ch = CELL_H * k;           /* the grid is exact in the buffer's own pixels */
             int x0 = (RAILX + PAD + col * CELL_W) * k, y0 = (top_h() + PAD + row * CELL_H) * k;
-            const uint8_t *g = lm_font_cell_styled(c->cp, cw, ch, (c->attr & ATTR_BOLD) != 0);    /* drawn at the cell's own size, whatever the zoom */
+            cw *= span;
+            bool bold = (c->attr & ATTR_BOLD) != 0;
+            const uint8_t *g = span == 2 ? lm_font_cell_wide(cp, cw, ch, bold)
+                                         : lm_font_cell_styled(cp, cw, ch, bold);       /* drawn at the cell's own size, whatever the zoom */
             for (int r = 0; r < ch; r++) {
                 uint32_t *dst = px + (size_t)(y0 + r) * (size_t)A.pw + (size_t)x0;
                 const uint8_t *cov = g + (size_t)r * (size_t)cw;
@@ -1543,6 +1709,7 @@ static void render(void)
                     px[(size_t)(y0 + r) * (size_t)A.pw + (size_t)(x0 + cw - 1)] = DEFAULT_FG;
                 }
             }
+            col += span - 1;
         }
     }
 
@@ -1624,8 +1791,13 @@ static char *selection_text(void)
     for (int y = y0; y <= y1; y++) {
         int xa = y == y0 ? x0 : 0, xb = y == y1 ? x1 : t->cols - 1;
         char *line_start = p;
+        const struct cell *first = xa > 0 ? cell_at_view(t, y, xa) : NULL;
+        if (first && (first->attr & ATTR_CONT))                 /* it starts on the right half: the whole character */
+            xa--;
         for (int x = xa; x <= xb; x++) {
             const struct cell *c = cell_at_view(t, y, x);
+            if (c && (c->attr & ATTR_CONT))
+                continue;
             uint32_t cp = c ? c->cp : ' ';
             if (cp < 0x80) *p++ = (char)cp;
             else if (cp < 0x800) { *p++ = (char)(0xc0 | cp >> 6); *p++ = (char)(0x80 | (cp & 0x3f)); }
@@ -2014,6 +2186,27 @@ static void key_to_pty(uint32_t code, bool repeat)
     const char *seq = NULL;
     char buf[16];
     int mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    modes_check(CUR);
+    int screen = t->alt_active ? 1 : 0, depth = CUR->m.kbd_n[screen];
+    if (depth && (CUR->m.kbd[screen][depth - 1] & 1)) {         /* the keyboard protocol: see kbd_command() */
+        uint32_t k = code == KEY_ESC ? 27 : 0;
+        if (mod > 1 && (code == KEY_ENTER || code == KEY_KPENTER)) k = 13;
+        if (mod > 1 && code == KEY_TAB) k = 9;
+        if (mod > 1 && code == KEY_BACKSPACE) k = 127;
+        if (!k && (ctrl || alt)) {
+            uint32_t base = lm_keymap_keysym(code, 0);
+            if (base >= 32 && base < 127)
+                k = base;
+        }
+        if (k) {
+            if (mod > 1)
+                snprintf(buf, sizeof(buf), "\033[%u;%du", k, mod);
+            else
+                snprintf(buf, sizeof(buf), "\033[%uu", k);
+            send_str(buf);
+            return;
+        }
+    }
     char c1 = t->app_cursor ? 'O' : '[';
     switch (code) {
     case KEY_UP: case KEY_DOWN: case KEY_RIGHT: case KEY_LEFT: case KEY_HOME: case KEY_END: {
@@ -2395,7 +2588,7 @@ static bool tab_save(int fd, const struct tab *tb)
     for (int k = 0; k < t->sb_count; k++)                           /* oldest first */
         if (!line_save(fd, &t->sb[(t->sb_head - t->sb_count + k + 2 * SCROLLBACK) % SCROLLBACK]))
             return false;
-    return true;
+    return wr_all(fd, &tb->m, sizeof(tb->m));
 }
 
 static bool tab_load(int fd, struct tab *tb)
@@ -2424,6 +2617,10 @@ static bool tab_load(int fd, struct tab *tb)
         ok = line_load(fd, &t->alt_scr[y]) && t->alt_scr[y].cols == t->cols;
     for (int k = 0; ok && k < t->sb_count; k++)
         ok = line_load(fd, &t->sb[k]);
+    if (!ok || !rd_all(fd, &tb->m, sizeof(tb->m)))      /* at the end: a state written by an older terminal has none */
+        memset(&tb->m, 0, sizeof(tb->m));
+    for (int i = 0; i < 2; i++)
+        tb->m.kbd_n[i] = LM_MIN(tb->m.kbd_n[i], KBD_DEPTH);
     t->sb_head = t->sb_count % SCROLLBACK;
     t->scr = t->alt_active ? t->alt_scr : t->main_scr;
     t->view_off = LM_CLAMP(t->view_off, 0, t->sb_count);
@@ -2562,6 +2759,31 @@ static void cell_from_pointer(int *col, int *row)
 {
     *col = LM_CLAMP((int)(A.px - PAD - RAILX) / CELL_W, 0, CUR->t.cols - 1);
     *row = LM_CLAMP((int)(A.py - top_h() - PAD) / CELL_H, 0, CUR->t.rows - 1);
+}
+
+/* The wheel, for a program that watches the mouse (it scrolls its own view): one button 64 / 65 report per notch at the pointer's cell.
+ * Clicks and drags stay with the terminal (selection). */
+static void wheel_report(double travel)
+{
+    int col, row;
+    cell_from_pointer(&col, &row);
+    A.wheel_acc += travel;
+    while (A.wheel_acc >= 15.0 || A.wheel_acc <= -15.0) {
+        bool down = A.wheel_acc > 0;
+        A.wheel_acc -= down ? 15.0 : -15.0;
+        int b = (down ? 65 : 64) + ((A.mods & LM_MOD_ALT) ? 8 : 0);
+        char buf[32];
+        if (CUR->m.mouse & MOUSE_SGR) {
+            int l = snprintf(buf, sizeof(buf), "\033[<%d;%d;%dM", b, col + 1, row + 1);
+            pty_write(buf, (size_t)l);
+        } else {                                        /* the old form: three bytes, each 32 more than its value */
+            memcpy(buf, "\033[M", 3);
+            buf[3] = (char)(32 + b);
+            buf[4] = (char)(32 + LM_MIN(col + 1, 223));
+            buf[5] = (char)(32 + LM_MIN(row + 1, 223));
+            pty_write(buf, 6);
+        }
+    }
 }
 
 static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union lm_arg *args, void *data)
@@ -2763,10 +2985,13 @@ static void pointer_event(struct wlc *c, uint32_t id, uint32_t op, const union l
         }
         break;
     case LM_WL_POINTER_EVT_AXIS:
+        modes_check(CUR);
         if (tabbar_on() && A.py >= BAR_H && A.py < BAR_H + WLTABS_H && args[1].u == LM_POINTER_AXIS_VERTICAL) {      /* the wheel over the tabs changes tab */
             tab_cycle(args[2].f > 0 ? 1 : -1);
         } else if ((A.mods & LM_MOD_CTRL) && args[1].u == LM_POINTER_AXIS_VERTICAL) {
             set_zoom(args[2].f > 0 ? -1 : 1);
+        } else if (args[1].u == LM_POINTER_AXIS_VERTICAL && (CUR->m.mouse & MOUSE_ON) && !(A.mods & LM_MOD_SHIFT)) {
+            wheel_report(lm_fixed_to_double(args[2].f));
         } else if (args[1].u == LM_POINTER_AXIS_VERTICAL && !t->alt_active) {
             int lines = (int)(lm_fixed_to_double(args[2].f) / 15.0 * 3.0);
             if (lines == 0)

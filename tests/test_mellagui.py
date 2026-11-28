@@ -7067,6 +7067,119 @@ class TestClients(Base):
             if w['app_id'] == app_id:
                 return w['title']
 
+    def test_terminal_speaks_to_full_screen_programs(self):
+        """What Claude Code sends: a UTF-8 title, prefixed CSI commands (not colours, not "restore cursor") and mouse reporting."""
+        flag, go, out = (os.path.join(tmp, 'term-tui.' + n) for n in ('flag', 'go', 'out'))
+        for path in (flag, go, out):
+            if os.path.exists(path):
+                os.unlink(path)
+        os.mkfifo(go)
+        script = os.path.join(tmp, 'tui.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nstty raw -echo\n'
+                    "printf '\\033]0;\\342\\234\\263 Title\\007\\033[?25l'\n"
+                    'echo 1 > "%(flag)s"; read l < "%(go)s"\n'
+                    # underlined if CSI > 4 ; 2 m is taken for a colour; the cursor jumps if CSI ? u / CSI < u are taken for CSI u
+                    "printf '\\033[3;1H\\033[>4;2m                    \\033[5;5H\\0337\\033[10;10H\\033[?u\\033[<u\\033[>1u\\033[6n'\n"
+                    'dd bs=1 count=13 2>/dev/null > "%(out)s"\n'
+                    "printf '\\033[?1049h\\033[?1000h\\033[?1006h'\n"
+                    'echo 2 > "%(flag)s"\n'
+                    'dd bs=1 count=18 2>/dev/null >> "%(out)s"\n' % {'flag': flag, 'go': go, 'out': out})
+        os.chmod(script, 0o755)
+        p = self.spawn('mellagui-term', args=['-e', script])
+        self.assertIsNotNone(wait_for_window('mellagui.term'))
+
+        def wait_flag(v):
+            for _ in range(60):
+                if os.path.exists(flag) and open(flag).read().strip() == v:
+                    return
+                time.sleep(0.05)
+            self.fail('the program did not get to step ' + v)
+
+        wait_flag('1')
+        time.sleep(0.4)
+        self.assertEqual(self.window_title_of('mellagui.term'), '✳ Title')
+        win = self.term_window()
+        ctl.abs(900, 590)
+
+        def picture():
+            ppm = ctl.dump(os.path.join(tmp, 'tui.ppm'))
+            return [ppm.px(x, y) for y in range(win['y'], win['y'] + 120) for x in range(win['x'] + 60, win['x'] + 260)]
+
+        before = picture()
+        with open(go, 'w') as f:
+            f.write('\n')
+        for _ in range(60):
+            if os.path.exists(out) and os.path.getsize(out) >= 13:
+                break
+            time.sleep(0.05)
+        self.assertEqual(open(out, 'rb').read(), b'\x1b[?0u\x1b[10;10R')          # the query is answered, the cursor stayed
+        wait_flag('2')
+        time.sleep(0.3)
+        self.assertEqual(picture(), before, 'the blanks must not be underlined')
+        ctl.abs(win['x'] + win['w'] // 2, win['y'] + win['h'] // 2)
+        ctl.cmd('axis v -15 -1')
+        ctl.cmd('axis v 15 1')
+        p.wait(timeout=5)
+        got = open(out, 'rb').read()[13:]
+        self.assertRegex(got, rb'^\x1b\[<64;\d\d;\d\dM\x1b\[<65;')
+
+    def test_terminal_knows_wide_characters_repeat_and_the_keyboard_protocol(self):
+        flag, out = (os.path.join(tmp, 'term-kbd.' + n) for n in ('flag', 'out'))
+        for path in (flag, out):
+            if os.path.exists(path):
+                os.unlink(path)
+        script = os.path.join(tmp, 'kbd.sh')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nstty raw -echo\n'
+                    # where the cursor is after: two CJK letters, a + combining tilde, a sign + "as emoji", x repeated 5 times
+                    "printf '\\033[1;1H\\346\\227\\245\\346\\234\\254\\033[6n\\033[2;1Ha\\314\\203\\033[6n'\n"
+                    "printf '\\033[3;1H\\342\\232\\240\\357\\270\\217\\033[6n\\033[4;1Hx\\033[5b\\033[6n'\n"
+                    "printf '\\033[?u\\033[>1u\\033[?u'\n"
+                    'dd bs=1 count=34 2>/dev/null > "%(out)s"\n'
+                    'echo 1 > "%(flag)s"\n'
+                    'dd bs=1 count=20 2>/dev/null >> "%(out)s"\n'
+                    "printf '\\033[<u'\n"
+                    'echo 2 > "%(flag)s"\n'
+                    'dd bs=1 count=2 2>/dev/null >> "%(out)s"\n'
+                    # a program of its own process group that asks for the protocol and dies without giving it back
+                    'set -m\n'
+                    "sh -c \"printf '\\033[>1u'; sleep 0.5\"\n"
+                    'echo 3 > "%(flag)s"\n'
+                    'dd bs=1 count=1 2>/dev/null >> "%(out)s"\n' % {'flag': flag, 'out': out})
+        os.chmod(script, 0o755)
+        p = self.spawn('mellagui-term', args=['-e', script])
+        self.assertIsNotNone(wait_for_window('mellagui.term'))
+
+        def wait_flag(v):
+            for _ in range(80):
+                if os.path.exists(flag) and open(flag).read().strip() == v:
+                    time.sleep(0.2)
+                    return
+                time.sleep(0.05)
+            self.fail('the program did not get to step ' + v)
+
+        def chord(mod, code):
+            ctl.key(mod, True)
+            ctl.tap(code)
+            ctl.key(mod, False)
+
+        ctl.abs(900, 590)
+        wait_flag('1')
+        chord(KEY_LEFTSHIFT, KEY_ENTER)
+        ctl.tap(1)                                                               # Esc
+        chord(KEY_LEFTCTRL, 46)                                                  # Ctrl+C
+        ctl.tap(KEY_ENTER)
+        wait_flag('2')
+        chord(KEY_LEFTSHIFT, KEY_ENTER)
+        chord(KEY_LEFTCTRL, 46)
+        wait_flag('3')
+        chord(KEY_LEFTCTRL, 46)
+        p.wait(timeout=5)
+        self.assertEqual(open(out, 'rb').read(),
+                         b'\x1b[1;5R\x1b[2;2R\x1b[3;3R\x1b[4;7R\x1b[?0u\x1b[?1u'
+                         b'\x1b[13;2u\x1b[27u\x1b[99;5u\r' b'\r\x03' b'\x03')
+
     def test_terminal_e_with_a_missing_program_says_so_and_waits(self):
         p = self.spawn('mellagui-term', args=['-e', '/nonexistent/prog'])
         self.assertIsNotNone(wait_for_window('mellagui.term'))

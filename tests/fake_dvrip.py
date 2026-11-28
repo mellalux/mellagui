@@ -6,6 +6,8 @@
 DIR holds main.h264 and sub.h264 (Annex B, an access unit delimiter in front of every frame, no B frames); they are sent over and over, ten
 frames a second, cut into messages anywhere. Prints "port N" when it listens; every login, claim and start is a line on stdout. A file
 DIR/drop, when it appears, is removed and the stream's connection is closed (a camera that goes away for a moment).
+DIR/alarm ("EVENT Start|Stop"), when it appears, is removed and told to whoever asked for alarms. DIR/files.json lists the recordings of the
+card; each is 30 pictures of the small stream with six seconds of sound, sent slowly while DIR/slow is there.
 """
 import hashlib
 import json
@@ -110,7 +112,40 @@ class Camera:
         except OSError:
             pass
 
+    def alarms(self, sock, session, lock):
+        path = os.path.join(self.folder, "alarm")
+        try:
+            while True:
+                time.sleep(0.05)
+                if os.path.exists(path):
+                    event, status = open(path).read().split()
+                    os.unlink(path)
+                    body = {"Name": "AlarmInfo", "SessionID": session, "AlarmInfo": {"Channel": 0, "Event": event, "Status": status, "StartTime": "2026-01-01 00:00:00"}}
+                    send_msg(sock, 1504, json.dumps(body).encode() + b"\n\x00", lock=lock)
+                    say("alarm", event, status)
+        except OSError:
+            pass
+
+    def playback(self, sock):
+        units = frames(os.path.join(self.folder, "sub.h264"))
+        w, h = (int(v) for v in open(os.path.join(self.folder, "sub.size")).read().split())
+        data = b""
+        for n in range(30):
+            key, unit = units[n % len(units)]
+            head = struct.pack("<4sBBBBII", b"\x00\x00\x01\xfc", 2, 10, w // 8, h // 8, 0, len(unit)) if key else struct.pack("<4sI", b"\x00\x00\x01\xfd", len(unit))
+            data += head + unit + struct.pack("<4sBBH", b"\x00\x00\x01\xfa", 14, 2, 1600) + TONE + TONE      # (6 s of sound: not the rate the stream claims)
+        try:
+            for at in range(0, len(data), 900):
+                send_msg(sock, 1426, data[at:at + 900])
+                while os.path.exists(os.path.join(self.folder, "slow")):
+                    send_msg(sock, 1426, b"\x00")
+                    time.sleep(0.2)
+            send_msg(sock, 1426, b"")
+        except OSError:
+            pass
+
     def client(self, s):
+        lock = threading.Lock()
         try:
             while True:
                 msg, body = recv_msg(s)
@@ -148,9 +183,35 @@ class Camera:
                     self.config[name] = body[name]
                     say("set", name, json.dumps(body[name], sort_keys=True))
                     send_msg(s, 1041, b'{"Ret":100}\n\x00')
+                elif msg == 1500:
+                    say("subscribe")
+                    send_msg(s, 1501, b'{"Ret":100}\n\x00', lock=lock)
+                    threading.Thread(target=self.alarms, args=(s, body["SessionID"], lock), daemon=True).start()
+                elif msg == 1440:
+                    q = body["OPFileQuery"]
+                    say("files", q["BeginTime"].replace(" ", "_"), q["EndTime"].replace(" ", "_"))
+                    path = os.path.join(self.folder, "files.json")
+                    found = [f for f in (json.load(open(path)) if os.path.exists(path) else []) if q["BeginTime"] <= f["BeginTime"] <= q["EndTime"]]
+                    answer = {"Ret": 100, "OPFileQuery": found[:64]} if found else {"Ret": 119}
+                    send_msg(s, 1441, json.dumps(answer).encode() + b"\n\x00")
+                elif msg == 1424:
+                    name = body["OPPlayBack"]["Parameter"]["FileName"]
+                    say("claim play", name)
+                    self.claimed[body["SessionID"], "play"] = s
+                    send_msg(s, 1425, b'{"Ret":100}\n\x00')
+                    while s.recv(4096):
+                        pass
+                    return
+                elif msg == 1420:
+                    action = body["OPPlayBack"]["Action"]
+                    say("playback", action)
+                    send_msg(s, 1421, b'{"Ret":100}\n\x00')
+                    who = body["SessionID"], "play"
+                    if action == "DownloadStart" and who in self.claimed:
+                        threading.Thread(target=self.playback, args=(self.claimed.pop(who),), daemon=True).start()
                 elif msg == 1006:
                     say("keepalive")
-                    send_msg(s, 1007, b'{"Ret":100}\n\x00')
+                    send_msg(s, 1007, b'{"Ret":100}\n\x00', lock=lock)
         except (OSError, ValueError):
             pass
         finally:

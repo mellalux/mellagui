@@ -33402,14 +33402,15 @@ class TestCctv(Base):
         os.chmod(player, 0o700)
         p = subprocess.Popen([self.EXE, '--size', '700x470'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_CCTV_CONF=path, MELLAGUI_CCTV_DUMP=self.dump, MELLAGUI_CCTV_DIR=self.saved,
-                                      MELLAGUI_CCTV_PLAYER=player, MELLAGUI_CCTV_FILES='none'))
+                                      MELLAGUI_CCTV_PLAYER=player, MELLAGUI_CCTV_FILES='none', MELLAGUI_CCTV_NO_WATCH='1', XDG_CACHE_HOME=os.path.join(self.dir, 'cache'),
+                                      MELLAGUI_CCTV_VIEWER=self.script('viewer')))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         self.win = wait_for_window('mellagui.cctv')
         self.assertIsNotNone(self.win, 'the window did not appear')
         return p
 
     def state(self):
-        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}, 'rec': {}, 'ctl': {}, 'pad': {}}
+        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}, 'rec': {}, 'ctl': {}, 'pad': {}, 'want': {}, 'row': {}, 'abtn': {}}
         try:
             with open(self.dump) as f:
                 lines = f.read().splitlines()
@@ -33419,8 +33420,12 @@ class TestCctv(Base):
             f = l.split()
             if f[0] == 'state':
                 st.update(x.split('=') for x in f[1:])
-            elif f[0] in ('cam', 'rec', 'ctl'):
+            elif f[0] in ('cam', 'rec', 'ctl', 'want'):
                 st[f[0]][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
+            elif f[0] == 'arch':
+                st['arch'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] == 'row':
+                st['row'][int(f[1])] = (f[2], f[3], int(f[4]), int(f[5]))
             elif f[0] == 'sound':
                 st['sound'] = f[1]
             elif f[0] == 'note':
@@ -33704,6 +33709,153 @@ class TestCctv(Base):
         ctl.tap(49)
         self.wait(lambda s: s['note'] == 'Show one camera alone to set it up', 'told')
         self.assertEqual(len(self.lines(log, 'set')), 2)
+
+    def script(self, name):
+        """A program that writes each start's arguments as a line of DIR/NAME.log."""
+        path = os.path.join(self.dir, name)
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\nIFS="|"\necho "$*" >> %s.log\n' % path)
+        os.chmod(path, 0o700)
+        return path
+
+    def logged(self, name, n, timeout=8.0):
+        path = os.path.join(self.dir, name + '.log')
+        end = time.time() + timeout
+        while True:
+            got = open(path).read().splitlines() if os.path.exists(path) else []
+            if len(got) >= n or time.time() > end:
+                return got
+            time.sleep(0.05)
+
+    def card(self):
+        """Today's recordings of the stand-in camera's card: 70, so that the list comes in two pages; every seventh with movement."""
+        day = time.strftime('%Y-%m-%d')
+        files = []
+        for i in range(70):
+            kind = 'M' if i % 7 == 3 else 'R'
+            b, e = '%02d:%02d:00' % (i // 60, i % 60), '%02d:%02d:03' % (i // 60, i % 60)
+            files.append({'BeginTime': day + ' ' + b, 'EndTime': day + ' ' + e, 'FileName': '/idea0/%s/%s-%s[%s][@%x][0].h264' % (day, b, e, kind, i), 'FileLength': '0x00000020'})
+        with open(os.path.join(self.dir, 'files.json'), 'w') as f:
+            json.dump(files, f)
+        return day
+
+    def test_the_recordings_of_the_card_are_listed_watched_and_saved(self):
+        day = self.card()
+        p, log, st = self.alone()
+        ctl.tap(30)                                                         # A
+        st = self.wait(lambda s: s['arch']['loading'] == '0' and s['arch']['n'] == '70', 'listed')
+        self.assertEqual((st['arch']['day'], st['arch']['shown'], st['cam'][0]['state']), (day, '70', 'idle'))
+        self.assertEqual(st['row'][0][:2], ('01:09:00', 'R'))               # the newest first
+        self.assertEqual(len(self.lines(log, 'files')), 2)
+        ctl.tap(33)                                                         # F: movement only
+        st = self.wait(lambda s: s['arch']['shown'] == '10', 'movement only')
+        self.assertTrue(all(r[1] == 'M' for r in st['row'].values()), st['row'])
+        ctl.tap(108)                                                        # Down
+        st = self.wait(lambda s: s['arch']['sel'] == '1', 'second')
+        when = st['row'][1][0]
+        ctl.tap(28)                                                         # Enter: fetched and shown
+        seen = self.logged('viewer', 1)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(os.path.basename(seen[0]), 'Yard-%s-%s.mp4' % (day.replace('-', ''), when.replace(':', '')))
+        streams, duration = self.probe(seen[0])
+        self.assertEqual([s[0] for s in streams], ['h264', 'aac'])
+        self.assertTrue(5.7 < duration < 6.4, duration)
+        r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'stream=duration', '-of', 'csv=p=0', seen[0]], capture_output=True, text=True, timeout=20)
+        video, sound = (float(x) for x in r.stdout.split())
+        self.assertLess(abs(video - sound), 0.4, (video, sound))           # the pictures go as long as the sound
+        r = subprocess.run(['ffmpeg', '-v', 'error', '-i', seen[0], '-fps_mode', 'passthrough', '-enc_time_base', 'demux', '-f', 'null', '-'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stderr, '')
+        self.assertEqual(os.listdir(os.path.dirname(seen[0])), [os.path.basename(seen[0])])   # no parts left behind
+        ctl.tap(28)                                                         # again: no second fetch
+        self.assertEqual(len(self.logged('viewer', 2)), 2)
+        self.assertEqual(len(self.lines(log, 'claim play')), 1)
+        self.assertIn('[M]', self.lines(log, 'claim play')[0])
+        ctl.tap(31)                                                         # S: into the folder
+        self.wait(lambda s: s['arch']['fetch'] == '0' and s['note'].startswith('Saved '), 'saved')
+        self.assertEqual(len(self.files('.mp4')), 1)
+        ctl.tap(31)
+        self.wait(lambda s: len(self.files('.mp4')) == 2, 'nothing is written over')
+        open(os.path.join(self.dir, 'slow'), 'w').close()
+        ctl.tap(108)
+        ctl.tap(31)
+        self.wait(lambda s: s['arch']['fetch'] == '1', 'fetching')
+        time.sleep(0.4)
+        ctl.tap(1)                                                          # Esc: stops the fetch
+        self.wait(lambda s: s['arch']['fetch'] == '0' and s['note'] == 'Stopped', 'stopped')
+        self.assertEqual(sorted(os.listdir(self.saved)), sorted(os.path.basename(f) for f in self.files('.mp4')))
+        os.unlink(os.path.join(self.dir, 'slow'))
+        ctl.tap(105)                                                        # Left: yesterday has nothing
+        self.wait(lambda s: s['arch']['loading'] == '0' and s['arch']['day'] != day and s['arch']['n'] == '0', 'yesterday')
+        ctl.tap(106)
+        self.wait(lambda s: s['arch']['day'] == day and s['arch']['n'] == '70', 'today again')
+        ctl.tap(106)                                                        # there is no tomorrow
+        time.sleep(0.3)
+        self.assertEqual(self.state()['arch']['day'], day)
+        self.assertEqual(self.lines(log, 'ptz'), [])                        # the arrows moved no camera
+        ctl.tap(1)
+        self.wait(lambda s: 'arch' not in s and s['view'] == '0' and s['cam'][0]['state'] == 'live', 'live again')
+
+    def test_the_alarm_menu_saves_what_is_wanted(self):
+        p, log, st = self.alone()
+        wants = os.path.join(self.dir, 'cctv-alarms.conf')
+        self.choose(38, 'Record the movement')                              # L
+        self.wait(lambda s: s['want'][0] == {'notify': '0', 'record': '1'}, 'record')
+        labels = self.choose(38, 'Show a notification')
+        self.assertIn('* Record the movement', labels)
+        self.wait(lambda s: s['want'][0] == {'notify': '1', 'record': '1'}, 'both')
+        with open(wants) as f:
+            self.assertIn('Yard notify record\n', f.read())
+        self.assertEqual(os.stat(wants).st_mode & 0o777, 0o600)
+        self.choose(38, '* Record the movement')
+        self.choose(38, '* Show a notification')
+        self.wait(lambda s: s['want'][0] == {'notify': '0', 'record': '0'}, 'neither')
+        with open(wants) as f:
+            self.assertNotIn('Yard', f.read())
+        self.assertEqual(self.lines(log, 'subscribe'), [])                  # (the watcher was not started in this test)
+
+    def test_the_watcher_tells_and_records(self):
+        port, log = self.camera('')
+        bad, badlog = self.camera('sala')
+        conf, wants, saved = (os.path.join(self.dir, n) for n in ('cctv.conf', 'cctv-alarms.conf', 'saved'))
+        self.saved = saved
+        with open(conf, 'w') as f:
+            f.write('Yard 127.0.0.1:%d admin -\nShed 127.0.0.1:%d admin wrong\n' % (port, bad))
+        env = dict(os.environ, MELLAGUI_CCTV_CONF=conf, MELLAGUI_CCTV_DIR=saved, MELLAGUI_CCTV_NOTIFY=self.script('notify'), MELLAGUI_CCTV_AFTER_MS='1500')
+        env.pop('WAYLAND_DISPLAY', None)
+        self.assertEqual(subprocess.run([self.EXE, '--watch'], env=env, timeout=10).returncode, 0)   # nothing wanted: ends at once
+        self.assertEqual(self.lines(log, 'login') + self.lines(badlog, 'login'), [])
+        with open(wants, 'w') as f:
+            f.write('Yard notify record\nShed notify\n')
+        p = subprocess.Popen([self.EXE, '--watch'], env=env)
+        self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
+        got = self.logged('notify', 1)
+        self.assertEqual(got, ['Camera Shed is not watched|wrong password (code 203)'])
+        end = time.time() + 5
+        while time.time() < end and not self.lines(log, 'subscribe'):
+            time.sleep(0.05)
+        self.assertEqual(len(self.lines(log, 'subscribe')), 1)
+        self.assertEqual(subprocess.run([self.EXE, '--watch'], env=env, timeout=10).returncode, 1)   # one is enough
+        with open(os.path.join(self.dir, 'alarm'), 'w') as f:
+            f.write('VideoMotion Start')
+        got = self.logged('notify', 2)
+        self.assertEqual(got[1:], ['Camera Yard|Something is moving - recording'])
+        time.sleep(0.8)
+        with open(os.path.join(self.dir, 'alarm'), 'w') as f:
+            f.write('VideoMotion Start')                                    # again within a minute: no second card, the same file
+        time.sleep(4.5)
+        self.assertEqual(len(self.logged('notify', 3, 0.2)), 2)
+        files = self.files('.mp4')
+        self.assertEqual(len(files), 1)
+        streams, duration = self.probe(files[0])
+        self.assertEqual(streams[0], ('h264', 640, 480))
+        self.assertTrue(1.0 < duration < 4.5, duration)
+        with open(os.path.join(self.dir, 'alarm'), 'w') as f:
+            f.write('StorageFailure Start')
+        self.assertEqual(self.logged('notify', 3)[2], 'Camera Yard|Alarm: StorageFailure')
+        self.assertEqual(len(self.lines(badlog, 'login')), 1)               # the refused camera was asked once
+        with open(wants, 'w') as f:
+            f.write('')
+        self.assertEqual(p.wait(timeout=10), 0)                             # nothing wanted any more
 
     def test_selftest_and_list_do_not_show_passwords(self):
         self.assertEqual(subprocess.run([self.EXE, '--selftest'], capture_output=True, timeout=20).returncode, 0)

@@ -1,7 +1,7 @@
 /* mellagui-cctv - live pictures of the network cameras in the house (XiongMai cameras, the ones the iCSee app talks to), a window of the wlwin family.
  *
  *   mellagui-cctv [--config FILE] [--size WxH]
- *   mellagui-cctv --list | --selftest
+ *   mellagui-cctv --list | --selftest | --watch
  *
  * The cameras are named in $XDG_CONFIG_HOME/mellagui/cctv.conf ($MELLAGUI_CCTV_CONF), one a line, at most eight:
  *
@@ -17,9 +17,13 @@
  * samples, or "none"). O opens the folder.
  * A camera shown alone can be steered: the arrow keys or the pad on its picture move it while they are held (cctvctl.c), P remembers up to four views
  * and goes back to them, N chooses the night picture and the lamp.
+ * L chooses what happens when it raises an alarm (a card, a recording): that is done by `mellagui-cctv --watch`, a process without a window that goes on
+ * when this one is closed (cctvalarm.c). A opens the recordings on its memory card, a day at a time: Enter fetches one and shows it in mellagui-view
+ * ($MELLAGUI_CCTV_VIEWER), S saves it into the folder (cctvarch.c).
  *
  * Every camera has a thread of its own: it keeps the connection, feeds ffmpeg and takes its pictures; the window only shows the newest one.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -37,6 +41,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "cctvalarm.h"
+#include "cctvarch.h"
 #include "cctvctl.h"
 #include "cctvrec.h"
 #include "dvrip.h"
@@ -51,6 +57,7 @@
 #include "wlc.h"
 #include "wlcard.h"
 #include "wlrail.h"
+#include "wlsbar.h"
 #include "wlwin.h"
 
 #define MAX_CAMS 8
@@ -130,15 +137,30 @@ struct app {
     struct cam cam[MAX_CAMS];
     int n;
     int single;                             /* the camera shown alone, -1 = all */
-    int hover, rhover;                      /* the tile and the rail button under the pointer */
+    int hover, rhover, shover;              /* the tile, the button of the left and of the right rail under the pointer */
     double px, py;
-    struct wlrail_anim ran;
+    struct wlrail_anim ran, san;
     const char *conf;
     bool sound;                             /* M */
     int moving, move_dir;                   /* the camera that is being moved (-1 = none) and which way */
     uint32_t move_key;                      /* the key held for it, 0 = the pad is */
     int menu, menu_cam;                     /* the menu that is open: MENU_* */
     int menu_do[16];                        /* what its entries do */
+    struct cctv_want want[MAX_CAMS];        /* what to do on an alarm */
+    char wants_path[PATH_MAX], cache[400];
+    /* the card's recordings of a day */
+    int arch;                               /* the camera whose recordings are shown, -1 = none */
+    struct tm day;
+    struct cctv_arch *list, *fetch;
+    struct dv_file *files;
+    int nfiles, *shown, nshown;             /* shown: the files in the list, newest first (movement only: those) */
+    int sel, top, bar_grab;
+    bool motion_only, loading, bar_held, fetch_open;
+    unsigned list_seen, fetch_seen;
+    int fetch_pct;
+    char fetch_what[16], arch_msg[240];
+    int64_t click_ms;
+    int click_row;
     char note[600];                         /* a word for the status line */
     int64_t note_until;
     char dir[400];                          /* where pictures and recordings go */
@@ -708,7 +730,7 @@ static void set_wants(struct app *a)
 {
     for (int i = 0; i < a->n; i++) {
         struct cam *c = &a->cam[i];
-        int want = a->single < 0 ? WANT_SUB : a->single == i ? WANT_MAIN : WANT_NONE;
+        int want = a->arch >= 0 ? WANT_NONE : a->single < 0 ? WANT_SUB : a->single == i ? WANT_MAIN : WANT_NONE;
         pthread_mutex_lock(&c->lock);
         c->listen = a->sound && a->single == i;
         bool changed = c->want != want;
@@ -737,6 +759,8 @@ static void reconnect(struct app *a, int i)
 /* ---- the window ----------------------------------------------------------------------------------------------------------- */
 
 /* ---- pictures, recordings, the folder ---- */
+
+static void centred(struct wlwin *w, struct lm_rect r, const char *text, uint32_t color);
 
 static void note(struct app *a, const char *text)
 {
@@ -834,38 +858,42 @@ static void collect_jobs(struct app *a)
     }
 }
 
-/* O: the folder in the file manager. */
-static void open_folder(struct app *a)
+/* Starts a program of ours (or the one $env names; "none" = nothing) with one argument; nobody has to wait for it. */
+static bool spawn_beside(const char *env, const char *name, const char *arg)
 {
-    const char *own = getenv("MELLAGUI_CCTV_FILES");
+    const char *own = env ? getenv(env) : NULL;
     if (own && !strcmp(own, "none"))
-        return;
-    static char prog[PATH_MAX + 32];
+        return false;
+    char prog[PATH_MAX + 32];
     if (own && *own) {
         snprintf(prog, sizeof(prog), "%s", own);
     } else {
         ssize_t n = readlink("/proc/self/exe", prog, PATH_MAX - 1);
         char *slash = n > 0 ? (prog[n] = 0, strrchr(prog, '/')) : NULL;
-        if (slash)
-            strcpy(slash + 1, "mellagui-files");
-        else
-            strcpy(prog, "mellagui-files");
-    }
-    if (mkdir(a->dir, 0700) < 0 && errno != EEXIST) {
-        note(a, "The folder cannot be made");
-        return;
+        strcpy(slash ? slash + 1 : prog, name);
     }
     pid_t pid = fork();
     if (pid == 0) {
-        if (fork() == 0) {                  /* nobody has to wait for it */
+        if (fork() == 0) {
             setsid();
-            execlp(prog, prog, a->dir, (char *)NULL);
+            execlp(prog, prog, arg, (char *)NULL);
             _exit(127);
         }
         _exit(0);
     }
     if (pid > 0)
         waitpid(pid, NULL, 0);
+    return pid > 0;
+}
+
+/* O: the folder in the file manager. */
+static void open_folder(struct app *a)
+{
+    if (mkdir(a->dir, 0700) < 0 && errno != EEXIST) {
+        note(a, "The folder cannot be made");
+        return;
+    }
+    spawn_beside("MELLAGUI_CCTV_FILES", "mellagui-files", a->dir);
 }
 
 static void toggle_sound(struct app *a)
@@ -882,10 +910,12 @@ static void toggle_sound(struct app *a)
 /* ---- steering ---- */
 
 static const char *const DIRECTION[4] = { "DirectionUp", "DirectionDown", "DirectionLeft", "DirectionRight" };
-enum { MENU_NONE, MENU_NIGHT, MENU_POSITIONS };
+enum { MENU_NONE, MENU_NIGHT, MENU_POSITIONS, MENU_ALARM };
 #define DO_LAMP 100                         /* menu_do: a night value, DO_LAMP + a lamp mode, DO_GO / DO_SAVE + a position */
 #define DO_GO 200
 #define DO_SAVE 300
+#define DO_NOTIFY 400
+#define DO_RECORD 401
 #define POSITIONS 4
 static const struct { const char *mode, *text; } LAMP[] = { { "Close", "Off" }, { "KeepOpen", "Always on" }, { "Auto", "Automatic" } };
 
@@ -1000,16 +1030,484 @@ static void position_menu(struct app *a)
     a->menu_cam = a->single;
 }
 
+/* ---- alarms ---- */
+
+static void watcher_start(const struct app *a)
+{
+    if (getenv("MELLAGUI_CCTV_NO_WATCH"))
+        return;
+    bool any = false;
+    for (int i = 0; i < a->n; i++)
+        any |= a->want[i].notify || a->want[i].record;
+    if (!any)
+        return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            setsid();
+            int nul = open("/dev/null", O_RDWR);
+            dup2(nul, 0);
+            dup2(nul, 1);
+            execl("/proc/self/exe", "mellagui-cctv", "--config", a->conf, "--watch", (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0)
+        waitpid(pid, NULL, 0);
+}
+
+static void alarm_menu(struct app *a)
+{
+    if (a->single < 0) {
+        note(a, "Show one camera alone to set its alarms");
+        return;
+    }
+    const struct cctv_want *wt = &a->want[a->single];
+    /* (a camera that shows no picture is not given to the watcher: its login is not known to be good) */
+    if (!wt->notify && !wt->record && !is_live(&a->cam[a->single]))
+        return;
+    move_stop(a);
+    char menu[300];
+    snprintf(menu, sizeof(menu), "~When this camera raises an alarm\n%sShow a notification\n%sRecord the movement", wt->notify ? "* " : "   ", wt->record ? "* " : "   ");
+    a->menu_do[0] = -1;
+    a->menu_do[1] = DO_NOTIFY;
+    a->menu_do[2] = DO_RECORD;
+    a->menu = wlwin_menu(&a->win, menu) ? MENU_ALARM : MENU_NONE;
+    a->menu_cam = a->single;
+}
+
+static void change_want(struct app *a, int i, int what)
+{
+    struct cctv_want old = a->want[i];
+    if (what == DO_NOTIFY)
+        a->want[i].notify = !old.notify;
+    else
+        a->want[i].record = !old.record;
+    const char *names[MAX_CAMS];
+    for (int k = 0; k < a->n; k++)
+        names[k] = a->cam[k].name;
+    if (!cctv_wants_save(a->wants_path, names, a->want, a->n)) {
+        a->want[i] = old;
+        note(a, "The choice cannot be saved");
+        return;
+    }
+    watcher_start(a);                       /* (one that runs reads the file anew by itself) */
+    note(a, a->want[i].notify || a->want[i].record ? "The camera is watched, also when this window is closed" : "The camera is not watched any more");
+}
+
+/* ---- the recordings on the card ---- */
+
+#define ROW_H 22
+#define HEAD_H 30
+#define BAR_H 40
+
+enum { AB_PREV, AB_NEXT, AB_MOTION, AB_OPEN, AB_SAVE, AB_N };
+
+static char file_kind(const struct dv_file *f)
+{
+    const char *b = strchr(f->name, '[');
+    return b ? b[1] : '?';
+}
+
+static const char *kind_text(char k)
+{
+    return k == 'R' ? "Regular" : k == 'M' ? "Movement" : k == 'A' ? "Alarm" : k == 'H' ? "By hand" : "Other";
+}
+
+static void day_string(const struct tm *t, char *out, size_t cap) { strftime(out, cap, "%Y-%m-%d", t); }
+
+static void filter_files(struct app *a)
+{
+    free(a->shown);
+    a->shown = a->nfiles ? malloc((size_t)a->nfiles * sizeof(int)) : NULL;
+    a->nshown = 0;
+    for (int i = a->nfiles - 1; a->shown && i >= 0; i--) {
+        char k = file_kind(&a->files[i]);
+        if (!a->motion_only || k == 'M' || k == 'A')
+            a->shown[a->nshown++] = i;
+    }
+    a->sel = LM_CLAMP(a->sel, 0, LM_MAX(a->nshown - 1, 0));
+    a->top = 0;
+    a->win.redraw = true;
+}
+
+static void load_day(struct app *a)
+{
+    cctv_arch_free(a->list);
+    free(a->files);
+    a->files = NULL;
+    a->nfiles = a->sel = a->top = 0;
+    filter_files(a);
+    struct cam *c = &a->cam[a->arch];
+    struct cctv_target t = { .name = c->name, .host = c->host, .port = c->port, .user = c->user, .password = c->pass };
+    char day[16];
+    day_string(&a->day, day, sizeof(day));
+    a->list = cctv_list_start(&t, day);
+    a->list_seen = 0;
+    a->loading = a->list != NULL;
+    snprintf(a->arch_msg, sizeof(a->arch_msg), "Asking the camera...");
+}
+
+static void set_wants(struct app *a);
+
+static void arch_close(struct app *a)
+{
+    if (a->arch < 0)
+        return;
+    cctv_arch_free(a->list);
+    cctv_arch_free(a->fetch);
+    a->list = a->fetch = NULL;
+    free(a->files);
+    free(a->shown);
+    a->files = NULL;
+    a->shown = NULL;
+    a->nfiles = a->nshown = 0;
+    a->arch = -1;
+    a->win.redraw = true;
+    set_wants(a);
+}
+
+static void arch_open(struct app *a)
+{
+    if (a->arch >= 0) {
+        arch_close(a);
+        return;
+    }
+    if (a->single < 0) {
+        note(a, "Show one camera alone to see its recordings");
+        return;
+    }
+    if (!is_live(&a->cam[a->single]))
+        return;
+    move_stop(a);
+    a->arch = a->single;
+    time_t now = time(NULL);
+    localtime_r(&now, &a->day);
+    a->motion_only = false;
+    a->note[0] = 0;
+    set_wants(a);                           /* the live picture rests meanwhile */
+    load_day(a);
+}
+
+static void other_day(struct app *a, int by)
+{
+    struct tm t = a->day, today;
+    t.tm_hour = 12;
+    t.tm_mday += by;
+    t.tm_isdst = -1;
+    time_t when = mktime(&t), now = time(NULL);
+    localtime_r(&now, &today);
+    char d1[16], d2[16];
+    localtime_r(&when, &t);
+    day_string(&t, d1, sizeof(d1));
+    day_string(&today, d2, sizeof(d2));
+    if (strcmp(d1, d2) > 0)
+        return;                             /* there is nothing from tomorrow */
+    a->day = t;
+    load_day(a);
+}
+
+/* NAME-YYYYMMDD-HHMMSS of a recording, fit for a file name. */
+static void file_base(const struct cam *c, const struct dv_file *f, char *out, size_t cap)
+{
+    char name[48], stamp[20];
+    snprintf(name, sizeof(name), "%s", c->name);
+    for (char *p = name; *p; p++)
+        if (*p == '/' || (unsigned char)*p < 0x20 || (p == name && (*p == '.' || *p == '-')))
+            *p = '_';
+    size_t n = 0;
+    for (const char *p = f->begin; *p && n + 1 < sizeof(stamp); p++)
+        if (*p >= '0' && *p <= '9')
+            stamp[n++] = *p;
+        else if (*p == ' ')
+            stamp[n++] = '-';
+    stamp[n] = 0;
+    snprintf(out, cap, "%s-%s", name, stamp);
+}
+
+/* Enter / S: the chosen recording is shown (fetched into the cache first) or saved into the folder. */
+static void take_file(struct app *a, bool open)
+{
+    if (a->sel < 0 || a->sel >= a->nshown || !g_ffmpeg)
+        return;
+    if (a->fetch) {
+        note(a, "One file is being fetched already (Esc stops it)");
+        return;
+    }
+    struct cam *c = &a->cam[a->arch];
+    const struct dv_file *f = &a->files[a->shown[a->sel]];
+    char base[96], path[600];
+    file_base(c, f, base, sizeof(base));
+    if (open) {
+        snprintf(path, sizeof(path), "%s/%s.mp4", a->cache, base);
+        if (access(path, R_OK) == 0) {
+            spawn_beside("MELLAGUI_CCTV_VIEWER", "mellagui-view", path);
+            return;
+        }
+        char dir[400];                      /* the cache's folders */
+        snprintf(dir, sizeof(dir), "%s", a->cache);
+        for (char *p = dir + 1; *p; p++)
+            if (*p == '/') {
+                *p = 0;
+                mkdir(dir, 0700);
+                *p = '/';
+            }
+    }
+    struct cctv_target t = { .name = c->name, .host = c->host, .port = c->port, .user = c->user, .password = c->pass };
+    a->fetch = cctv_fetch_start(&t, f, open ? a->cache : a->dir, base, g_ffmpeg);
+    a->fetch_open = open;
+    a->fetch_pct = 0;
+    a->fetch_seen = 0;
+    snprintf(a->fetch_what, sizeof(a->fetch_what), "%.8s", strlen(f->begin) > 11 ? f->begin + 11 : f->begin);
+    a->note[0] = 0;
+    a->win.redraw = true;
+}
+
+static void collect_arch(struct app *a)
+{
+    if (a->arch < 0)
+        return;
+    struct cctv_arch_status st;
+    if (a->list && a->loading) {
+        cctv_arch_status(a->list, &st);
+        if (st.done) {
+            a->loading = false;
+            a->nfiles = st.n;
+            a->files = st.n ? malloc((size_t)st.n * sizeof(*a->files)) : NULL;
+            if (a->files)
+                memcpy(a->files, st.files, (size_t)st.n * sizeof(*a->files));
+            else
+                a->nfiles = 0;
+            snprintf(a->arch_msg, sizeof(a->arch_msg), "%s", st.failed ? st.msg : "Nothing was recorded on this day (or the camera has no memory card)");
+            filter_files(a);
+        }
+    }
+    if (a->fetch) {
+        cctv_arch_status(a->fetch, &st);
+        if (st.serial != a->fetch_seen) {
+            a->fetch_seen = st.serial;
+            a->fetch_pct = st.kb ? (int)LM_MIN((uint64_t)st.got_kb * 100 / st.kb, (uint64_t)100) : 0;
+            a->win.redraw = true;
+        }
+        if (st.done) {
+            char text[600];
+            const char *base = strrchr(st.path, '/');
+            if (st.failed) {
+                snprintf(text, sizeof(text), "%s: %s", a->fetch_what, st.msg);
+            } else if (a->fetch_open) {
+                spawn_beside("MELLAGUI_CCTV_VIEWER", "mellagui-view", st.path);
+                snprintf(text, sizeof(text), "Opening %s", a->fetch_what);
+            } else {
+                snprintf(text, sizeof(text), "Saved %.120s in %s", base ? base + 1 : st.path, a->dir);
+            }
+            cctv_arch_free(a->fetch);
+            a->fetch = NULL;
+            note(a, text);
+        }
+    }
+}
+
+static int arch_rows(const struct app *a) { return LM_MAX((a->win.bh - STAT_H - HEAD_H - BAR_H) / ROW_H, 1); }
+static int arch_w(const struct app *a) { return a->win.bw - WLRAIL_W; }
+
+static struct wlsbar arch_bar(const struct app *a)
+{
+    return (struct wlsbar){ arch_w(a) - wlsbar_w() - 4, HEAD_H, wlsbar_w(), arch_rows(a) * ROW_H, a->nshown, arch_rows(a), a->top };
+}
+
+static struct lm_rect arch_button(const struct app *a, int i)
+{
+    static const int wd[AB_N] = { 76, 76, 140, 76, 76 };
+    int x = 8;
+    for (int k = 0; k < i; k++)
+        x += wd[k] + 6;
+    return (struct lm_rect){ x, a->win.bh - STAT_H - BAR_H + 6, wd[i], 28 };
+}
+
+static void arch_scroll_to(struct app *a)
+{
+    int rows = arch_rows(a);
+    if (a->sel < a->top)
+        a->top = a->sel;
+    if (a->sel >= a->top + rows)
+        a->top = a->sel - rows + 1;
+    a->top = LM_CLAMP(a->top, 0, LM_MAX(a->nshown - rows, 0));
+}
+
+static void arch_select(struct app *a, int to)
+{
+    a->sel = LM_CLAMP(to, 0, LM_MAX(a->nshown - 1, 0));
+    arch_scroll_to(a);
+    a->win.redraw = true;
+}
+
+static void arch_press_button(struct app *a, int b)
+{
+    if (b == AB_PREV)
+        other_day(a, -1);
+    else if (b == AB_NEXT)
+        other_day(a, 1);
+    else if (b == AB_MOTION) {
+        a->motion_only = !a->motion_only;
+        a->sel = 0;
+        filter_files(a);
+    } else {
+        take_file(a, b == AB_OPEN);
+    }
+}
+
+static void paint_arch(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    int W = arch_w(a), rows = arch_rows(a);
+    char text[300], day[40];
+    strftime(day, sizeof(day), "%a %d.%m.%Y", &a->day);
+    int moves = 0;
+    for (int i = 0; i < a->nfiles; i++)
+        moves += file_kind(&a->files[i]) == 'M' || file_kind(&a->files[i]) == 'A';
+    if (a->loading)
+        snprintf(text, sizeof(text), "%s  -  %s", a->cam[a->arch].name, day);
+    else
+        snprintf(text, sizeof(text), "%s  -  %s  -  %d recordings, %d with movement", a->cam[a->arch].name, day, a->nfiles, moves);
+    wlwin_fill(w, 0, 0, W, HEAD_H, lm_theme.bar);
+    wlwin_text_bold(w, 10, (HEAD_H - LM_FONT_H) / 2, text, 1, lm_theme.text, W - 20);
+    if (!a->nshown) {
+        const char *why = a->loading || !a->nfiles ? a->arch_msg : "No movement was recorded on this day";
+        centred(w, (struct lm_rect){ 0, HEAD_H, W, rows * ROW_H }, why, lm_theme.text);
+    }
+    struct wlsbar bar = arch_bar(a);
+    int rw = wlsbar_on(&bar) ? W - wlsbar_w() - 8 : W - 4;
+    for (int r = 0; r < rows && a->top + r < a->nshown; r++) {
+        int k = a->top + r, y = HEAD_H + r * ROW_H;
+        const struct dv_file *f = &a->files[a->shown[k]];
+        char kind = file_kind(f);
+        if (k == a->sel)
+            wlwin_round_fill(w, 4, y + 1, rw - 4, ROW_H - 2, 6, lm_theme.accent);
+        uint32_t ink = k == a->sel ? 0xffffff : lm_theme.text;
+        snprintf(text, sizeof(text), "%.8s", strlen(f->begin) > 11 ? f->begin + 11 : f->begin);
+        wlwin_text(w, 14, y + 3, text, 1, ink, 0);
+        struct tm b0 = { 0 }, e0 = { 0 };
+        long secs = 0;
+        if (sscanf(f->begin, "%*d-%*d-%d %d:%d:%d", &b0.tm_mday, &b0.tm_hour, &b0.tm_min, &b0.tm_sec) == 4 &&
+            sscanf(f->end, "%*d-%*d-%d %d:%d:%d", &e0.tm_mday, &e0.tm_hour, &e0.tm_min, &e0.tm_sec) == 4)
+            secs = (e0.tm_hour - b0.tm_hour) * 3600L + (e0.tm_min - b0.tm_min) * 60L + e0.tm_sec - b0.tm_sec + (e0.tm_mday != b0.tm_mday ? 86400L : 0);
+        snprintf(text, sizeof(text), "%ld:%02ld", secs / 60, secs % 60);
+        wlwin_text(w, 110, y + 3, text, 1, ink, 0);
+        wlwin_text(w, 180, y + 3, kind_text(kind), 1, k == a->sel ? ink : kind == 'M' || kind == 'A' ? lm_theme.warn : lm_theme.text, 0);
+        snprintf(text, sizeof(text), "%u.%u MB", f->kb / 1024, f->kb % 1024 * 10 / 1024);
+        wlwin_text(w, 290, y + 3, text, 1, ink, rw - 294);
+    }
+    wlsbar_paint(w, &bar, a->bar_held);
+    static const char *const label[AB_N] = { "< Day", "Day >", "Movement only", "Open", "Save" };
+    for (int i = 0; i < AB_N; i++) {
+        struct lm_rect b = arch_button(a, i);
+        uint32_t c = i == AB_MOTION ? (a->motion_only ? lm_theme.btn_amber_lit : lm_theme.btn_slate) : i >= AB_OPEN ? lm_theme.btn_green : lm_theme.btn_blue;
+        wlwin_drop(w, b.x, b.y, b.w, b.h, lm_button_radius(b.h / 2), c);
+        wlwin_text(w, b.x + (b.w - wlcard_text_w(label[i])) / 2, b.y + (b.h - LM_FONT_H) / 2 - 1, label[i], 1, lm_theme.on_colour, b.w - 4);
+    }
+}
+
+static void arch_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+    struct wlsbar bar = arch_bar(a);
+    if (op == LM_WL_POINTER_EVT_AXIS) {
+        if (args[1].u == 0) {
+            a->top = LM_CLAMP(a->top + (lm_fixed_to_double(args[2].f) > 0 ? 3 : -3), 0, LM_MAX(a->nshown - arch_rows(a), 0));
+            a->win.redraw = true;
+        }
+        return;
+    }
+    if (op == LM_WL_POINTER_EVT_MOTION && a->bar_held) {
+        a->top = wlsbar_drag(&bar, a->py, a->bar_grab);
+        a->win.redraw = true;
+        return;
+    }
+    if (op != LM_WL_POINTER_EVT_BUTTON || args[2].u != 272)
+        return;
+    if (args[3].u != 1) {
+        a->bar_held = false;
+        a->win.redraw = true;
+        return;
+    }
+    int top = a->top, grab = 0, r = wlsbar_press(&bar, a->px, a->py, &top, &grab);
+    if (r) {
+        a->top = top;
+        a->bar_held = r == 1;
+        a->bar_grab = grab;
+        a->win.redraw = true;
+        return;
+    }
+    for (int i = 0; i < AB_N; i++) {
+        struct lm_rect b = arch_button(a, i);
+        if (a->px >= b.x && a->px < b.x + b.w && a->py >= b.y && a->py < b.y + b.h) {
+            arch_press_button(a, i);
+            return;
+        }
+    }
+    int row = a->py >= HEAD_H && a->px < arch_w(a) ? (int)((a->py - HEAD_H) / ROW_H) : -1;
+    if (row < 0 || row >= arch_rows(a) || a->top + row >= a->nshown)
+        return;
+    int k = a->top + row;
+    int64_t now = now_ms();
+    bool again = k == a->click_row && now - a->click_ms <= lm_metrics.double_click_ms;
+    a->click_row = k;
+    a->click_ms = again ? 0 : now;
+    arch_select(a, k);
+    if (again)
+        take_file(a, true);
+}
+
+static void arch_key(struct app *a, uint32_t ks)
+{
+    if (ks == LM_KS_Up || ks == LM_KS_Down)
+        arch_select(a, a->sel + (ks == LM_KS_Up ? -1 : 1));
+    else if (ks == LM_KS_Page_Up || ks == LM_KS_Page_Down)
+        arch_select(a, a->sel + (ks == LM_KS_Page_Up ? -1 : 1) * arch_rows(a));
+    else if (ks == LM_KS_Home || ks == LM_KS_End)
+        arch_select(a, ks == LM_KS_Home ? 0 : a->nshown - 1);
+    else if (ks == LM_KS_Left || ks == LM_KS_Right)
+        other_day(a, ks == LM_KS_Left ? -1 : 1);
+    else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter)
+        take_file(a, true);
+    else if (ks == 's' || ks == 'S')
+        take_file(a, false);
+    else if (ks == 'f' || ks == 'F')
+        arch_press_button(a, AB_MOTION);
+    else if (ks == 'r' || ks == 'R')
+        load_day(a);
+    else if (ks == 'o' || ks == 'O')
+        open_folder(a);
+    else if (ks == 'a' || ks == 'A')
+        arch_close(a);
+    else if (ks == LM_KS_Escape) {
+        if (a->fetch) {
+            cctv_arch_free(a->fetch);
+            a->fetch = NULL;
+            note(a, "Stopped");
+        } else {
+            arch_close(a);
+        }
+    }
+}
+
 static void menu_event(struct wlwin *w, int index)
 {
     struct app *a = w->data;
     int menu = a->menu;
     a->menu = MENU_NONE;
     w->redraw = true;
-    if (menu == MENU_NONE || index < 0 || index >= (int)LM_ARRAY_LEN(a->menu_do) || a->menu_cam != a->single || !a->cam[a->menu_cam].ctl)
+    if (menu == MENU_NONE || index < 0 || index >= (int)LM_ARRAY_LEN(a->menu_do) || a->menu_cam != a->single)
         return;
-    struct cctv_ctl *ctl = a->cam[a->menu_cam].ctl;
     int d = a->menu_do[index];
+    if (menu == MENU_ALARM) {
+        if (d >= DO_NOTIFY)
+            change_want(a, a->menu_cam, d);
+        return;
+    }
+    struct cctv_ctl *ctl = a->cam[a->menu_cam].ctl;
+    if (!ctl)
+        return;
     if (d >= DO_SAVE)
         cctv_ctl_position(ctl, d - DO_SAVE, true);
     else if (d >= DO_GO)
@@ -1051,7 +1549,7 @@ static void watch_steering(struct app *a)
 
 static bool pad_centre(struct app *a, int *cx, int *cy)
 {
-    if (a->single < 0)
+    if (a->single < 0 || a->arch >= 0)
         return false;
     struct cam *c = &a->cam[a->single];
     if (c->pic.w < 200 || c->pic.h < 150 || !is_live(c))
@@ -1112,8 +1610,26 @@ static void speaker_icon(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t b
 
 /* ---- the window ---- */
 
-enum { B_ALL, B_CAM0, B_SHOT = B_CAM0 + MAX_CAMS, B_REC, B_SOUND, B_FOLDER, B_NIGHT, B_POS, B_AGAIN, B_COUNT };
-_Static_assert(B_COUNT <= WLRAIL_MAX, "the rail holds the buttons");
+/* the left rail chooses what is shown, the right one does things with it */
+enum { B_ALL, B_CAM0, B_AGAIN = B_CAM0 + MAX_CAMS, B_COUNT };
+enum { S_SHOT, S_REC, S_SOUND, S_FOLDER, S_NIGHT, S_POS, S_ALARM, S_ARCH, S_COUNT };
+_Static_assert(B_COUNT <= WLRAIL_MAX && S_COUNT <= WLRAIL_MAX, "the rails hold the buttons");
+
+static void bell_icon(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    (void)bg;
+    wlwin_round_fill(w, cx - 5, cy - 7, 10, 12, 5, c);
+    wlwin_fill(w, cx - 5, cy - 1, 10, 5, c);
+    wlwin_fill(w, cx - 8, cy + 3, 16, 2, c);
+    wlwin_round_fill(w, cx - 2, cy + 6, 4, 3, 1, c);
+}
+
+static void card_icon(struct wlwin *w, int cx, int cy, uint32_t c, uint32_t bg)
+{
+    wlwin_round_fill(w, cx - 6, cy - 8, 12, 16, 3, c);
+    for (int i = 0; i < 3; i++)
+        wlwin_fill(w, cx - 3 + 3 * i, cy - 6, 2, 4, bg);
+}
 
 static void rail(struct app *a, struct wlrail *L)
 {
@@ -1128,32 +1644,45 @@ static void rail(struct app *a, struct wlrail *L)
         L->it[B_CAM0 + i] = (struct wlrail_item){ .tip = i < a->n ? a->cam[i].name : NULL, .text = num[i], .base = lm_theme.btn_teal, .lite = lm_theme.btn_teal_lit,
                                                   .show = i < a->n, .lit = a->single == i, .gap = i == 0 };
     }
+    L->it[B_AGAIN] = (struct wlrail_item){ .tip = "Connect again (R)", .icon = wlrail_ic_swap, .base = lm_theme.btn_amber, .lite = lm_theme.btn_amber_lit,
+                                           .show = true, .bottom = true, .idle = !a->n };
+}
+
+static void side_rail(struct app *a, struct wlrail *S)
+{
+    memset(S, 0, sizeof(*S));
+    S->x = a->win.inx + a->win.bw - WLRAIL_W;           /* (in window pixels) */
+    S->y1 = a->win.bh > 0 ? a->win.bh - STAT_H : 400;
+    S->n = S_COUNT;
     bool recording = false;
     for (int i = 0; i < a->n; i++)
         recording |= a->cam[i].rec && (a->single < 0 || a->single == i);
-    L->it[B_SHOT] = (struct wlrail_item){ .tip = "Save a picture (S)", .icon = wlrail_ic_camera, .base = lm_theme.btn_green, .lite = lm_theme.btn_green_lit,
-                                          .show = true, .gap = true, .idle = !a->n };
-    L->it[B_REC] = (struct wlrail_item){ .tip = recording ? "Stop recording (V)" : "Record (V)", .icon = wlrail_ic_rec, .base = lm_theme.btn_red,
-                                         .lite = lm_theme.btn_red_lit, .show = true, .lit = recording, .idle = !a->n };
-    L->it[B_SOUND] = (struct wlrail_item){ .tip = a->single < 0 ? "Sound (M): one camera alone" : a->sound ? "Sound off (M)" : "Sound on (M)", .icon = speaker_icon,
-                                           .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .show = true, .lit = a->sound && a->single >= 0, .idle = a->single < 0 };
-    L->it[B_FOLDER] = (struct wlrail_item){ .tip = "Open the folder (O)", .icon = wlrail_ic_open, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit, .show = true };
-    bool one = a->single >= 0;
-    L->it[B_NIGHT] = (struct wlrail_item){ .tip = one ? "Night picture and lamp (N)" : "Night (N): one camera alone", .icon = night_icon, .base = lm_theme.btn_blue,
-                                           .lite = lm_theme.btn_blue_lit, .show = true, .gap = true, .idle = !one };
-    L->it[B_POS] = (struct wlrail_item){ .tip = one ? "Positions (P)" : "Positions (P): one camera alone", .icon = wlrail_ic_home, .base = lm_theme.btn_teal,
-                                         .lite = lm_theme.btn_teal_lit, .show = true, .idle = !one };
-    L->it[B_AGAIN] = (struct wlrail_item){ .tip = "Connect again (R)", .icon = wlrail_ic_swap, .base = lm_theme.btn_amber, .lite = lm_theme.btn_amber_lit,
-                                           .show = true, .bottom = true, .idle = !a->n };
+    bool one = a->single >= 0, arch = a->arch >= 0, live_one = one && !arch;
+    bool watched = one && (a->want[a->single].notify || a->want[a->single].record);
+    S->it[S_SHOT] = (struct wlrail_item){ .tip = "Save a picture (S)", .icon = wlrail_ic_camera, .base = lm_theme.btn_green, .lite = lm_theme.btn_green_lit,
+                                          .show = true, .idle = !a->n || arch };
+    S->it[S_REC] = (struct wlrail_item){ .tip = recording ? "Stop recording (V)" : "Record (V)", .icon = wlrail_ic_rec, .base = lm_theme.btn_red,
+                                         .lite = lm_theme.btn_red_lit, .show = true, .lit = recording, .idle = !a->n || arch };
+    S->it[S_SOUND] = (struct wlrail_item){ .tip = !one ? "Sound (M): one camera alone" : a->sound ? "Sound off (M)" : "Sound on (M)", .icon = speaker_icon,
+                                           .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .show = true, .lit = a->sound && live_one, .idle = !live_one };
+    S->it[S_FOLDER] = (struct wlrail_item){ .tip = "Open the folder (O)", .icon = wlrail_ic_open, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit, .show = true };
+    S->it[S_NIGHT] = (struct wlrail_item){ .tip = one ? "Night picture and lamp (N)" : "Night (N): one camera alone", .icon = night_icon, .base = lm_theme.btn_blue,
+                                           .lite = lm_theme.btn_blue_lit, .show = true, .gap = true, .idle = !live_one };
+    S->it[S_POS] = (struct wlrail_item){ .tip = one ? "Positions (P)" : "Positions (P): one camera alone", .icon = wlrail_ic_home, .base = lm_theme.btn_teal,
+                                         .lite = lm_theme.btn_teal_lit, .show = true, .idle = !live_one };
+    S->it[S_ALARM] = (struct wlrail_item){ .tip = one ? "Alarms (L)" : "Alarms (L): one camera alone", .icon = bell_icon, .base = lm_theme.btn_amber,
+                                           .lite = lm_theme.btn_amber_lit, .show = true, .lit = watched && live_one, .idle = !live_one };
+    S->it[S_ARCH] = (struct wlrail_item){ .tip = !one ? "Recordings (A): one camera alone" : arch ? "Back to the live picture (A)" : "Recordings on the card (A)",
+                                          .icon = card_icon, .base = lm_theme.btn_rose, .lite = lm_theme.btn_rose_lit, .show = true, .lit = arch, .idle = !one };
 }
 
 /* Where the tiles go: all cameras in the arrangement that makes the pictures largest, or one alone. */
 static void layout(struct app *a)
 {
-    int W = a->win.bw, H = a->win.bh - STAT_H;
+    int W = a->win.bw - WLRAIL_W, H = a->win.bh - STAT_H;
     for (int i = 0; i < a->n; i++)
         a->cam[i].tile = a->cam[i].pic = (struct lm_rect){ 0, 0, 0, 0 };
-    if (!a->n || W < 2 * GAP + 16 || H < 2 * GAP + 16)
+    if (!a->n || a->arch >= 0 || W < 2 * GAP + 16 || H < 2 * GAP + 16)
         return;
     int shown = a->single >= 0 ? 1 : a->n, cols = 1;
     double best = 0;
@@ -1251,6 +1780,22 @@ static void write_dump(struct app *a)
     if (pad_centre(a, &px, &py))
         fprintf(f, "pad %d %d %d\n", a->single, px, py);
     fprintf(f, "menu %d\n", a->menu);
+    for (int i = 0; i < a->n; i++)
+        fprintf(f, "want %d notify=%d record=%d\n", i, a->want[i].notify, a->want[i].record);
+    if (a->arch >= 0) {
+        char day[16];
+        day_string(&a->day, day, sizeof(day));
+        fprintf(f, "arch cam=%d day=%s loading=%d n=%d shown=%d sel=%d top=%d motion=%d fetch=%d\n", a->arch, day, a->loading, a->nfiles, a->nshown, a->sel, a->top,
+                a->motion_only, a->fetch != NULL);
+        for (int r = 0; r < arch_rows(a) && a->top + r < a->nshown; r++) {
+            const struct dv_file *fl = &a->files[a->shown[a->top + r]];
+            fprintf(f, "row %d %.8s %c %u %d\n", a->top + r, fl->begin + 11, file_kind(fl), fl->kb, HEAD_H + r * ROW_H + ROW_H / 2);
+        }
+        for (int i = 0; i < AB_N; i++) {
+            struct lm_rect b = arch_button(a, i);
+            fprintf(f, "abtn %d %d %d %d %d\n", i, b.x, b.y, b.w, b.h);
+        }
+    }
     fprintf(f, "note %s\n", a->note);
     fclose(f);
     if (rename(tmp, g_dump) < 0) {}
@@ -1265,7 +1810,7 @@ static void paint(struct wlwin *w)
         char text[600];
         snprintf(text, sizeof(text), "%s Write one camera a line into %s : name address user password (a - for no password), then start the program again.",
                  a->conf_note, a->conf);
-        centred(w, (struct lm_rect){ 0, 0, w->bw, w->bh - STAT_H }, text, lm_theme.text);
+        centred(w, (struct lm_rect){ 0, 0, w->bw - WLRAIL_W, w->bh - STAT_H }, text, lm_theme.text);
     }
     for (int i = 0; i < a->n; i++) {
         struct cam *c = &a->cam[i];
@@ -1287,11 +1832,17 @@ static void paint(struct wlwin *w)
         else if (st != ST_LIVE)             /* the last picture stays, with a word about what is wrong */
             chip(w, c->tile.x + 8, c->tile.y + c->tile.h - 32, msg, c->tile.w - 16, 0);
         chip(w, c->tile.x + 8, c->tile.y + 8, c->name, c->tile.w - 16, dot);
+        int cy = c->tile.y + 38;
+        if (a->want[i].notify || a->want[i].record) {
+            const char *what = !a->want[i].record ? "Alarms: notify" : a->want[i].notify ? "Alarms: notify, record" : "Alarms: record";
+            chip(w, c->tile.x + 8, cy, what, c->tile.w - 16, lm_theme.warn);
+            cy += 30;
+        }
         if (c->rec) {
             char r[64] = "Starting to record";
             if (c->rec_secs >= 0)
                 snprintf(r, sizeof(r), "REC %d:%02d", c->rec_secs / 60, c->rec_secs % 60);
-            chip(w, c->tile.x + 8, c->tile.y + 38, r, c->tile.w - 16, 0xff3b30);
+            chip(w, c->tile.x + 8, cy, r, c->tile.w - 16, 0xff3b30);
         }
         if (st == ST_LIVE && (a->single == i || a->hover == i)) {
             char info[96];
@@ -1300,7 +1851,10 @@ static void paint(struct wlwin *w)
             chip(w, c->tile.x + c->tile.w - tw - 8, a->single == i ? c->tile.y + 8 : c->tile.y + c->tile.h - 32, info, c->tile.w - 16, 0);
         }
     }
-    paint_pad(a);
+    if (a->arch >= 0)
+        paint_arch(a);
+    else
+        paint_pad(a);
     int sy = w->bh - STAT_H;
     wlwin_fill(w, 0, sy, w->bw, STAT_H, lm_theme.bar);
     char status[300];
@@ -1315,8 +1869,12 @@ static void paint(struct wlwin *w)
         recording += a->cam[i].rec != NULL;
     if (!g_ffmpeg)
         snprintf(status, sizeof(status), "ffmpeg is not installed: the pictures cannot be shown");
+    else if (a->fetch)
+        snprintf(status, sizeof(status), "Fetching %s... %d %%  -  Esc: stop", a->fetch_what, a->fetch_pct);
     else if (a->note[0])
         snprintf(status, sizeof(status), "%.299s", a->note);
+    else if (a->arch >= 0)
+        snprintf(status, sizeof(status), "Enter: watch  S: save  arrows: choose, other day  F: movement only  Esc: back");
     else if (recording && a->single >= 0 && !a->cam[a->single].rec)
         snprintf(status, sizeof(status), "Recording %d other camera%s  -  Esc: all cameras", recording, recording > 1 ? "s" : "");
     else if (a->single >= 0)
@@ -1327,6 +1885,9 @@ static void paint(struct wlwin *w)
     struct wlrail L;
     rail(a, &L);
     wlrail_foot(w, &L, lm_theme.bar);
+    struct wlrail S;
+    side_rail(a, &S);
+    wlrail_paint(w, &S, &a->san, a->shover, now_ms(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text);
     wlrail_paint(w, &L, &a->ran, a->rhover, now_ms(), lm_theme.bar, lm_theme.bar, lm_theme.accent, lm_theme.text);
     write_dump(a);
 }
@@ -1334,6 +1895,7 @@ static void paint(struct wlwin *w)
 static void show(struct app *a, int i)
 {
     move_stop(a);
+    arch_close(a);
     for (int k = 0; k < a->n; k++)
         a->cam[k].asked = false;
     a->single = i >= 0 && i < a->n ? i : -1;
@@ -1349,22 +1911,31 @@ static void press_button(struct app *a, int b)
         show(a, -1);
     else if (b >= B_CAM0 && b < B_CAM0 + a->n)
         show(a, b - B_CAM0);
-    else if (b == B_SHOT && g_ffmpeg)
-        snapshot(a);
-    else if (b == B_REC && g_ffmpeg)
-        toggle_record(a);
-    else if (b == B_SOUND)
-        toggle_sound(a);
-    else if (b == B_FOLDER)
-        open_folder(a);
-    else if (b == B_NIGHT)
-        night_menu(a);
-    else if (b == B_POS)
-        position_menu(a);
     else if (b == B_AGAIN)
         for (int i = 0; i < a->n; i++)
             if (a->single < 0 || a->single == i)
                 reconnect(a, i);
+}
+
+static void press_side(struct app *a, int b)
+{
+    bool arch = a->arch >= 0;
+    if (b == S_SHOT && g_ffmpeg && !arch)
+        snapshot(a);
+    else if (b == S_REC && g_ffmpeg && !arch)
+        toggle_record(a);
+    else if (b == S_SOUND && !arch)
+        toggle_sound(a);
+    else if (b == S_FOLDER)
+        open_folder(a);
+    else if (b == S_NIGHT && !arch)
+        night_menu(a);
+    else if (b == S_POS && !arch)
+        position_menu(a);
+    else if (b == S_ALARM && !arch)
+        alarm_menu(a);
+    else if (b == S_ARCH)
+        arch_open(a);
 }
 
 static int tile_at(const struct app *a, double x, double y)
@@ -1385,29 +1956,37 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->px = lm_fixed_to_double(args[k].f);
         a->py = lm_fixed_to_double(args[k + 1].f);
     } else if (op == LM_WL_POINTER_EVT_LEAVE) {
-        a->hover = a->rhover = -1;
+        a->hover = a->rhover = a->shover = -1;
         wlrail_release(&a->ran);
+        wlrail_release(&a->san);
         if (!a->move_key)
             move_stop(a);
         w->redraw = true;
         return;
-    } else if (op != LM_WL_POINTER_EVT_BUTTON) {
+    } else if (op != LM_WL_POINTER_EVT_BUTTON && op != LM_WL_POINTER_EVT_AXIS) {
         return;
     }
-    struct wlrail L;
+    struct wlrail L, S;
     rail(a, &L);
+    side_rail(a, &S);
     if (op != LM_WL_POINTER_EVT_BUTTON) {
-        int h = tile_at(a, a->px, a->py), rh = wlrail_at(&L, w->rpx, w->rpy);
-        if (h != a->hover || rh != a->rhover)
+        int h = tile_at(a, a->px, a->py), rh = wlrail_at(&L, w->rpx, w->rpy), sh = wlrail_at(&S, w->rpx, w->rpy);
+        if (h != a->hover || rh != a->rhover || sh != a->shover)
             w->redraw = true;
         a->hover = h;
         a->rhover = rh;
+        a->shover = sh;
+        if (a->arch >= 0)
+            arch_pointer(a, op, args);
         return;
     }
     if (args[3].u != 1) {
         wlrail_release(&a->ran);
+        wlrail_release(&a->san);
         if (args[2].u == 272 && !a->move_key)
             move_stop(a);
+        if (a->arch >= 0)
+            arch_pointer(a, op, args);
         w->redraw = true;
         return;
     }
@@ -1419,6 +1998,18 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         if (!L.it[b].idle)
             press_button(a, b);
         w->redraw = true;
+        return;
+    }
+    int sb = wlrail_at(&S, w->rpx, w->rpy);
+    if (sb >= 0) {
+        wlrail_press(&a->san, sb, now_ms());
+        if (!S.it[sb].idle)
+            press_side(a, sb);
+        w->redraw = true;
+        return;
+    }
+    if (a->arch >= 0) {
+        arch_pointer(a, op, args);
         return;
     }
     int pd = pad_at(a, a->px, a->py);
@@ -1452,15 +2043,28 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             w->running = false;
         return;
     }
+    if (a->arch >= 0) {
+        if (ks >= '1' && ks <= '0' + (uint32_t)a->n)
+            show(a, (int)(ks - '1'));
+        else if (ks == '0' || ks == 'g')
+            show(a, -1);
+        else
+            arch_key(a, ks);
+        return;
+    }
     if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Left || ks == LM_KS_Right) {
         if (a->single < 0)
             note(a, "Show one camera alone to move it");
         else
             move_start(a, ks == LM_KS_Up ? 0 : ks == LM_KS_Down ? 1 : ks == LM_KS_Left ? 2 : 3, args[2].u);
     } else if (ks == 'n' || ks == 'N') {
-        press_button(a, B_NIGHT);
+        press_side(a, S_NIGHT);
     } else if (ks == 'p' || ks == 'P') {
-        press_button(a, B_POS);
+        press_side(a, S_POS);
+    } else if (ks == 'l' || ks == 'L') {
+        press_side(a, S_ALARM);
+    } else if (ks == 'a' || ks == 'A') {
+        press_side(a, S_ARCH);
     } else if (ks == LM_KS_Escape || ks == '0' || ks == 'g')
         show(a, -1);
     else if (ks >= '1' && ks <= '0' + (uint32_t)a->n)
@@ -1468,13 +2072,13 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
     else if (ks == 'r' || ks == 'R')
         press_button(a, B_AGAIN);
     else if (ks == 's' || ks == 'S' || ks == ' ')
-        press_button(a, B_SHOT);
+        press_side(a, S_SHOT);
     else if (ks == 'v' || ks == 'V')
-        press_button(a, B_REC);
+        press_side(a, S_REC);
     else if (ks == 'm' || ks == 'M')
-        press_button(a, B_SOUND);
+        press_side(a, S_SOUND);
     else if (ks == 'o' || ks == 'O')
-        press_button(a, B_FOLDER);
+        press_side(a, S_FOLDER);
 }
 
 /* ---- self test ------------------------------------------------------------------------------------------------------------- */
@@ -1552,23 +2156,25 @@ int main(int argc, char **argv)
     lm_theme_load_env();
     signal(SIGPIPE, SIG_IGN);
     const char *cli_conf = NULL;
-    int win_w = 960, win_h = 500;
-    bool list = false;
+    int win_w = 1000, win_h = 500;
+    bool list = false, watch = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--selftest"))
             return selftest();
         if (!strcmp(argv[i], "--list")) {
             list = true;
+        } else if (!strcmp(argv[i], "--watch")) {
+            watch = true;
         } else if (!strcmp(argv[i], "--config") && i + 1 < argc) {
             cli_conf = argv[++i];
         } else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
             char junk;
-            if (sscanf(argv[++i], "%dx%d%c", &win_w, &win_h, &junk) != 2 || win_w < 420 || win_h < 460) {
+            if (sscanf(argv[++i], "%dx%d%c", &win_w, &win_h, &junk) != 2 || win_w < 520 || win_h < 440) {
                 fprintf(stderr, "mellagui-cctv: --size wants a size like 960x440\n");
                 return 2;
             }
         } else {
-            fprintf(stderr, "usage: mellagui-cctv [--config FILE] [--size WxH] | --list | --selftest\n");
+            fprintf(stderr, "usage: mellagui-cctv [--config FILE] [--size WxH] | --list | --selftest | --watch\n");
             return 2;
         }
     }
@@ -1576,13 +2182,38 @@ int main(int argc, char **argv)
     static char path[PATH_MAX];
     conf_path(path, sizeof(path), cli_conf);
     a.conf = path;
-    a.single = a.hover = a.rhover = a.moving = -1;
+    a.single = a.hover = a.rhover = a.shover = a.moving = a.arch = a.click_row = -1;
     load_conf(&a);
     const char *dir = getenv("MELLAGUI_CCTV_DIR"), *home = getenv("HOME");
     if (dir && *dir)
         snprintf(a.dir, sizeof(a.dir), "%s", dir);
     else
         snprintf(a.dir, sizeof(a.dir), "%s/CCTV", home ? home : ".");
+    const char *alarms = getenv("MELLAGUI_CCTV_ALARMS");
+    if (alarms && *alarms) {
+        snprintf(a.wants_path, sizeof(a.wants_path), "%s", alarms);
+    } else {                                /* beside the list of cameras */
+        const char *slash = strrchr(path, '/');
+        snprintf(a.wants_path, sizeof(a.wants_path), "%.*scctv-alarms.conf", slash ? (int)(slash - path + 1) : 0, path);
+    }
+    const char *names[MAX_CAMS];
+    struct cctv_target targets[MAX_CAMS];
+    for (int i = 0; i < a.n; i++) {
+        struct cam *c = &a.cam[i];
+        names[i] = c->name;
+        targets[i] = (struct cctv_target){ .name = c->name, .host = c->host, .port = c->port, .user = c->user, .password = c->pass };
+    }
+    cctv_wants_load(a.wants_path, names, a.want, a.n);
+    if (watch) {
+        if (!a.n)
+            return 0;
+        return cctv_watch(targets, a.n, a.wants_path, a.dir, ffpipe_ffmpeg_path());
+    }
+    const char *cache = getenv("XDG_CACHE_HOME");
+    if (cache && *cache)
+        snprintf(a.cache, sizeof(a.cache), "%s/mellagui/cctv", cache);
+    else
+        snprintf(a.cache, sizeof(a.cache), "%s/.cache/mellagui/cctv", home ? home : ".");
     if (list) {
         for (int i = 0; i < a.n; i++)
             printf("%s\t%s:%d\t%s\t%s\n", a.cam[i].name, a.cam[i].host, a.cam[i].port, a.cam[i].user, a.cam[i].pass[0] ? "password set" : "no password");
@@ -1593,11 +2224,23 @@ int main(int argc, char **argv)
     g_ffmpeg = ffpipe_ffmpeg_path();
     g_dump = getenv("MELLAGUI_CCTV_DUMP");
     wlrail_init(&a.ran);
+    wlrail_init(&a.san);
+    /* what was fetched to be watched last time is thrown away */
+    DIR *cd = opendir(a.cache);
+    for (struct dirent *e; cd && (e = readdir(cd));) {
+        size_t n = strlen(e->d_name);
+        if ((n > 4 && !strcmp(e->d_name + n - 4, ".mp4")) || !strncmp(e->d_name, ".part-", 6) || !strncmp(e->d_name, ".video-", 7) || !strncmp(e->d_name, ".sound-", 7)) {
+            if (unlinkat(dirfd(cd), e->d_name, 0) < 0) {}
+        }
+    }
+    if (cd)
+        closedir(cd);
+    watcher_start(&a);
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     if (wlwin_connect(&a.win, "mellagui-cctv", &ops, &a) < 0)
         return 1;
     wlwin_set_inset(&a.win, WLRAIL_W);
-    if (wlwin_open(&a.win, "Cameras", "mellagui.cctv", win_w, win_h, 420, 460) < 0)
+    if (wlwin_open(&a.win, "Cameras", "mellagui.cctv", win_w, win_h, 520, 440) < 0)
         return 1;
     for (int i = 0; i < a.n; i++) {
         struct cam *c = &a.cam[i];
@@ -1621,10 +2264,14 @@ int main(int argc, char **argv)
         struct wlrail L;
         rail(&a, &L);
         int timeout = wlrail_loop(&a.win, &a.ran, &L, a.rhover, a.n ? 30 : -1);
+        struct wlrail S;
+        side_rail(&a, &S);
+        timeout = wlrail_loop(&a.win, &a.san, &S, a.shover, timeout);
         if (!wlwin_step(&a.win, timeout))
             break;
         collect_jobs(&a);
         watch_steering(&a);
+        collect_arch(&a);
         if (a.note[0] && now_ms() >= a.note_until) {
             a.note[0] = 0;
             a.win.redraw = true;
@@ -1646,6 +2293,8 @@ int main(int argc, char **argv)
         pthread_mutex_unlock(&c->lock);
         poke(c);
     }
+    cctv_arch_free(a.list);
+    cctv_arch_free(a.fetch);
     for (int i = 0; i < a.n; i++)           /* a camera that moves is stopped before anything else */
         cctv_ctl_free(a.cam[i].ctl);
     for (int i = 0; i < a.n; i++)           /* all are told first, so that they finish side by side */

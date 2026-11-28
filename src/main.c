@@ -754,6 +754,12 @@ int main(int argc, char **argv)
         lm_server_spawn(srv, scmd);
     }
 
+    if (srv->wm && !srv->config.kiosk && (!headless || getenv("MELLAGUI_CCTV_PRELOAD"))) {
+        char ccmd[LM_DOCK_CMD_MAX];
+        lm_launch_expand("mellagui-cctv --watch", ccmd, sizeof(ccmd));         /* the cameras' alarms (it ends at once when none is wanted) */
+        lm_server_spawn(srv, ccmd);
+    }
+
     if (!headless && cfg.startup_sound && !srv->config.kiosk)
         lm_sound_startup();                                                /* the start-up chime (chime.h): a child plays it, nothing waits */
 

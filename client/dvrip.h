@@ -20,6 +20,8 @@
 
 #define DV_PORT 34567
 #define DV_MSG_STREAM 1412
+#define DV_MSG_PLAY 1426                    /* a piece of a recording of the card; one with nothing in it ends the file */
+#define DV_MSG_ALARM 1504
 #define DV_MAX_BODY (4u << 20)              /* a longer message or frame is not believed */
 
 /* The 8 characters a camera wants in place of the password (made from its MD5). */
@@ -98,5 +100,27 @@ int dv_config_set(struct dv_session *s, const char *name, const char *value, int
 /* In the text of an answer of dv_config_get: a new copy of the member `name`'s JSON with the string member `key` inside it changed to `to` (everything
  * else as the camera wrote it). NULL when there is no such member or key. */
 char *dv_config_change(const char *reply, const char *name, const char *key, const char *to);
+
+/* ---- alarms ------------------------------------------------------------------------------------------------------------ */
+
+/* Ask the camera to tell about its alarms: they then come on s->ctl as messages DV_MSG_ALARM. Returns like dv_ptz. */
+int dv_alarm_subscribe(struct dv_session *s, int wake_fd);
+/* The text of an alarm message: the event's name ("VideoMotion", "HumanDetect" ...) and whether it begins (true) or ends. False when it is no event. */
+bool dv_alarm_parse(const char *body, size_t len, char *event, size_t cap, bool *begins);
+
+/* ---- the recordings on the camera's card -------------------------------------------------------------------------------- */
+
+struct dv_file {
+    char name[200];                     /* the camera's own path */
+    char begin[20], end[20];            /* "2026-11-27 22:28:23", the camera's clock */
+    uint32_t kb;                        /* its size in units of 1024 bytes */
+};
+
+/* The video files of the time from `begin` to `end` (that format), oldest first: at most `max` of them into *files (to be freed). Returns like dv_ptz;
+ * *n is the number. */
+int dv_files(struct dv_session *s, const char *begin, const char *end, struct dv_file **files, int *n, int max, int wake_fd);
+/* Ask for a file: its bytes (a stream of frames like a live one) then come on s->data as messages DV_MSG_PLAY. 0 or -1 (`err`). */
+int dv_play_start(struct dv_session *s, const struct dv_file *f, int wake_fd, char *err, size_t errsz);
+void dv_play_stop(struct dv_session *s, const struct dv_file *f);
 
 #endif

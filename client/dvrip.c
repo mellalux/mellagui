@@ -17,7 +17,8 @@
 #define HDR 20
 #define WAIT_MS 6000
 
-enum { MSG_LOGIN = 1000, MSG_KEEPALIVE = 1006, MSG_SET = 1040, MSG_GET = 1042, MSG_PTZ = 1400, MSG_MONITOR = 1410, MSG_CLAIM = 1413 };
+enum { MSG_LOGIN = 1000, MSG_KEEPALIVE = 1006, MSG_SET = 1040, MSG_GET = 1042, MSG_PTZ = 1400, MSG_MONITOR = 1410, MSG_CLAIM = 1413, MSG_PLAYBACK = 1420,
+       MSG_PLAY_CLAIM = 1424, MSG_SUBSCRIBE = 1500, MSG_FILES = 1440 };
 
 void dv_hash(const char *password, char out[9])
 {
@@ -513,4 +514,125 @@ char *dv_config_change(const char *reply, const char *name, const char *key, con
     if (out)
         snprintf(out, cap, "%.*s\"%s\"%.*s", (int)(old - v), v, to, (int)(end - old_end), old_end);
     return out;
+}
+
+int dv_alarm_subscribe(struct dv_session *s, int wake_fd)
+{
+    char body[96];
+    snprintf(body, sizeof(body), "{\"Name\":\"\",\"SessionID\":\"%s\"}", s->idtext);
+    return ask(s, MSG_SUBSCRIBE, body, NULL, wake_fd);
+}
+
+bool dv_alarm_parse(const char *body, size_t len, char *event, size_t cap, bool *begins)
+{
+    while (len && (body[len - 1] == 0 || body[len - 1] == '\n'))
+        len--;
+    char *t = strndup(body, len);
+    struct json *j = t ? json_parse(t) : NULL;
+    struct json *a = json_get(j, json_str(j, "Name", "AlarmInfo"));
+    if (!a)
+        a = json_get(j, "AlarmInfo");
+    const char *e = json_str(a, "Event", NULL);
+    bool ok = e != NULL;
+    if (ok) {
+        size_t n = 0;
+        for (; e[n] && n + 1 < cap; n++)                 /* the name goes on cards: plain letters only */
+            event[n] = (unsigned char)e[n] < 0x20 ? ' ' : e[n];
+        event[n] = 0;
+        *begins = strcmp(json_str(a, "Status", "Start"), "Stop") != 0;
+    }
+    json_free(j);
+    free(t);
+    return ok;
+}
+
+int dv_files(struct dv_session *s, const char *begin, const char *end, struct dv_file **files, int *n, int max, int wake_fd)
+{
+    *files = NULL;
+    *n = 0;
+    char from[20];
+    snprintf(from, sizeof(from), "%s", begin);
+    int cap = 0;
+    for (int page = 0; page < 64 && *n < max; page++) {
+        char body[400], f_[44], e_[44];
+        quote(f_, sizeof(f_), from);
+        quote(e_, sizeof(e_), end);
+        snprintf(body, sizeof(body), "{\"Name\":\"OPFileQuery\",\"SessionID\":\"%s\",\"OPFileQuery\":{\"BeginTime\":\"%s\",\"EndTime\":\"%s\",\"Channel\":0,"
+                 "\"DriverTypeMask\":\"0x0000FFFF\",\"Event\":\"*\",\"Type\":\"h264\",\"StreamType\":\"0x00000000\"}}", s->idtext, f_, e_);
+        char *reply = NULL;
+        int r = ask(s, MSG_FILES, body, &reply, wake_fd);
+        if (r != 0)
+            return *n ? 0 : r;
+        struct json *j = json_parse(reply), *list = json_get(j, "OPFileQuery");
+        free(reply);
+        int got = 0, added = 0;
+        for (struct json *i = list ? list->child : NULL; i; i = i->next, got++) {
+            struct dv_file f;
+            memset(&f, 0, sizeof(f));
+            snprintf(f.name, sizeof(f.name), "%s", json_str(i, "FileName", ""));
+            snprintf(f.begin, sizeof(f.begin), "%s", json_str(i, "BeginTime", ""));
+            snprintf(f.end, sizeof(f.end), "%s", json_str(i, "EndTime", ""));
+            f.kb = (uint32_t)strtoul(json_str(i, "FileLength", "0"), NULL, 16);
+            if (!f.name[0] || strlen(json_str(i, "FileName", "")) >= sizeof(f.name))
+                continue;
+            bool have = false;                           /* a page begins with the last file of the one before */
+            for (int k = *n - 1; k >= 0 && k >= *n - 80 && !have; k--)
+                have = !strcmp((*files)[k].name, f.name);
+            if (have || *n >= max)
+                continue;
+            if (*n == cap) {
+                cap = cap ? cap * 2 : 128;
+                struct dv_file *q = realloc(*files, (size_t)cap * sizeof(*q));
+                if (!q) {
+                    json_free(j);
+                    return 0;
+                }
+                *files = q;
+            }
+            (*files)[(*n)++] = f;
+            added++;
+        }
+        json_free(j);
+        if (got < 64 || !added)
+            break;
+        snprintf(from, sizeof(from), "%s", (*files)[*n - 1].begin);
+    }
+    return 0;
+}
+
+static void play_body(struct dv_session *s, const struct dv_file *f, const char *action, char *body, size_t cap)
+{
+    char name[420], b[44], e[44];
+    quote(name, sizeof(name), f->name);
+    quote(b, sizeof(b), f->begin);
+    quote(e, sizeof(e), f->end);
+    snprintf(body, cap, "{\"Name\":\"OPPlayBack\",\"SessionID\":\"%s\",\"OPPlayBack\":{\"Action\":\"%s\",\"Parameter\":{\"PlayMode\":\"ByName\",\"FileName\":\"%s\","
+             "\"StreamType\":0,\"Value\":0,\"TransMode\":\"TCP\",\"Channel\":0},\"StartTime\":\"%s\",\"EndTime\":\"%s\"}}", s->idtext, action, name, b, e);
+}
+
+int dv_play_start(struct dv_session *s, const struct dv_file *f, int wake_fd, char *err, size_t errsz)
+{
+    s->data = dial(s->host, s->port, wake_fd, err, errsz);
+    if (s->data < 0)
+        return -1;
+    char body[900];
+    play_body(s, f, "Claim", body, sizeof(body));
+    struct json *j = send_msg(s->data, s->id, 0, MSG_PLAY_CLAIM, body, wake_fd) ? read_reply(s->data, wake_fd) : NULL;
+    long long ret = j ? (long long)json_num(j, "Ret", -1) : -1;
+    json_free(j);
+    if (ret == 100) {
+        play_body(s, f, "DownloadStart", body, sizeof(body));
+        ret = ask(s, MSG_PLAYBACK, body, NULL, wake_fd);
+        if (ret == 0)
+            return 0;
+    }
+    snprintf(err, errsz, "the camera did not give the file (code %lld)", ret);
+    return -1;
+}
+
+void dv_play_stop(struct dv_session *s, const struct dv_file *f)
+{
+    char body[900];
+    play_body(s, f, "DownloadStop", body, sizeof(body));
+    ask(s, MSG_PLAYBACK, body, NULL, -1);
 }

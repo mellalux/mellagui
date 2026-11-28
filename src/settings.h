@@ -22,7 +22,7 @@
  *   saver-minutes   0 .. 240                   that many minutes of idle time, 0 = never (default 10; saved)
  *   osk-avoid       0 | 1                      windows keep out of the on-screen keyboard's way: maximized ones get smaller, others move up (default 1; saved)
  *   layout-badges   0 | 1                      the panel shows a badge for every enabled keyboard layout and a click picks that one (default 0 = one badge, a click switches to the next; saved)
- *   saver-blank     0 .. 240                   with the screensaver on: the monitors go to sleep (fading out first) that many minutes after the last input, 0 = never (default 15; saved)
+ *   saver-blank     0 .. 240                   with the screensaver on: the monitors go to sleep (fading out first) that many minutes after it started, 0 = never (default 15; saved)
  *   lock-wallpaper  0 | 1                      the lock screen shows the wallpaper, blurred and dimmed, behind the clock (default 1; saved; no wallpaper = plain dark)
  *   layout-style    letters | button | flag-code | flag   the panel's layout button: its letters, a white button with the flag (and the text of
  *                                              layout-label), the flag as the button with the code on it, the flag as the button (default letters; saved)

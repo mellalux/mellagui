@@ -163,7 +163,7 @@ struct lm_config {
     bool saver_cat;             /* the room has its cat (settings: saver-cat; default true); off: mellagui-matrix gets --no-cat */
     bool saver_turtle;          /* the room has its swimming map turtle (settings: saver-turtle; default true); off: mellagui-matrix gets --no-turtle */
     bool saver_meow;            /* the cat meows when it looks at the camera (settings: saver-meow; default false: a screensaver that makes noise is a surprise); on: mellagui-matrix gets --meow */
-    int saver_blank_min;        /* with the screensaver on: the monitors go to sleep (with a fade) this many minutes after the last input, 0 = never (settings: saver-blank; default 15) */
+    int saver_blank_min;        /* with the screensaver on: the monitors go to sleep (with a fade) this many minutes after the saver started, 0 = never (settings: saver-blank; default 15) */
     int saver_lock_min;         /* the screensaver locks the screen this many minutes after it started (it keeps running), 0 = never (settings: saver-lock; default 1) */
     bool startup_sound;         /* play the start-up chime when MellaGUI has started (settings: startup-sound; default true), see chime.h */
     bool dnd;                   /* do not disturb: notifications are logged but no card is shown (settings: dnd; key action dnd), see notifylog.h */

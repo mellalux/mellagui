@@ -1140,11 +1140,11 @@ static void build_saver(struct app *a, int x, int y, int w)
     y += ROW_H;
     add_check(a, x, y, w, "Start the screensaver when nobody uses the computer", "saver", kv_int(a, "saver", 1) != 0);
     y += ROW_H;
-    add_slider(a, x, y, w, "Starts after", "saver-minutes", 1, 120, 1, " min");
+    add_slider(a, x, y, w, "Starts after", "saver-minutes", 1, 30, 1, " min");
     y += ROW_H;
-    add_slider(a, x, y, w, "Lock after", "saver-lock", 0, 60, 1, " min");
+    add_slider(a, x, y, w, "Lock after", "saver-lock", 0, 30, 1, " min");
     y += ROW_H;
-    add_slider(a, x, y, w, "Monitor sleeps after", "saver-blank", 0, 240, 1, " min");
+    add_slider(a, x, y, w, "Monitor sleeps after", "saver-blank", 0, 30, 1, " min");
     y += ROW_H;
     const char *style = kv_get(a, "saver-style");
     add(a, W_LABEL, (struct rect){ x, y, 80, ROW_H }, "Style");
@@ -1162,7 +1162,7 @@ static void build_saver(struct app *a, int x, int y, int w)
     struct widget *nt = add(a, W_NOTE, (struct rect){ x, y, w, 6 * NOTE_LINE_H }, "");
     nt->note = "The rule: while the screensaver is on, these times decide, and the Security page's \"Lock after idle\" is not used (it applies when "
                "it is off). When the lock screen itself is in front, the Security page's \"Screen off after\" decides when the monitors sleep. "
-               "\"Starts after\" and \"Monitor sleeps after\" count from the last touch, \"Lock after\" from when it started (0 = never; needs a password or PIN). The monitor fades out, "
+               "\"Starts after\" counts from the last touch, \"Lock after\" and \"Monitor sleeps after\" from when it started (0 = never; a lock needs a password or PIN). The monitor fades out, "
                "then sleeps; any touch wakes it and is not passed on. It does not start over a full screen window.";
     (void)nt;
 }

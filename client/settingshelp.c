@@ -187,8 +187,8 @@ static const struct entry table[] = {
       "volume that is set there. At most once in 25 seconds and not every time he looks. Off by default, because a screensaver that makes a noise is a "
       "surprise. It applies the next time the screensaver starts; it needs the cat and the room style." },
     { "saver-blank", NULL, "Monitor sleeps after",
-      "The monitors go to sleep this many minutes after the last keyboard or mouse use (so a bit after the screensaver started, if you set it higher "
-      "than the time it starts after). When the lock screen is in front instead of the screensaver, the Security page's \"Screen off after\" decides. The picture fades out slowly first and then the monitors switch off; any key or mouse movement brings it "
+      "The monitors go to sleep this many minutes after the screensaver started (so with 'Starts after' 5 and 10 here: 15 minutes after the last keyboard "
+      "or mouse use). When the lock screen is in front instead of the screensaver, the Security page's \"Screen off after\" decides. The picture fades out slowly first and then the monitors switch off; any key or mouse movement brings it "
       "back, and that touch is not passed on. 0 = never. A video that is playing keeps it awake." },
     { "saver-lock", NULL, "Lock after",
       "That many minutes after the screensaver started the screen is locked (when a password or PIN is set on the Lock part). The screensaver goes on "

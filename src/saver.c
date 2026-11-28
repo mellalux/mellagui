@@ -26,6 +26,7 @@ struct lm_saver {
     pid_t pid;                          /* the running program, 0 = none */
     uint64_t last_activity;
     uint64_t started;                   /* when the running program was started */
+    uint64_t blank_from;                /* `saver-blank` counts from here: the start, moved on while something keeps the screen awake */
     bool locking;                       /* we are locking the screen right now: the saver stays */
     bool shield;                        /* the lock was made by the saver and it still runs over it */
     bool gone;                          /* the program ended on its own (killed, crashed): no new one before the next input */
@@ -117,7 +118,7 @@ bool lm_saver_start(struct lm_saver *s)
         return false;
     s->pid = pid;
     s->gone = false;
-    s->started = lm_now_ms();
+    s->started = s->blank_from = lm_now_ms();
     s->shield = false;
     s->preview = false;
     s->travel = 0.0;
@@ -204,9 +205,11 @@ static void tick_cb(void *data)
     }
     if (lm_saver_governs(cfg) && cfg->saver_blank_min > 0 && !lm_screenoff_active(s->srv->screenoff) &&
         !(s->srv->lock && lm_lock_active(s->srv->lock) && !s->shield)) {    /* (the lock screen in front goes by the Security page's "Screen off after", lock.c) */
-        if (lm_idle_inhibited(s->srv->idle_inhibit))            /* a film is on: the idle time starts when it is over */
-            s->last_activity = lm_now_ms();
-        else if (lm_now_ms() - s->last_activity >= (uint64_t)cfg->saver_blank_min * unit_ms() &&
+        /* counted from the start of the saver; when none runs (it ended on its own, there is no command) from the moment it was due */
+        uint64_t from = s->pid > 0 ? s->blank_from : s->last_activity + (uint64_t)cfg->saver_min * unit_ms();
+        if (lm_idle_inhibited(s->srv->idle_inhibit))            /* a film is on: the times start when it is over */
+            s->last_activity = s->blank_from = lm_now_ms();
+        else if (lm_now_ms() >= from + (uint64_t)cfg->saver_blank_min * unit_ms() &&
                  (s->pid > 0 || !(s->srv->wm && lm_wm_has_fullscreen(s->srv->wm))))      /* (not under a full screen window that has no saver over it) */
             lm_screenoff_start(s->srv->screenoff);
     }

@@ -26148,7 +26148,7 @@ class TestSaver(Base):
         p, c = self.start('mellagui-sv14', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '200'})
         c.cmd('lock set - pin 1357')
         c.cmd('settings saver-lock 1')
-        c.cmd('settings saver-blank 6')                         # the saver's own time: 6 "minutes" after the last touch (the saver started at 10)
+        c.cmd('settings saver-blank 6')                         # the saver's own time: 6 "minutes" after it started
         c.cmd('saver start')
         self.wait(lambda: self.saver(c)['shield'] == '1', 'locked under the saver')
         self.wait(lambda: self.screenoff(c)['off'] == '1', 'the monitor goes off')
@@ -26162,7 +26162,7 @@ class TestSaver(Base):
         p, c = self.start('mellagui-sv-sleep', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})
         c.cmd('settings saver-minutes 2')
         c.cmd('settings saver-lock 0')
-        c.cmd('settings saver-blank 8')                          # the monitor sleeps 8 "minutes" after the last touch, the saver ran from 2
+        c.cmd('settings saver-blank 8')                          # the monitor sleeps 8 "minutes" after the saver started (at 2)
         self.wait(lambda: self.saver(c)['running'] == '1', 'the saver starts')
         self.wait(lambda: self.screenoff(c)['off'] == '1', 'the monitor sleeps')
         self.wait(lambda: self.saver(c)['running'] == '0' and not self.matrix_windows(c), 'the saver is ended with it')
@@ -26184,6 +26184,17 @@ class TestSaver(Base):
         self.wait(lambda: self.lock_line(c)['locked'] == '1', 'the lock after idle')
         self.wait(lambda: self.screenoff(c)['off'] == '1', 'and the lock\'s screen off')
 
+    def test_the_monitors_time_counts_from_the_start_of_the_saver(self):
+        p, c = self.start('mellagui-sv-from', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})
+        c.cmd('settings saver-lock 0')
+        c.cmd('settings saver-minutes 8')                       # 2 s of idle time ...
+        c.cmd('settings saver-blank 6')                         # ... and the monitors 1.5 s after THAT, not 1.5 s after the last touch
+        self.wait(lambda: self.saver(c)['running'] == '1', 'the saver starts')
+        t0 = time.time()
+        self.assertEqual(self.screenoff(c)['active'], '0', 'the monitors went to sleep together with the start of the saver')
+        self.wait(lambda: self.screenoff(c)['active'] == '1', 'then the monitors sleep')
+        self.assertGreater(time.time() - t0, 0.8)
+
     def test_the_lock_screen_in_front_goes_by_the_security_pages_screen_off_time_even_with_the_screensaver_on(self):
         p, c = self.start('mellagui-sv-lockblank', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '100'})
         c.cmd('lock set - pin 1357 0 0 2')                      # no idle lock, "Screen off after" 2 minutes (500 ms here)
@@ -26197,8 +26208,8 @@ class TestSaver(Base):
 
     def test_the_monitor_fades_out_before_it_sleeps_and_comes_back_at_a_touch(self):
         p, c = self.start('mellagui-sv-fade', '--config', 'none', env={'MELLAGUI_BLANK_FADE_MS': '1600'})
-        c.cmd('settings saver-minutes 100')
-        c.cmd('settings saver-blank 2')                         # no lock secret at all: the screen sleeps by itself
+        c.cmd('settings saver-minutes 1')
+        c.cmd('settings saver-blank 2')                         # no lock secret at all: the screen sleeps by itself, 2 "minutes" after the saver started
         self.wait(lambda: self.screenoff(c)['active'] == '1', 'the fade begins')
         mid = []
         end = time.time() + 1.6

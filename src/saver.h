@@ -14,7 +14,8 @@
  *  - Locking the screen ends it, too (lm_saver_locked) - except the lock that the saver makes itself: `saver-lock` minutes after it started
  *    (default 1; only when a lock secret is set) it locks the screen and keeps running. While it runs over the lock the scene shows the
  *    saver's window instead of the lock card (lm_saver_shields); the first input ends it (swallowed) and the lock card is there.
- *  - `saver-blank`: with the saver on, the monitors fade out and sleep that many minutes after the last input (screenoff.h), also without a lock.
+ *  - `saver-blank`: with the saver on, the monitors fade out and sleep that many minutes after the saver
+ *    started (screenoff.h), also without a lock.
  *  - Tests make the minute short with the same MELLAGUI_LOCK_UNIT_MS as the lock.
  */
 
@@ -27,7 +28,7 @@ struct lm_saver;
 struct lm_config;
 
 /* THE RULE: while the screensaver is on (the check is switched on and its minutes are not 0) ITS settings decide when the screen locks (`saver-lock`, counted
- * from the moment it started) and when the monitors sleep (`saver-blank`, counted from the last input), and the Security page's "Lock after idle" and
+ * from the moment it started) and when the monitors sleep (`saver-blank`, counted from the moment it started, too), and the Security page's "Lock after idle" and
  * "Screen off after" are not used. With the screensaver off those two apply. */
 bool lm_saver_governs(const struct lm_config *c);
 

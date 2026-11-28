@@ -7,8 +7,10 @@ DIR holds main.h264 and sub.h264 (Annex B, an access unit delimiter in front of 
 frames a second, cut into messages anywhere. Prints "port N" when it listens; every login, claim and start is a line on stdout. A file
 DIR/drop, when it appears, is removed and the stream's connection is closed (a camera that goes away for a moment).
 DIR/alarm ("EVENT Start|Stop"), when it appears, is removed and told to whoever asked for alarms. DIR/files.json lists the recordings of the
-card; each is 30 pictures of the small stream with six seconds of sound, sent slowly while DIR/slow is there.
+card; each, fetched, is 30 pictures of the small stream with six seconds of sound, sent slowly while DIR/slow is there. Played ("Start") it is as long as
+files.json says, five pictures a second with their sound, from the asked time (which may be in the middle of a group of pictures), sent as fast as it is read.
 """
+import calendar
 import hashlib
 import json
 import os
@@ -144,6 +146,37 @@ class Camera:
         except OSError:
             pass
 
+    def replay(self, sock, name, asked):
+        units = frames(os.path.join(self.folder, "sub.h264"))
+        w, h = (int(v) for v in open(os.path.join(self.folder, "sub.size")).read().split())
+        entry = next(f for f in json.load(open(os.path.join(self.folder, "files.json"))) if f["FileName"] == name)
+        secs = lambda t: calendar.timegm(time.strptime(t, "%Y-%m-%d %H:%M:%S"))
+        begin, end, at = secs(entry["BeginTime"]), secs(entry["EndTime"]), secs(asked)
+        if at > begin:
+            at += 1 - (at - begin) % 2      # (a key frame every 2 s: an odd second is in the middle)
+        pending = b""
+        try:
+            for n in range((end - begin) * 5):
+                key, unit = units[n % len(units)]
+                when = begin + n // 5
+                if when < at:                       # (like a real camera: from the asked time on, the next key frame or not)
+                    continue
+                if key:
+                    t = time.gmtime(when)
+                    stamp = (t.tm_year - 2000) << 26 | t.tm_mon << 22 | t.tm_mday << 17 | t.tm_hour << 12 | t.tm_min << 6 | t.tm_sec
+                    head = struct.pack("<4sBBBBII", b"\x00\x00\x01\xfc", 2, 10, w // 8, h // 8, stamp, len(unit))
+                else:
+                    head = struct.pack("<4sI", b"\x00\x00\x01\xfd", len(unit))
+                pending += head + unit + struct.pack("<4sBBH", b"\x00\x00\x01\xfa", 14, 2, 1600) + TONE + TONE
+                while len(pending) > 900:
+                    send_msg(sock, 1422, pending[:900])
+                    pending = pending[900:]
+            send_msg(sock, 1422, pending)
+            send_msg(sock, 1422, b"")
+            say("replayed to the end")
+        except OSError:
+            pass
+
     def client(self, s):
         lock = threading.Lock()
         try:
@@ -204,11 +237,17 @@ class Camera:
                     return
                 elif msg == 1420:
                     action = body["OPPlayBack"]["Action"]
-                    say("playback", action)
+                    if action == "Start":
+                        say("playback", action, body["OPPlayBack"]["StartTime"].split()[1])
+                    else:
+                        say("playback", action)
                     send_msg(s, 1421, b'{"Ret":100}\n\x00')
                     who = body["SessionID"], "play"
                     if action == "DownloadStart" and who in self.claimed:
                         threading.Thread(target=self.playback, args=(self.claimed.pop(who),), daemon=True).start()
+                    elif action == "Start" and who in self.claimed:
+                        args = (self.claimed.pop(who), body["OPPlayBack"]["Parameter"]["FileName"], body["OPPlayBack"]["StartTime"])
+                        threading.Thread(target=self.replay, args=args, daemon=True).start()
                 elif msg == 1006:
                     say("keepalive")
                     send_msg(s, 1007, b'{"Ret":100}\n\x00', lock=lock)

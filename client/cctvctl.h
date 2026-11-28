@@ -18,6 +18,7 @@
 
 #define CCTV_MOVE_MAX_MS 20000
 #define CCTV_SPEED 5
+#define CCTV_POSITIONS 4                /* the remembered views the window offers: positions 1..4 */
 
 enum { CCTV_NIGHT_AUTO = 0, CCTV_NIGHT_COLOUR = 1, CCTV_NIGHT_GREY = 2, CCTV_NIGHT_SMART = 3, CCTV_NIGHT_LAMP = 4, CCTV_NIGHT_INFRARED = 5 };
 
@@ -27,6 +28,7 @@ struct cctv_view {
     char lamp[24];                      /* "Close", "KeepOpen", "Auto" ..., "" = it has no lamp */
     char msg[160];                      /* the last thing worth saying ("" = nothing) */
     unsigned said;                      /* goes up with every message */
+    unsigned stored[CCTV_POSITIONS + 1]; /* [n] goes up when the camera has taken a view as position n */
     unsigned serial;                    /* goes up with every change */
 };
 

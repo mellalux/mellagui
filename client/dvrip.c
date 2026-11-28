@@ -73,6 +73,7 @@ static long frame_at(const uint8_t *p, size_t n, struct dv_frame *f)
         f->codec = p[4] & 0x0f;
         f->w = (p[6] + ((p[4] >> 4) & 3) * 256) * 8;        /* (pictures wider than 2040 carry the high bits beside the codec) */
         f->h = (p[7] + ((p[4] >> 6) & 3) * 256) * 8;
+        f->time = le32(p + 8);
         len = le32(p + 12);
         break;
     case 0xfd:
@@ -610,8 +611,11 @@ static void play_body(struct dv_session *s, const struct dv_file *f, const char 
              "\"StreamType\":0,\"Value\":0,\"TransMode\":\"TCP\",\"Channel\":0},\"StartTime\":\"%s\",\"EndTime\":\"%s\"}}", s->idtext, action, name, b, e);
 }
 
-int dv_play_start(struct dv_session *s, const struct dv_file *f, int wake_fd, char *err, size_t errsz)
+/* Claims the file on a new data connection and starts it. */
+static int play_begin(struct dv_session *s, const struct dv_file *f, const char *action, int wake_fd, char *err, size_t errsz)
 {
+    if (s->data >= 0)
+        close(s->data);
     s->data = dial(s->host, s->port, wake_fd, err, errsz);
     if (s->data < 0)
         return -1;
@@ -621,13 +625,53 @@ int dv_play_start(struct dv_session *s, const struct dv_file *f, int wake_fd, ch
     long long ret = j ? (long long)json_num(j, "Ret", -1) : -1;
     json_free(j);
     if (ret == 100) {
-        play_body(s, f, "DownloadStart", body, sizeof(body));
+        play_body(s, f, action, body, sizeof(body));
         ret = ask(s, MSG_PLAYBACK, body, NULL, wake_fd);
         if (ret == 0)
             return 0;
     }
     snprintf(err, errsz, "the camera did not give the file (code %lld)", ret);
     return -1;
+}
+
+int dv_play_start(struct dv_session *s, const struct dv_file *f, int wake_fd, char *err, size_t errsz)
+{
+    return play_begin(s, f, "DownloadStart", wake_fd, err, errsz);
+}
+
+int dv_replay_start(struct dv_session *s, const struct dv_file *f, int wake_fd, char *err, size_t errsz)
+{
+    return play_begin(s, f, "Start", wake_fd, err, errsz);
+}
+
+void dv_replay_stop(struct dv_session *s, const struct dv_file *f, int wake_fd)
+{
+    char body[900];
+    play_body(s, f, "Stop", body, sizeof(body));
+    ask(s, MSG_PLAYBACK, body, NULL, wake_fd);
+    if (s->data >= 0)
+        close(s->data);
+    s->data = -1;
+}
+
+static long long seconds_of(int y, int mo, int d, int h, int mi, int s)
+{
+    struct tm t = { .tm_year = y - 1900, .tm_mon = mo - 1, .tm_mday = d, .tm_hour = h, .tm_min = mi, .tm_sec = s };
+    return (long long)timegm(&t);
+}
+
+long long dv_seconds(uint32_t v)
+{
+    int mo = (int)(v >> 22 & 15), d = (int)(v >> 17 & 31);
+    if (!mo || !d)
+        return 0;
+    return seconds_of(2000 + (int)(v >> 26), mo, d, (int)(v >> 12 & 31), (int)(v >> 6 & 63), (int)(v & 63));
+}
+
+long long dv_seconds_text(const char *text)
+{
+    int y, mo, d, h, mi, s;
+    return sscanf(text, "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) == 6 ? seconds_of(y, mo, d, h, mi, s) : 0;
 }
 
 void dv_play_stop(struct dv_session *s, const struct dv_file *f)

@@ -15,15 +15,15 @@
  * S saves a picture and V starts / stops a recording (of the camera shown alone, else of every camera that is live): full size, into ~/CCTV
  * ($MELLAGUI_CCTV_DIR), cctvrec.c. M plays the sound of the camera shown alone ($MELLAGUI_CCTV_PLAYER = a program that takes 16 bit 8000 Hz mono
  * samples, or "none"). O opens the folder.
- * A camera shown alone can be steered: the arrow keys or the pad on its picture move it while they are held (cctvctl.c), P remembers up to four views
- * and goes back to them, N chooses the night picture and the lamp.
+ * A camera shown alone can be steered: the arrow keys or the pad on its picture move it while they are held (cctvctl.c). P shows a strip with its four
+ * positions: a click on one goes there (or 1..4), "Set here" (Shift+1..4) makes the view as it is that position - its small picture is kept beside the
+ * list of cameras (cctv-positions/). N chooses the night picture and the lamp.
  * L chooses what happens when it raises an alarm (a card, a recording): that is done by `mellagui-cctv --watch`, a process without a window that goes on
- * when this one is closed (cctvalarm.c). A opens the recordings on its memory card, a day at a time: Enter fetches one and shows it in mellagui-view
- * ($MELLAGUI_CCTV_VIEWER), S saves it into the folder (cctvarch.c).
+ * when this one is closed (cctvalarm.c). A opens the recordings on its memory card, a day at a time (cctvarch.c): Enter plays one here as it arrives
+ * from the camera - nothing is written to the disk; Space pauses, the arrows and the bar move in it, M gives its sound -, S saves it into the folder.
  *
  * Every camera has a thread of its own: it keeps the connection, feeds ffmpeg and takes its pictures; the window only shows the newest one.
  */
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -69,6 +69,7 @@
 enum state { ST_IDLE, ST_CONNECTING, ST_WAITING, ST_LIVE, ST_RETRY, ST_REFUSED };
 static const char *const STATE_NAME[] = { "idle", "connecting", "waiting", "live", "retry", "refused" };
 enum { WANT_NONE, WANT_SUB, WANT_MAIN };
+struct playback;
 
 struct decoder {
     pid_t pid;
@@ -77,6 +78,12 @@ struct decoder {
     int src_w, src_h;
     uint32_t *px;                           /* the picture being read */
     size_t have;
+};
+
+/* A small copy of what a position shows (made when it was set from here). */
+struct thumb {
+    uint32_t *px;
+    int w, h;
 };
 
 struct cam {
@@ -130,6 +137,8 @@ struct cam {
     unsigned seen, rec_seen;
     int rec_secs;
     struct lm_rect tile, pic;
+    struct thumb pos[CCTV_POSITIONS], pos_new[CCTV_POSITIONS];      /* the positions' pictures; pos_new: waiting for the camera to agree */
+    bool pos_loaded;
 };
 
 struct app {
@@ -147,15 +156,20 @@ struct app {
     int menu, menu_cam;                     /* the menu that is open: MENU_* */
     int menu_do[16];                        /* what its entries do */
     struct cctv_want want[MAX_CAMS];        /* what to do on an alarm */
-    char wants_path[PATH_MAX], cache[400];
+    bool pos_open;                          /* the panel of positions (of the camera shown alone) */
+    int pos_ask;                            /* the position that is asked about before it is replaced, -1 = none */
+    int64_t pos_ask_until;
+    char wants_path[PATH_MAX];
     /* the card's recordings of a day */
     int arch;                               /* the camera whose recordings are shown, -1 = none */
     struct tm day;
     struct cctv_arch *list, *fetch;
+    struct playback *play;                  /* the recording that is being watched, NULL = the list shows */
+    int play_file;                          /* which row it is */
     struct dv_file *files;
     int nfiles, *shown, nshown;             /* shown: the files in the list, newest first (movement only: those) */
     int sel, top, bar_grab;
-    bool motion_only, loading, bar_held, fetch_open;
+    bool motion_only, loading, bar_held;
     unsigned list_seen, fetch_seen;
     int fetch_pct;
     char fetch_what[16], arch_msg[240];
@@ -540,6 +554,44 @@ static void drain_wake(struct cam *c)
     while (read(c->wake[0], b, sizeof(b)) > 0) {}
 }
 
+/* Takes the pictures the decoder has made and gives it what waits for it. */
+static void dec_pump(struct cam *c, bool readable, bool writable)
+{
+    if (readable && c->dec.pid) {
+        size_t total = (size_t)c->dec.w * (size_t)c->dec.h * 4;
+        for (;;) {
+            ssize_t k = read(c->dec.out, (uint8_t *)c->dec.px + c->dec.have, total - c->dec.have);
+            if (k > 0) {
+                c->dec.have += (size_t)k;
+                if (c->dec.have == total) {
+                    c->dec.have = 0;
+                    publish(c);
+                }
+                continue;
+            }
+            if (k < 0 && (errno == EAGAIN || errno == EINTR))
+                break;
+            dec_stop(&c->dec);          /* ffmpeg gave up */
+            c->pend_len = 0;
+            c->need_key = true;
+            if (++c->dec_failures >= 3) {
+                snprintf(c->why, sizeof(c->why), "ffmpeg cannot decode this stream");
+                c->broken = true;
+            }
+            break;
+        }
+    }
+    if (writable && c->dec.pid && c->pend_len) {
+        ssize_t k = write(c->dec.in, c->pend, c->pend_len);
+        if (k > 0) {
+            memmove(c->pend, c->pend + k, c->pend_len - (size_t)k);
+            c->pend_len -= (size_t)k;
+        } else if (k < 0 && errno != EAGAIN && errno != EINTR) {
+            c->pend_len = 0;            /* (the end of ffmpeg shows on its output) */
+        }
+    }
+}
+
 /* Shows the stream until something goes wrong (c->why says what) or the window wants something else. */
 static void watch(struct cam *c, unsigned cmd)
 {
@@ -566,39 +618,7 @@ static void watch(struct cam *c, unsigned cmd)
                 return;
         }
         /* the decoder first: its pictures belong to what was read before */
-        if (p[3].revents && c->dec.pid) {
-            size_t total = (size_t)c->dec.w * (size_t)c->dec.h * 4;
-            for (;;) {
-                ssize_t k = read(c->dec.out, (uint8_t *)c->dec.px + c->dec.have, total - c->dec.have);
-                if (k > 0) {
-                    c->dec.have += (size_t)k;
-                    if (c->dec.have == total) {
-                        c->dec.have = 0;
-                        publish(c);
-                    }
-                    continue;
-                }
-                if (k < 0 && (errno == EAGAIN || errno == EINTR))
-                    break;
-                dec_stop(&c->dec);          /* ffmpeg gave up */
-                c->pend_len = 0;
-                c->need_key = true;
-                if (++c->dec_failures >= 3) {
-                    snprintf(c->why, sizeof(c->why), "ffmpeg cannot decode this stream");
-                    c->broken = true;
-                }
-                break;
-            }
-        }
-        if (p[4].revents && c->dec.pid && c->pend_len) {
-            ssize_t k = write(c->dec.in, c->pend, c->pend_len);
-            if (k > 0) {
-                memmove(c->pend, c->pend + k, c->pend_len - (size_t)k);
-                c->pend_len -= (size_t)k;
-            } else if (k < 0 && errno != EAGAIN && errno != EINTR) {
-                c->pend_len = 0;            /* (the end of ffmpeg shows on its output) */
-            }
-        }
+        dec_pump(c, p[3].revents != 0, p[4].revents != 0);
         if (p[1].revents) {
             ssize_t k = recv(c->s.data, buf, sizeof(buf), 0);
             if (k > 0) {
@@ -720,6 +740,399 @@ static void *cam_thread(void *ud)
     return NULL;
 }
 
+/* ---- a recording of the card, played as it arrives --------------------------------------------------------------------------- */
+
+#define PLAY_AHEAD_MS 3000                  /* pictures held before reading stops: the camera sends several times faster than real time */
+#define PLAY_BYTES (24u << 20)
+#define PLAY_SILENT_MS 5000
+#define PLAY_STEP_MS 20000                  /* the arrows: a picture can begin only at a key frame, about ten seconds apart */
+
+struct held {
+    struct dv_frame f;                      /* (data is a copy of ours) */
+    struct held *next;
+};
+
+struct playback {
+    struct cam cam;                         /* the session, the decoder, the sound and the picture, as for a live one; its lock guards what follows too */
+    struct dv_file file;
+    long long begin, length_ms;
+    /* the window's wishes */
+    bool paused;
+    long long seek_ms;                      /* -1 = none */
+    /* what the thread tells */
+    long long pos_ms;
+    bool ended, failed;
+    /* the thread's own: what has arrived and waits for its time */
+    struct held *first, *last;
+    unsigned nvideo;                        /* pictures waiting */
+    size_t bytes;
+    unsigned long long in_frames, in_samples;
+    long long key0, key1;                   /* the first and the newest key frame that arrived (the camera's clock) */
+    unsigned long long key0_frames, key1_frames;
+    bool eof, keyed;                        /* keyed: the first key frame has come */
+    unsigned passed;                        /* frames that were left out before it */
+    long long gop, a_key;                   /* seconds between the file's key frames and one of their times, 0 = not seen (kept through seeks) */
+};
+
+static void held_clear(struct playback *p)
+{
+    while (p->first) {
+        struct held *h = p->first;
+        p->first = h->next;
+        free((void *)h->f.data);
+        free(h);
+    }
+    p->last = NULL;
+    p->nvideo = 0;
+    p->bytes = 0;
+    p->in_frames = p->in_samples = 0;
+    p->key0 = p->key1 = 0;
+    p->eof = p->keyed = false;
+}
+
+static void play_arrived(void *ud, const struct dv_frame *f)
+{
+    struct playback *p = ud;
+    bool video = f->kind == DV_VIDEO || f->kind == DV_VIDEO_KEY;
+    if (!video && f->kind != DV_AUDIO)
+        return;
+    if (!p->keyed) {
+        if (f->kind != DV_VIDEO_KEY) {
+            p->passed++;
+            return;                 /* a camera begins in the middle with pictures that need earlier ones: nothing of them is waited through */
+        }
+        p->keyed = true;
+    }
+    if (f->kind == DV_VIDEO_KEY && dv_seconds(f->time)) {
+        long long t = dv_seconds(f->time);
+        if (p->key1 && t > p->key1 && t - p->key1 <= 60)
+            p->gop = t - p->key1;
+        p->a_key = t;
+        p->key1 = t;
+        p->key1_frames = p->in_frames;
+        if (!p->key0) {
+            p->key0 = p->key1;
+            p->key0_frames = p->key1_frames;
+        }
+    }
+    if (video)
+        p->in_frames++;
+    else if (f->codec == DV_SOUND_ALAW)
+        p->in_samples += f->len;
+    struct held *h = malloc(sizeof(*h));
+    uint8_t *copy = h ? malloc(f->len ? f->len : 1) : NULL;
+    if (!copy) {
+        free(h);
+        p->cam.broken = true;
+        snprintf(p->cam.why, sizeof(p->cam.why), "out of memory");
+        return;
+    }
+    memcpy(copy, f->data, f->len);
+    h->f = *f;
+    h->f.data = copy;
+    h->next = NULL;
+    if (p->last)
+        p->last->next = h;
+    else
+        p->first = h;
+    p->last = h;
+    p->nvideo += video;
+    p->bytes += f->len;
+}
+
+static void play_packet(void *ud, int msg, const uint8_t *body, size_t len)
+{
+    struct playback *p = ud;
+    if ((msg != DV_MSG_REPLAY && msg != DV_MSG_PLAY) || p->eof)
+        return;
+    if (!len) {
+        p->eof = true;
+        return;
+    }
+    if (!dv_demux_feed(&p->cam.demux, body, len, play_arrived, p)) {
+        p->cam.broken = true;
+        snprintf(p->cam.why, sizeof(p->cam.why), "out of memory");
+    }
+}
+
+/* How long one picture lasts, in milliseconds; 0 = not known yet. The pictures carry no times and the rate the stream claims need not be kept: it is
+ * counted from the sound that came with them, without sound from the clocks of the key frames. */
+static double frame_ms(const struct playback *p)
+{
+    double ms = 0;
+    if (p->in_samples >= 8000 && p->in_frames)
+        ms = (double)p->in_samples / 8.0 / (double)p->in_frames;
+    else if (!p->in_samples && p->key1 - p->key0 >= 2 && p->key1_frames > p->key0_frames)
+        ms = (double)(p->key1 - p->key0) * 1000.0 / (double)(p->key1_frames - p->key0_frames);
+    else if (p->eof || p->bytes > PLAY_BYTES / 2)
+        ms = 100;
+    return ms > 0 ? LM_CLAMP(ms, 10.0, 1000.0) : 0;
+}
+
+static void play_told(struct playback *p, long long pos, bool ended)
+{
+    pthread_mutex_lock(&p->cam.lock);
+    if (p->seek_ms < 0 && (p->pos_ms / 200 != pos / 200 || p->ended != ended)) {
+        p->pos_ms = pos;
+        p->ended = ended;
+        p->cam.serial++;
+    }
+    pthread_mutex_unlock(&p->cam.lock);
+}
+
+/* Plays what the camera sends until the window wants something else (true) or the connection fails (false). *at = where it is, in the file. */
+static bool play_stream(struct playback *p, long long *at)
+{
+    struct cam *c = &p->cam;
+    int64_t now = now_ms(), last_data = now, next_alive = now + c->s.alive_s * 500;
+    double due = (double)now, pos = (double)*at;
+    unsigned before = c->frames, fed_first = 0;
+    c->need_key = true;
+    c->broken = false;
+    c->dec_failures = 0;
+    fcntl(c->s.data, F_SETFL, O_NONBLOCK);
+    fcntl(c->s.ctl, F_SETFL, O_NONBLOCK);
+    static __thread uint8_t buf[65536];
+    while (!c->broken) {
+        pthread_mutex_lock(&c->lock);
+        bool go = c->quit || p->seek_ms >= 0, paused = p->paused;
+        pthread_mutex_unlock(&c->lock);
+        if (go)
+            return true;
+        double ms = frame_ms(p);
+        now = now_ms();
+        /* what is due goes to the decoder and to the sound; while paused only as far as the first picture */
+        while (p->first && ms > 0 && c->pend_len < (4u << 20)) {
+            struct held *h = p->first;
+            bool video = h->f.kind != DV_AUDIO;
+            bool first = paused && c->frames == before && fed_first < 30;
+            if (paused && !first)
+                break;
+            if (video && !first && (double)now < due)
+                break;
+            if (video) {
+                if (h->f.kind == DV_VIDEO_KEY && dv_seconds(h->f.time))
+                    pos = (double)(dv_seconds(h->f.time) - p->begin) * 1000.0;
+                else
+                    pos += ms;
+                pos = LM_CLAMP(pos, 0.0, (double)p->length_ms);
+                due = LM_MAX(due + ms, (double)now - 200.0);
+                fed_first += c->frames == before;
+                p->nvideo--;
+            }
+            if (video || !paused)
+                on_frame(c, &h->f);
+            p->first = h->next;
+            if (!p->first)
+                p->last = NULL;
+            p->bytes -= h->f.len;
+            free((void *)h->f.data);
+            free(h);
+        }
+        if (paused || !p->first)
+            due = LM_MAX(due, (double)now);     /* (what was waited for is not run after) */
+        bool ended = p->eof && !p->first;
+        if (ended)
+            pos = (double)p->length_ms;
+        *at = (long long)pos;
+        play_told(p, *at, ended);
+        bool want = !p->eof && p->bytes < PLAY_BYTES && (ms <= 0 || p->nvideo * ms < PLAY_AHEAD_MS);
+        struct pollfd pf[5] = { { .fd = c->wake[0], .events = POLLIN }, { .fd = want ? c->s.data : -1, .events = POLLIN }, { .fd = c->s.ctl, .events = POLLIN },
+                                { .fd = c->dec.pid ? c->dec.out : -1, .events = POLLIN }, { .fd = c->dec.pid && c->pend_len ? c->dec.in : -1, .events = POLLOUT } };
+        int timeout = 50;
+        if (!paused && p->first && ms > 0)
+            timeout = (int)LM_CLAMP(due - (double)now, 0.0, 50.0);
+        if (poll(pf, 5, timeout) < 0 && errno != EINTR)
+            break;
+        if (pf[0].revents)
+            drain_wake(c);
+        dec_pump(c, pf[3].revents != 0, pf[4].revents != 0);
+        now = now_ms();
+        if (pf[1].revents) {
+            ssize_t k = recv(c->s.data, buf, sizeof(buf), 0);
+            if (k > 0) {
+                last_data = now;
+                if (!dv_packets_feed(&c->packets, buf, (size_t)k, play_packet, p)) {
+                    snprintf(c->why, sizeof(c->why), "the camera sent something that is not understood");
+                    return false;
+                }
+            } else if (!(k < 0 && (errno == EAGAIN || errno == EINTR))) {
+                snprintf(c->why, sizeof(c->why), "the connection was lost");
+                if (p->key1 && p->key1 - p->begin >= p->length_ms / 1000 - 12)
+                    p->eof = true;              /* (it closed at the file's end) */
+                else
+                    return false;
+            }
+        }
+        if (!want)
+            last_data = now;
+        if (want && now - last_data > PLAY_SILENT_MS) {
+            if (p->key1 && p->key1 - p->begin >= p->length_ms / 1000 - 12) {
+                p->eof = true;                  /* nothing more comes: that was the file */
+            } else {
+                snprintf(c->why, sizeof(c->why), "the camera stopped sending");
+                return false;
+            }
+        }
+        if (pf[2].revents) {
+            ssize_t k = recv(c->s.ctl, buf, sizeof(buf), 0);
+            if (k == 0 || (k < 0 && errno != EAGAIN && errno != EINTR)) {
+                snprintf(c->why, sizeof(c->why), "the connection was lost");
+                return false;
+            }
+        }
+        if (now >= next_alive) {
+            next_alive = now + c->s.alive_s * 500;
+            if (dv_keepalive(&c->s) < 0) {
+                snprintf(c->why, sizeof(c->why), "the connection was lost");
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+static void *play_thread(void *ud)
+{
+    struct playback *p = ud;
+    struct cam *c = &p->cam;
+    long long at = 0;
+    int failures = 0;
+    for (;;) {
+        drain_wake(c);
+        pthread_mutex_lock(&c->lock);
+        bool quit = c->quit;
+        if (p->seek_ms >= 0) {
+            at = p->seek_ms;
+            p->seek_ms = -1;
+            p->pos_ms = at;
+            p->ended = p->failed = false;
+            c->serial++;
+            failures = 0;
+        }
+        bool failed = p->failed;
+        pthread_mutex_unlock(&c->lock);
+        if (quit)
+            break;
+        if (failed) {                           /* nothing more is tried until the window asks for another place */
+            struct pollfd pf = { .fd = c->wake[0], .events = POLLIN };
+            poll(&pf, 1, -1);
+            continue;
+        }
+        held_clear(p);
+        c->demux.len = c->packets.len = 0;
+        dec_stop(&c->dec);
+        c->pend_len = 0;
+        c->why[0] = 0;
+        bool reused = c->s.ctl >= 0;
+        int r = reused ? 0 : dv_login(&c->s, c->host, c->port, c->user, c->pass, c->wake[0], c->why, sizeof(c->why));
+        struct dv_file from = p->file;          /* the file, from the place that is wanted */
+        if (at > 0) {
+            long long want = p->begin + at / 1000;
+            if (p->gop > 0) {                   /* just before the key frame at or before it: little is sent in vain, and it comes quickly */
+                long long off = (want - p->a_key) % p->gop;
+                long long key = want - (off < 0 ? off + p->gop : off);
+                want = LM_MAX(key - 1, p->begin);
+            }
+            time_t when = (time_t)want;
+            struct tm t;
+            gmtime_r(&when, &t);
+            strftime(from.begin, sizeof(from.begin), "%Y-%m-%d %H:%M:%S", &t);
+        }
+        if (r == 0)
+            r = dv_replay_start(&c->s, &from, c->wake[0], c->why, sizeof(c->why));
+        long long began = at;
+        bool changed = false;
+        if (r == 0) {
+            changed = play_stream(p, &at);
+            pthread_mutex_lock(&c->lock);
+            bool leaving = c->quit;             /* (then closing the connection is enough) */
+            pthread_mutex_unlock(&c->lock);
+            if (changed && !leaving)
+                dv_replay_stop(&c->s, &from, -1);
+        } else if (reused) {
+            dv_close(&c->s);                    /* the old session is of no use any more: a new one, at once */
+            continue;
+        }
+        pthread_mutex_lock(&c->lock);
+        changed |= c->quit || p->seek_ms >= 0;  /* (what looked like a failure was the window changing its mind) */
+        pthread_mutex_unlock(&c->lock);
+        if (changed && r == 0)
+            continue;
+        dv_close(&c->s);
+        player_stop(c);
+        if (changed)
+            continue;
+        failures = at > began + 5000 ? 1 : failures + 1;
+        if (r > 0 || failures > 3) {            /* a refused login is never tried again by itself */
+            pthread_mutex_lock(&c->lock);
+            p->failed = true;
+            pthread_mutex_unlock(&c->lock);
+            tell(c, r > 0 ? ST_REFUSED : ST_RETRY, c->why[0] ? c->why : "the connection failed");
+            continue;
+        }
+        struct pollfd pf = { .fd = c->wake[0], .events = POLLIN };
+        poll(&pf, 1, 1000 * failures);
+    }
+    held_clear(p);
+    dec_stop(&c->dec);
+    player_stop(c);
+    dv_close(&c->s);
+    dv_demux_free(&c->demux);
+    dv_packets_free(&c->packets);
+    free(c->pend);
+    return NULL;
+}
+
+static void playback_free(struct playback *p)
+{
+    if (!p)
+        return;
+    pthread_mutex_lock(&p->cam.lock);
+    p->cam.quit = true;
+    pthread_mutex_unlock(&p->cam.lock);
+    if (write(p->cam.wake[1], "x", 1) < 0) {}
+    pthread_join(p->cam.thread, NULL);
+    close(p->cam.wake[0]);
+    close(p->cam.wake[1]);
+    pthread_mutex_destroy(&p->cam.lock);
+    free(p->cam.px);
+    free(p);
+}
+
+static struct playback *playback_start(const struct cam *from, const struct dv_file *f, bool sound)
+{
+    struct playback *p = calloc(1, sizeof(*p));
+    if (!p)
+        return NULL;
+    struct cam *c = &p->cam;
+    memcpy(c->name, from->name, sizeof(c->name));
+    memcpy(c->host, from->host, sizeof(c->host));
+    memcpy(c->user, from->user, sizeof(c->user));
+    memcpy(c->pass, from->pass, sizeof(c->pass));
+    c->port = from->port;
+    c->cur_stream = WANT_MAIN;
+    c->listen = sound;
+    p->file = *f;
+    p->begin = dv_seconds_text(f->begin);
+    long long len = dv_seconds_text(f->end) - p->begin;
+    p->length_ms = LM_CLAMP(len, 1LL, 86400LL) * 1000;
+    p->seek_ms = -1;
+    dv_init(&c->s);
+    pthread_mutex_init(&c->lock, NULL);
+    if (pipe2(c->wake, O_CLOEXEC | O_NONBLOCK) < 0) {
+        free(p);
+        return NULL;
+    }
+    if (pthread_create(&c->thread, NULL, play_thread, p) != 0) {
+        close(c->wake[0]);
+        close(c->wake[1]);
+        free(p);
+        return NULL;
+    }
+    return p;
+}
+
 static void poke(struct cam *c)
 {
     if (write(c->wake[1], "x", 1) < 0) {}
@@ -743,6 +1156,11 @@ static void set_wants(struct app *a)
         if (changed)
             poke(c);
     }
+    if (a->play) {
+        pthread_mutex_lock(&a->play->cam.lock);
+        a->play->cam.listen = a->sound;
+        pthread_mutex_unlock(&a->play->cam.lock);
+    }
 }
 
 static void reconnect(struct app *a, int i)
@@ -761,6 +1179,13 @@ static void reconnect(struct app *a, int i)
 /* ---- pictures, recordings, the folder ---- */
 
 static void centred(struct wlwin *w, struct lm_rect r, const char *text, uint32_t color);
+static void position_taken(struct app *a, int cam, int n);
+struct pos_layout {
+    struct lm_rect all, shut, tile[CCTV_POSITIONS], set[CCTV_POSITIONS];
+};
+
+static bool pos_layout(struct app *a, struct pos_layout *L);
+static void chip(struct wlwin *w, int x, int y, const char *text, int max_w, uint32_t dot);
 
 static void note(struct app *a, const char *text)
 {
@@ -910,13 +1335,10 @@ static void toggle_sound(struct app *a)
 /* ---- steering ---- */
 
 static const char *const DIRECTION[4] = { "DirectionUp", "DirectionDown", "DirectionLeft", "DirectionRight" };
-enum { MENU_NONE, MENU_NIGHT, MENU_POSITIONS, MENU_ALARM };
+enum { MENU_NONE, MENU_NIGHT, MENU_ALARM };
 #define DO_LAMP 100                         /* menu_do: a night value, DO_LAMP + a lamp mode, DO_GO / DO_SAVE + a position */
-#define DO_GO 200
-#define DO_SAVE 300
 #define DO_NOTIFY 400
 #define DO_RECORD 401
-#define POSITIONS 4
 static const struct { const char *mode, *text; } LAMP[] = { { "Close", "Off" }, { "KeepOpen", "Always on" }, { "Auto", "Automatic" } };
 
 /* The steering of a camera, made when it is first wanted. Only for one that shows a picture: its login is known to be good. */
@@ -1004,32 +1426,6 @@ static void night_menu(struct app *a)
     a->menu_cam = a->single;
 }
 
-static void position_menu(struct app *a)
-{
-    if (a->single < 0) {
-        note(a, "Show one camera alone to move it");
-        return;
-    }
-    if (!steer(a, a->single))
-        return;
-    move_stop(a);
-    char menu[600] = "";
-    size_t o = 0;
-    int n = 0;
-    for (int k = 1; k <= POSITIONS; k++) {
-        o += (size_t)snprintf(menu + o, sizeof(menu) - o, "Go to position %d\n", k);
-        a->menu_do[n++] = DO_GO + k;
-    }
-    o += (size_t)snprintf(menu + o, sizeof(menu) - o, "~Remember this view as");
-    a->menu_do[n++] = -1;
-    for (int k = 1; k <= POSITIONS; k++) {
-        o += (size_t)snprintf(menu + o, sizeof(menu) - o, "\nPosition %d", k);
-        a->menu_do[n++] = DO_SAVE + k;
-    }
-    a->menu = wlwin_menu(&a->win, menu) ? MENU_POSITIONS : MENU_NONE;
-    a->menu_cam = a->single;
-}
-
 /* ---- alarms ---- */
 
 static void watcher_start(const struct app *a)
@@ -1055,6 +1451,256 @@ static void watcher_start(const struct app *a)
     }
     if (pid > 0)
         waitpid(pid, NULL, 0);
+}
+
+/* ---- the positions: a strip of four pictures over the camera shown alone -------------------------------------------------------- */
+
+#define THUMB_W 192                         /* the kept picture is at most this big */
+#define THUMB_H 144
+#define POS_GAP 8
+#define POS_HEAD 26
+#define POS_BTN 24
+#define POS_ASK_MS 4000
+
+/* The file of a position's picture: beside the list of cameras. */
+static void position_path(const struct app *a, int cam, int n, char *out, size_t cap)
+{
+    const char *slash = strrchr(a->conf, '/');
+    char name[48];
+    snprintf(name, sizeof(name), "%s", a->cam[cam].name);
+    for (char *p = name; *p; p++)
+        if (*p == '/' || (unsigned char)*p < 0x20 || (p == name && *p == '.'))
+            *p = '_';
+    snprintf(out, cap, "%.*scctv-positions/%s-%d.ppm", slash ? (int)(slash - a->conf + 1) : 0, a->conf, name, n);
+}
+
+static void position_load(struct app *a, int cam)
+{
+    struct cam *c = &a->cam[cam];
+    if (c->pos_loaded)
+        return;
+    c->pos_loaded = true;
+    for (int n = 1; n <= CCTV_POSITIONS; n++) {
+        char path[PATH_MAX + 80];
+        position_path(a, cam, n, path, sizeof(path));
+        FILE *f = fopen(path, "rb");
+        int w = 0, h = 0, max = 0;
+        if (f && fscanf(f, "P6 %d %d %d", &w, &h, &max) == 3 && fgetc(f) != EOF && max == 255 && w > 0 && h > 0 && w <= THUMB_W && h <= THUMB_H) {
+            uint32_t *px = malloc((size_t)w * (size_t)h * 4);
+            int i = 0;
+            for (uint8_t rgb[3]; px && i < w * h && fread(rgb, 1, 3, f) == 3; i++)
+                px[i] = 0xff000000u | (uint32_t)rgb[0] << 16 | (uint32_t)rgb[1] << 8 | rgb[2];
+            if (px && i == w * h)
+                c->pos[n - 1] = (struct thumb){ px, w, h };
+            else
+                free(px);
+        }
+        if (f)
+            fclose(f);
+    }
+}
+
+/* The picture as it is now, made small (each pixel the middle of the ones it stands for). */
+static struct thumb position_picture(struct cam *c)
+{
+    struct thumb t = { 0 };
+    pthread_mutex_lock(&c->lock);
+    if (c->px && c->w > 0 && c->h > 0) {
+        double k = LM_MIN(1.0, LM_MIN((double)THUMB_W / c->w, (double)THUMB_H / c->h));
+        int w = LM_MAX((int)(c->w * k), 1), h = LM_MAX((int)(c->h * k), 1);
+        t.px = malloc((size_t)w * (size_t)h * 4);
+        for (int y = 0; t.px && y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int x0 = x * c->w / w, x1 = LM_MAX((x + 1) * c->w / w, x0 + 1), y0 = y * c->h / h, y1 = LM_MAX((y + 1) * c->h / h, y0 + 1);
+                unsigned r = 0, g = 0, b = 0, n = 0;
+                for (int v = y0; v < y1; v++)
+                    for (int u = x0; u < x1; u++, n++) {
+                        uint32_t p = c->px[v * c->w + u];
+                        r += p >> 16 & 255;
+                        g += p >> 8 & 255;
+                        b += p & 255;
+                    }
+                t.px[y * w + x] = 0xff000000u | (r / n) << 16 | (g / n) << 8 | b / n;
+            }
+        if (t.px) {
+            t.w = w;
+            t.h = h;
+        }
+    }
+    pthread_mutex_unlock(&c->lock);
+    return t;
+}
+
+/* The camera has taken position n: its new picture is shown and kept (a picture of a home: for the owner's eyes only). */
+static void position_taken(struct app *a, int cam, int n)
+{
+    struct cam *c = &a->cam[cam];
+    struct thumb t = c->pos_new[n - 1];
+    if (!t.px)
+        return;
+    c->pos_new[n - 1] = (struct thumb){ 0 };
+    free(c->pos[n - 1].px);
+    c->pos[n - 1] = t;
+    char path[PATH_MAX + 80], tmp[PATH_MAX + 100];
+    position_path(a, cam, n, path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    char *slash = strrchr(tmp, '/');
+    if (slash) {
+        *slash = 0;
+        mkdir(tmp, 0700);
+    }
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    unlink(tmp);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    FILE *f = fd >= 0 ? fdopen(fd, "wb") : NULL;
+    if (!f) {
+        if (fd >= 0)
+            close(fd);
+        return;
+    }
+    fprintf(f, "P6\n%d %d\n255\n", t.w, t.h);
+    for (int i = 0; i < t.w * t.h; i++) {
+        uint8_t rgb[3] = { (uint8_t)(t.px[i] >> 16), (uint8_t)(t.px[i] >> 8), (uint8_t)t.px[i] };
+        fwrite(rgb, 1, 3, f);
+    }
+    if (fclose(f) != 0 || rename(tmp, path) < 0)
+        unlink(tmp);
+}
+
+static bool pos_layout(struct app *a, struct pos_layout *L)
+{
+    if (!a->pos_open || a->single < 0 || a->arch >= 0)
+        return false;
+    struct lm_rect r = a->cam[a->single].tile;
+    int tw = LM_MIN((r.w - 16 - (CCTV_POSITIONS + 1) * POS_GAP) / CCTV_POSITIONS, 150);
+    if (tw < 48)
+        return false;
+    int th = tw * 3 / 4, w = CCTV_POSITIONS * tw + (CCTV_POSITIONS + 1) * POS_GAP, h = POS_HEAD + th + 6 + POS_BTN + POS_GAP;
+    L->all = (struct lm_rect){ r.x + (r.w - w) / 2, r.y + r.h - h - 8, w, h };
+    L->shut = (struct lm_rect){ L->all.x + w - 26, L->all.y + 3, 20, 20 };
+    for (int i = 0; i < CCTV_POSITIONS; i++) {
+        int x = L->all.x + POS_GAP + i * (tw + POS_GAP);
+        L->tile[i] = (struct lm_rect){ x, L->all.y + POS_HEAD, tw, th };
+        L->set[i] = (struct lm_rect){ x, L->all.y + POS_HEAD + th + 6, tw, POS_BTN };
+    }
+    return true;
+}
+
+static void positions_close(struct app *a)
+{
+    a->pos_open = false;
+    a->pos_ask = -1;
+    a->win.redraw = true;
+}
+
+/* P: the panel of the camera shown alone. */
+static void positions_toggle(struct app *a)
+{
+    if (a->pos_open) {
+        positions_close(a);
+        return;
+    }
+    if (a->single < 0) {
+        note(a, "Show one camera alone to move it");
+        return;
+    }
+    if (!steer(a, a->single))
+        return;
+    position_load(a, a->single);
+    a->pos_open = true;
+    a->pos_ask = -1;
+    a->note[0] = 0;
+    a->win.redraw = true;
+}
+
+static void position_go(struct app *a, int i)
+{
+    struct cctv_ctl *ctl = steer(a, a->single);
+    if (!ctl)
+        return;
+    move_stop(a);
+    a->pos_ask = -1;
+    cctv_ctl_position(ctl, i + 1, false);
+    a->win.redraw = true;
+}
+
+/* The view as it is becomes position i + 1; one that has a picture is asked about first. */
+static void position_set(struct app *a, int i)
+{
+    struct cctv_ctl *ctl = steer(a, a->single);
+    if (!ctl)
+        return;
+    struct cam *c = &a->cam[a->single];
+    move_stop(a);
+    if (c->pos[i].px && a->pos_ask != i) {
+        a->pos_ask = i;
+        a->pos_ask_until = now_ms() + POS_ASK_MS;
+        a->win.redraw = true;
+        return;
+    }
+    a->pos_ask = -1;
+    free(c->pos_new[i].px);
+    c->pos_new[i] = position_picture(c);
+    cctv_ctl_position(ctl, i + 1, true);
+    a->win.redraw = true;
+}
+
+static bool in_rect(struct lm_rect r, double x, double y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
+
+/* 0 = not on the panel; 1 + i = picture i; 101 + i = its button; -1 = the close mark; -2 = elsewhere on the panel. */
+static int positions_at(struct app *a, double x, double y)
+{
+    struct pos_layout L;
+    if (!pos_layout(a, &L) || !in_rect(L.all, x, y))
+        return 0;
+    if (in_rect(L.shut, x, y))
+        return -1;
+    for (int i = 0; i < CCTV_POSITIONS; i++) {
+        if (in_rect(L.tile[i], x, y))
+            return 1 + i;
+        if (in_rect(L.set[i], x, y))
+            return 101 + i;
+    }
+    return -2;
+}
+
+static void paint_positions(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    struct pos_layout L;
+    if (!pos_layout(a, &L))
+        return;
+    struct cam *c = &a->cam[a->single];
+    int over = positions_at(a, a->px, a->py);
+    wlwin_round_fill(w, L.all.x, L.all.y, L.all.w, L.all.h, 10, 0x101418);
+    wlwin_text(w, L.all.x + POS_GAP + 2, L.all.y + 5, "Positions - click a picture to go there", 1, 0xf0f2f5, L.all.w - 44);
+    wlwin_text(w, L.shut.x + 6, L.shut.y + 2, "x", 1, over == -1 ? 0xffffff : 0x9aa0a8, 0);
+    for (int i = 0; i < CCTV_POSITIONS; i++) {
+        struct lm_rect t = L.tile[i], b = L.set[i];
+        bool hot = over == 1 + i;
+        wlwin_fill(w, t.x - 2, t.y - 2, t.w + 4, t.h + 4, hot ? lm_theme.accent : 0x2a3038);
+        wlwin_fill(w, t.x, t.y, t.w, t.h, 0x0a0c0f);
+        if (c->pos[i].px) {
+            int pw = t.w, ph = LM_MAX(1, c->pos[i].h * pw / c->pos[i].w);
+            if (ph > t.h) {
+                ph = t.h;
+                pw = LM_MAX(1, c->pos[i].w * ph / c->pos[i].h);
+            }
+            wlwin_blit(w, t.x + (t.w - pw) / 2, t.y + (t.h - ph) / 2, pw, ph, c->pos[i].px, c->pos[i].w, c->pos[i].h, c->pos[i].w);
+        } else {
+            centred(w, t, "no picture", 0x6c737c);
+        }
+        char num[4];
+        snprintf(num, sizeof(num), "%d", i + 1);
+        wlwin_round_fill(w, t.x + 4, t.y + 4, 20, 20, 10, lm_theme.accent);
+        wlwin_text(w, t.x + 10, t.y + 6, num, 1, 0xffffff, 0);
+        bool ask = a->pos_ask == i;
+        const char *label = ask ? "Replace?" : "Set here";
+        wlwin_drop(w, b.x, b.y, b.w, b.h, lm_button_radius(b.h / 2),
+                   ask ? lm_theme.btn_red : over == 101 + i ? lm_theme.btn_green : lm_theme.btn_slate);
+        int lw = wlcard_text_w(label);
+        wlwin_text(w, b.x + LM_MAX((b.w - lw) / 2, 2), b.y + (b.h - LM_FONT_H) / 2 - 1, label, 1, lm_theme.on_colour, b.w - 4);
+    }
 }
 
 static void alarm_menu(struct app *a)
@@ -1099,8 +1745,11 @@ static void change_want(struct app *a, int i, int what)
 /* ---- the recordings on the card ---- */
 
 #define ROW_H 22
+static const struct { int x; const char *name; } COLUMN[] = { { 14, "Time" }, { 110, "Length" }, { 180, "Kind" }, { 290, "Size" } };
 #define HEAD_H 30
 #define BAR_H 40
+#define COL_H 20                            /* the headings of the columns */
+#define ROWS_Y (HEAD_H + COL_H)
 
 enum { AB_PREV, AB_NEXT, AB_MOTION, AB_OPEN, AB_SAVE, AB_N };
 
@@ -1150,11 +1799,14 @@ static void load_day(struct app *a)
 }
 
 static void set_wants(struct app *a);
+static void positions_close(struct app *a);
 
 static void arch_close(struct app *a)
 {
     if (a->arch < 0)
         return;
+    playback_free(a->play);
+    a->play = NULL;
     cctv_arch_free(a->list);
     cctv_arch_free(a->fetch);
     a->list = a->fetch = NULL;
@@ -1181,6 +1833,7 @@ static void arch_open(struct app *a)
     if (!is_live(&a->cam[a->single]))
         return;
     move_stop(a);
+    positions_close(a);
     a->arch = a->single;
     time_t now = time(NULL);
     localtime_r(&now, &a->day);
@@ -1226,41 +1879,81 @@ static void file_base(const struct cam *c, const struct dv_file *f, char *out, s
     snprintf(out, cap, "%s-%s", name, stamp);
 }
 
-/* Enter / S: the chosen recording is shown (fetched into the cache first) or saved into the folder. */
-static void take_file(struct app *a, bool open)
+/* S: the chosen recording (or the one that is watched) is saved into the folder. */
+static void save_file(struct app *a)
 {
-    if (a->sel < 0 || a->sel >= a->nshown || !g_ffmpeg)
+    int row = a->play ? a->play_file : a->sel;
+    if (row < 0 || row >= a->nshown || !g_ffmpeg)
         return;
     if (a->fetch) {
         note(a, "One file is being fetched already (Esc stops it)");
         return;
     }
     struct cam *c = &a->cam[a->arch];
-    const struct dv_file *f = &a->files[a->shown[a->sel]];
-    char base[96], path[600];
+    const struct dv_file *f = a->play ? &a->play->file : &a->files[a->shown[row]];
+    char base[96];
     file_base(c, f, base, sizeof(base));
-    if (open) {
-        snprintf(path, sizeof(path), "%s/%s.mp4", a->cache, base);
-        if (access(path, R_OK) == 0) {
-            spawn_beside("MELLAGUI_CCTV_VIEWER", "mellagui-view", path);
-            return;
-        }
-        char dir[400];                      /* the cache's folders */
-        snprintf(dir, sizeof(dir), "%s", a->cache);
-        for (char *p = dir + 1; *p; p++)
-            if (*p == '/') {
-                *p = 0;
-                mkdir(dir, 0700);
-                *p = '/';
-            }
-    }
     struct cctv_target t = { .name = c->name, .host = c->host, .port = c->port, .user = c->user, .password = c->pass };
-    a->fetch = cctv_fetch_start(&t, f, open ? a->cache : a->dir, base, g_ffmpeg);
-    a->fetch_open = open;
+    a->fetch = cctv_fetch_start(&t, f, a->dir, base, g_ffmpeg);
     a->fetch_pct = 0;
     a->fetch_seen = 0;
     snprintf(a->fetch_what, sizeof(a->fetch_what), "%.8s", strlen(f->begin) > 11 ? f->begin + 11 : f->begin);
     a->note[0] = 0;
+    a->win.redraw = true;
+}
+
+/* Enter: the chosen recording plays, as it comes from the card. */
+static void play_open(struct app *a)
+{
+    if (a->sel < 0 || a->sel >= a->nshown || !g_ffmpeg)
+        return;
+    playback_free(a->play);
+    a->play_file = a->sel;
+    a->play = playback_start(&a->cam[a->arch], &a->files[a->shown[a->sel]], a->sound);
+    if (!a->play)
+        note(a, "It cannot be played");
+    a->note[0] = 0;
+    a->win.redraw = true;
+}
+
+static void play_close(struct app *a)
+{
+    playback_free(a->play);
+    a->play = NULL;
+    a->win.redraw = true;
+}
+
+static void play_seek(struct app *a, long long ms)
+{
+    struct playback *p = a->play;
+    pthread_mutex_lock(&p->cam.lock);
+    ms = LM_CLAMP(ms, 0LL, LM_MAX(p->length_ms - 12000, 0LL));          /* (after the last key frame there is nothing to begin with) */
+    p->seek_ms = p->pos_ms = ms;
+    p->ended = p->failed = false;
+    pthread_mutex_unlock(&p->cam.lock);
+    if (write(p->cam.wake[1], "x", 1) < 0) {}
+    a->win.redraw = true;
+}
+
+static void play_jump(struct app *a, long long by)
+{
+    pthread_mutex_lock(&a->play->cam.lock);
+    long long at = a->play->pos_ms;
+    pthread_mutex_unlock(&a->play->cam.lock);
+    play_seek(a, at + by);
+}
+
+/* Space: stop and go on; at the end (or after a failure) from the beginning (from where it failed). */
+static void play_pause(struct app *a)
+{
+    struct playback *p = a->play;
+    pthread_mutex_lock(&p->cam.lock);
+    bool again = p->ended || p->failed;
+    long long at = p->failed ? p->pos_ms : 0;
+    p->paused = again ? false : !p->paused;
+    pthread_mutex_unlock(&p->cam.lock);
+    if (again)
+        play_seek(a, at);
     a->win.redraw = true;
 }
 
@@ -1295,9 +1988,6 @@ static void collect_arch(struct app *a)
             const char *base = strrchr(st.path, '/');
             if (st.failed) {
                 snprintf(text, sizeof(text), "%s: %s", a->fetch_what, st.msg);
-            } else if (a->fetch_open) {
-                spawn_beside("MELLAGUI_CCTV_VIEWER", "mellagui-view", st.path);
-                snprintf(text, sizeof(text), "Opening %s", a->fetch_what);
             } else {
                 snprintf(text, sizeof(text), "Saved %.120s in %s", base ? base + 1 : st.path, a->dir);
             }
@@ -1308,12 +1998,12 @@ static void collect_arch(struct app *a)
     }
 }
 
-static int arch_rows(const struct app *a) { return LM_MAX((a->win.bh - STAT_H - HEAD_H - BAR_H) / ROW_H, 1); }
+static int arch_rows(const struct app *a) { return LM_MAX((a->win.bh - STAT_H - ROWS_Y - BAR_H) / ROW_H, 1); }
 static int arch_w(const struct app *a) { return a->win.bw - WLRAIL_W; }
 
 static struct wlsbar arch_bar(const struct app *a)
 {
-    return (struct wlsbar){ arch_w(a) - wlsbar_w() - 4, HEAD_H, wlsbar_w(), arch_rows(a) * ROW_H, a->nshown, arch_rows(a), a->top };
+    return (struct wlsbar){ arch_w(a) - wlsbar_w() - 4, ROWS_Y, wlsbar_w(), arch_rows(a) * ROW_H, a->nshown, arch_rows(a), a->top };
 }
 
 static struct lm_rect arch_button(const struct app *a, int i)
@@ -1352,8 +2042,10 @@ static void arch_press_button(struct app *a, int b)
         a->motion_only = !a->motion_only;
         a->sel = 0;
         filter_files(a);
+    } else if (b == AB_OPEN) {
+        play_open(a);
     } else {
-        take_file(a, b == AB_OPEN);
+        save_file(a);
     }
 }
 
@@ -1372,34 +2064,37 @@ static void paint_arch(struct app *a)
         snprintf(text, sizeof(text), "%s  -  %s  -  %d recordings, %d with movement", a->cam[a->arch].name, day, a->nfiles, moves);
     wlwin_fill(w, 0, 0, W, HEAD_H, lm_theme.bar);
     wlwin_text_bold(w, 10, (HEAD_H - LM_FONT_H) / 2, text, 1, lm_theme.text, W - 20);
+    for (size_t i = 0; i < LM_ARRAY_LEN(COLUMN); i++)
+        wlwin_text_bold(w, COLUMN[i].x, HEAD_H + (COL_H - LM_FONT_H) / 2, COLUMN[i].name, 1, lm_theme.accent, W - COLUMN[i].x - 4);
+    wlwin_fill(w, 8, ROWS_Y - 1, W - 16, 1, lm_theme.control);
     if (!a->nshown) {
         const char *why = a->loading || !a->nfiles ? a->arch_msg : "No movement was recorded on this day";
-        centred(w, (struct lm_rect){ 0, HEAD_H, W, rows * ROW_H }, why, lm_theme.text);
+        centred(w, (struct lm_rect){ 0, ROWS_Y, W, rows * ROW_H }, why, lm_theme.text);
     }
     struct wlsbar bar = arch_bar(a);
     int rw = wlsbar_on(&bar) ? W - wlsbar_w() - 8 : W - 4;
     for (int r = 0; r < rows && a->top + r < a->nshown; r++) {
-        int k = a->top + r, y = HEAD_H + r * ROW_H;
+        int k = a->top + r, y = ROWS_Y + r * ROW_H;
         const struct dv_file *f = &a->files[a->shown[k]];
         char kind = file_kind(f);
         if (k == a->sel)
             wlwin_round_fill(w, 4, y + 1, rw - 4, ROW_H - 2, 6, lm_theme.accent);
         uint32_t ink = k == a->sel ? 0xffffff : lm_theme.text;
         snprintf(text, sizeof(text), "%.8s", strlen(f->begin) > 11 ? f->begin + 11 : f->begin);
-        wlwin_text(w, 14, y + 3, text, 1, ink, 0);
+        wlwin_text(w, COLUMN[0].x, y + 3, text, 1, ink, 0);
         struct tm b0 = { 0 }, e0 = { 0 };
         long secs = 0;
         if (sscanf(f->begin, "%*d-%*d-%d %d:%d:%d", &b0.tm_mday, &b0.tm_hour, &b0.tm_min, &b0.tm_sec) == 4 &&
             sscanf(f->end, "%*d-%*d-%d %d:%d:%d", &e0.tm_mday, &e0.tm_hour, &e0.tm_min, &e0.tm_sec) == 4)
             secs = (e0.tm_hour - b0.tm_hour) * 3600L + (e0.tm_min - b0.tm_min) * 60L + e0.tm_sec - b0.tm_sec + (e0.tm_mday != b0.tm_mday ? 86400L : 0);
         snprintf(text, sizeof(text), "%ld:%02ld", secs / 60, secs % 60);
-        wlwin_text(w, 110, y + 3, text, 1, ink, 0);
-        wlwin_text(w, 180, y + 3, kind_text(kind), 1, k == a->sel ? ink : kind == 'M' || kind == 'A' ? lm_theme.warn : lm_theme.text, 0);
+        wlwin_text(w, COLUMN[1].x, y + 3, text, 1, ink, 0);
+        wlwin_text(w, COLUMN[2].x, y + 3, kind_text(kind), 1, k == a->sel ? ink : kind == 'M' || kind == 'A' ? lm_theme.warn : lm_theme.text, 0);
         snprintf(text, sizeof(text), "%u.%u MB", f->kb / 1024, f->kb % 1024 * 10 / 1024);
-        wlwin_text(w, 290, y + 3, text, 1, ink, rw - 294);
+        wlwin_text(w, COLUMN[3].x, y + 3, text, 1, ink, rw - COLUMN[3].x - 4);
     }
     wlsbar_paint(w, &bar, a->bar_held);
-    static const char *const label[AB_N] = { "< Day", "Day >", "Movement only", "Open", "Save" };
+    static const char *const label[AB_N] = { "< Day", "Day >", "Movement only", "Play", "Save" };
     for (int i = 0; i < AB_N; i++) {
         struct lm_rect b = arch_button(a, i);
         uint32_t c = i == AB_MOTION ? (a->motion_only ? lm_theme.btn_amber_lit : lm_theme.btn_slate) : i >= AB_OPEN ? lm_theme.btn_green : lm_theme.btn_blue;
@@ -1445,7 +2140,7 @@ static void arch_pointer(struct app *a, uint32_t op, const union lm_arg *args)
             return;
         }
     }
-    int row = a->py >= HEAD_H && a->px < arch_w(a) ? (int)((a->py - HEAD_H) / ROW_H) : -1;
+    int row = a->py >= ROWS_Y && a->px < arch_w(a) ? (int)((a->py - ROWS_Y) / ROW_H) : -1;
     if (row < 0 || row >= arch_rows(a) || a->top + row >= a->nshown)
         return;
     int k = a->top + row;
@@ -1455,7 +2150,7 @@ static void arch_pointer(struct app *a, uint32_t op, const union lm_arg *args)
     a->click_ms = again ? 0 : now;
     arch_select(a, k);
     if (again)
-        take_file(a, true);
+        play_open(a);
 }
 
 static void arch_key(struct app *a, uint32_t ks)
@@ -1469,15 +2164,17 @@ static void arch_key(struct app *a, uint32_t ks)
     else if (ks == LM_KS_Left || ks == LM_KS_Right)
         other_day(a, ks == LM_KS_Left ? -1 : 1);
     else if (ks == LM_KS_Return || ks == LM_KS_KP_Enter)
-        take_file(a, true);
+        play_open(a);
     else if (ks == 's' || ks == 'S')
-        take_file(a, false);
+        save_file(a);
     else if (ks == 'f' || ks == 'F')
         arch_press_button(a, AB_MOTION);
     else if (ks == 'r' || ks == 'R')
         load_day(a);
     else if (ks == 'o' || ks == 'O')
         open_folder(a);
+    else if (ks == 'm' || ks == 'M')
+        toggle_sound(a);
     else if (ks == 'a' || ks == 'A')
         arch_close(a);
     else if (ks == LM_KS_Escape) {
@@ -1487,6 +2184,134 @@ static void arch_key(struct app *a, uint32_t ks)
             note(a, "Stopped");
         } else {
             arch_close(a);
+        }
+    }
+}
+
+/* ---- the recording that is watched ---- */
+
+enum { PB_LIST, PB_PAUSE, PB_SAVE, PB_N };
+
+static struct lm_rect play_button(const struct app *a, int i)
+{
+    return (struct lm_rect){ 8 + i * 82, a->win.bh - STAT_H - BAR_H + 6, 76, 28 };
+}
+
+static struct lm_rect play_area(const struct app *a)
+{
+    return (struct lm_rect){ 0, HEAD_H, arch_w(a), LM_MAX(a->win.bh - STAT_H - HEAD_H - BAR_H, 1) };
+}
+
+/* The strip that shows the place (and takes a click). */
+static struct lm_rect play_bar(const struct app *a)
+{
+    int x = 8 + PB_N * 82 + 8;
+    return (struct lm_rect){ x, a->win.bh - STAT_H - BAR_H + 12, LM_MAX(arch_w(a) - x - 130, 20), 16 };
+}
+
+static void paint_play(struct app *a)
+{
+    struct wlwin *w = &a->win;
+    struct playback *p = a->play;
+    struct cam *c = &p->cam;
+    int W = arch_w(a);
+    struct lm_rect area = play_area(a), bar = play_bar(a);
+    wlwin_fill(w, area.x, area.y, area.w, area.h, 0x0a0c0f);
+    pthread_mutex_lock(&c->lock);
+    c->box_w = area.w * wlwin_scale(w);
+    c->box_h = area.h * wlwin_scale(w);
+    bool have = c->px && c->w > 0, paused = p->paused, ended = p->ended, failed = p->failed;
+    long long pos = p->pos_ms, len = p->length_ms;
+    char msg[240];
+    snprintf(msg, sizeof(msg), "%s", c->msg);
+    if (have) {
+        double asp = (double)c->w / c->h;
+        int pw = LM_MAX(1, (int)(LM_MIN((double)area.w, area.h * asp) + 0.5)), ph = LM_CLAMP((int)(pw / asp + 0.5), 1, area.h);
+        wlwin_blit(w, area.x + (area.w - pw) / 2, area.y + (area.h - ph) / 2, pw, ph, c->px, c->w, c->h, c->w);
+    }
+    pthread_mutex_unlock(&c->lock);
+    if (failed) {
+        char text[300];
+        snprintf(text, sizeof(text), "%s  -  Space: try again", msg);
+        if (have)
+            chip(w, 8, area.y + area.h - 32, text, area.w - 16, lm_theme.error);
+        else
+            centred(w, area, text, 0xff9a8f);
+    } else if (!have) {
+        centred(w, area, "Asking the camera...", 0xc8ccd2);
+    }
+    char text[300], clock[16];
+    time_t when = (time_t)(p->begin + pos / 1000);
+    struct tm t;
+    gmtime_r(&when, &t);
+    strftime(clock, sizeof(clock), "%H:%M:%S", &t);
+    snprintf(text, sizeof(text), "%s  -  %.10s %s  -  %s", c->name, p->file.begin, clock, kind_text(file_kind(&p->file)));
+    wlwin_fill(w, 0, 0, W, HEAD_H, lm_theme.bar);
+    wlwin_text_bold(w, 10, (HEAD_H - LM_FONT_H) / 2, text, 1, lm_theme.text, W - 20);
+    const char *label[PB_N] = { "< List", paused || ended || failed ? "Play" : "Pause", "Save" };
+    for (int i = 0; i < PB_N; i++) {
+        struct lm_rect b = play_button(a, i);
+        uint32_t col = i == PB_LIST ? lm_theme.btn_blue : i == PB_PAUSE ? lm_theme.btn_green : lm_theme.btn_slate;
+        wlwin_drop(w, b.x, b.y, b.w, b.h, lm_button_radius(b.h / 2), col);
+        wlwin_text(w, b.x + (b.w - wlcard_text_w(label[i])) / 2, b.y + (b.h - LM_FONT_H) / 2 - 1, label[i], 1, lm_theme.on_colour, b.w - 4);
+    }
+    wlwin_round_fill(w, bar.x, bar.y + 5, bar.w, 6, 3, lm_theme.control);
+    int done = len > 0 ? (int)((long long)bar.w * pos / len) : 0;
+    if (done > 0)
+        wlwin_round_fill(w, bar.x, bar.y + 5, LM_CLAMP(done, 6, bar.w), 6, 3, lm_theme.accent);
+    wlwin_round_fill(w, bar.x + LM_CLAMP(done - 7, 0, bar.w - 14), bar.y + 1, 14, 14, 7, lm_theme.accent);
+    snprintf(text, sizeof(text), "%lld:%02lld / %lld:%02lld", pos / 60000, pos / 1000 % 60, len / 60000, len / 1000 % 60);
+    wlwin_text(w, bar.x + bar.w + 12, bar.y, text, 1, lm_theme.text, W - bar.x - bar.w - 16);
+}
+
+static void play_pointer(struct app *a, uint32_t op, const union lm_arg *args)
+{
+    if (op != LM_WL_POINTER_EVT_BUTTON || args[2].u != 272 || args[3].u != 1)
+        return;
+    for (int i = 0; i < PB_N; i++) {
+        struct lm_rect b = play_button(a, i);
+        if (a->px >= b.x && a->px < b.x + b.w && a->py >= b.y && a->py < b.y + b.h) {
+            if (i == PB_LIST)
+                play_close(a);
+            else if (i == PB_PAUSE)
+                play_pause(a);
+            else
+                save_file(a);
+            return;
+        }
+    }
+    struct lm_rect bar = play_bar(a), area = play_area(a);
+    if (a->px >= bar.x - 4 && a->px < bar.x + bar.w + 4 && a->py >= bar.y - 6 && a->py < bar.y + bar.h + 6)
+        play_seek(a, (long long)(LM_CLAMP((a->px - bar.x) / bar.w, 0.0, 1.0) * (double)a->play->length_ms));
+    else if (a->px >= area.x && a->px < area.x + area.w && a->py >= area.y && a->py < area.y + area.h)
+        play_pause(a);
+}
+
+static void play_key(struct app *a, uint32_t ks)
+{
+    if (ks == ' ' || ks == 'k' || ks == 'K')
+        play_pause(a);
+    else if (ks == LM_KS_Left || ks == LM_KS_Right)
+        play_jump(a, ks == LM_KS_Left ? -PLAY_STEP_MS : PLAY_STEP_MS);
+    else if (ks == LM_KS_Page_Up || ks == LM_KS_Page_Down)
+        play_jump(a, ks == LM_KS_Page_Up ? -60000 : 60000);
+    else if (ks == LM_KS_Home)
+        play_seek(a, 0);
+    else if (ks == 's' || ks == 'S')
+        save_file(a);
+    else if (ks == 'm' || ks == 'M')
+        toggle_sound(a);
+    else if (ks == 'o' || ks == 'O')
+        open_folder(a);
+    else if (ks == 'a' || ks == 'A')
+        arch_close(a);
+    else if (ks == LM_KS_Escape || ks == LM_KS_BackSpace) {
+        if (a->fetch) {
+            cctv_arch_free(a->fetch);
+            a->fetch = NULL;
+            note(a, "Stopped");
+        } else {
+            play_close(a);
         }
     }
 }
@@ -1508,11 +2333,7 @@ static void menu_event(struct wlwin *w, int index)
     struct cctv_ctl *ctl = a->cam[a->menu_cam].ctl;
     if (!ctl)
         return;
-    if (d >= DO_SAVE)
-        cctv_ctl_position(ctl, d - DO_SAVE, true);
-    else if (d >= DO_GO)
-        cctv_ctl_position(ctl, d - DO_GO, false);
-    else if (d >= DO_LAMP)
+    if (d >= DO_LAMP)
         cctv_ctl_night(ctl, -1, LAMP[d - DO_LAMP].mode);
     else if (d >= 0)
         cctv_ctl_night(ctl, d, NULL);
@@ -1533,6 +2354,9 @@ static void watch_steering(struct app *a)
         cctv_ctl_view(c->ctl, &v);
         if (v.serial == c->view.serial)
             continue;
+        for (int n = 1; n <= CCTV_POSITIONS; n++)
+            if (v.stored[n] != c->view.stored[n])
+                position_taken(a, i, n);        /* the picture that was taken with the order becomes the position's */
         bool new_word = v.said != c->view.said && v.msg[0];
         c->view = v;
         a->win.redraw = true;
@@ -1556,6 +2380,9 @@ static bool pad_centre(struct app *a, int *cx, int *cy)
         return false;
     *cx = c->pic.x + c->pic.w - PAD_R - 10;
     *cy = c->pic.y + c->pic.h - PAD_R - 10;
+    struct pos_layout L;
+    if (pos_layout(a, &L))                  /* (the pad makes room for the positions) */
+        *cy = LM_MAX(LM_MIN(*cy, L.all.y - PAD_R - 8), c->tile.y + PAD_R + 40);
     return true;
 }
 
@@ -1657,19 +2484,19 @@ static void side_rail(struct app *a, struct wlrail *S)
     bool recording = false;
     for (int i = 0; i < a->n; i++)
         recording |= a->cam[i].rec && (a->single < 0 || a->single == i);
-    bool one = a->single >= 0, arch = a->arch >= 0, live_one = one && !arch;
+    bool one = a->single >= 0, arch = a->arch >= 0, live_one = one && !arch, hear = one && (!arch || a->play);
     bool watched = one && (a->want[a->single].notify || a->want[a->single].record);
     S->it[S_SHOT] = (struct wlrail_item){ .tip = "Save a picture (S)", .icon = wlrail_ic_camera, .base = lm_theme.btn_green, .lite = lm_theme.btn_green_lit,
                                           .show = true, .idle = !a->n || arch };
     S->it[S_REC] = (struct wlrail_item){ .tip = recording ? "Stop recording (V)" : "Record (V)", .icon = wlrail_ic_rec, .base = lm_theme.btn_red,
                                          .lite = lm_theme.btn_red_lit, .show = true, .lit = recording, .idle = !a->n || arch };
     S->it[S_SOUND] = (struct wlrail_item){ .tip = !one ? "Sound (M): one camera alone" : a->sound ? "Sound off (M)" : "Sound on (M)", .icon = speaker_icon,
-                                           .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .show = true, .lit = a->sound && live_one, .idle = !live_one };
+                                           .base = lm_theme.btn_purple, .lite = lm_theme.btn_purple_lit, .show = true, .lit = a->sound && hear, .idle = !hear };
     S->it[S_FOLDER] = (struct wlrail_item){ .tip = "Open the folder (O)", .icon = wlrail_ic_open, .base = lm_theme.btn_slate, .lite = lm_theme.btn_slate_lit, .show = true };
     S->it[S_NIGHT] = (struct wlrail_item){ .tip = one ? "Night picture and lamp (N)" : "Night (N): one camera alone", .icon = night_icon, .base = lm_theme.btn_blue,
                                            .lite = lm_theme.btn_blue_lit, .show = true, .gap = true, .idle = !live_one };
     S->it[S_POS] = (struct wlrail_item){ .tip = one ? "Positions (P)" : "Positions (P): one camera alone", .icon = wlrail_ic_home, .base = lm_theme.btn_teal,
-                                         .lite = lm_theme.btn_teal_lit, .show = true, .idle = !live_one };
+                                         .lite = lm_theme.btn_teal_lit, .show = true, .lit = a->pos_open && live_one, .idle = !live_one };
     S->it[S_ALARM] = (struct wlrail_item){ .tip = one ? "Alarms (L)" : "Alarms (L): one camera alone", .icon = bell_icon, .base = lm_theme.btn_amber,
                                            .lite = lm_theme.btn_amber_lit, .show = true, .lit = watched && live_one, .idle = !live_one };
     S->it[S_ARCH] = (struct wlrail_item){ .tip = !one ? "Recordings (A): one camera alone" : arch ? "Back to the live picture (A)" : "Recordings on the card (A)",
@@ -1780,6 +2607,14 @@ static void write_dump(struct app *a)
     if (pad_centre(a, &px, &py))
         fprintf(f, "pad %d %d %d\n", a->single, px, py);
     fprintf(f, "menu %d\n", a->menu);
+    struct pos_layout L;
+    if (pos_layout(a, &L)) {
+        fprintf(f, "pos open=1 ask=%d\n", a->pos_ask);
+        for (int i = 0; i < CCTV_POSITIONS; i++) {
+            fprintf(f, "ptile %d %d %d %d %d %d\n", i + 1, L.tile[i].x, L.tile[i].y, L.tile[i].w, L.tile[i].h, a->cam[a->single].pos[i].px != NULL);
+            fprintf(f, "pset %d %d %d %d %d\n", i + 1, L.set[i].x, L.set[i].y, L.set[i].w, L.set[i].h);
+        }
+    }
     for (int i = 0; i < a->n; i++)
         fprintf(f, "want %d notify=%d record=%d\n", i, a->want[i].notify, a->want[i].record);
     if (a->arch >= 0) {
@@ -1789,12 +2624,26 @@ static void write_dump(struct app *a)
                 a->motion_only, a->fetch != NULL);
         for (int r = 0; r < arch_rows(a) && a->top + r < a->nshown; r++) {
             const struct dv_file *fl = &a->files[a->shown[a->top + r]];
-            fprintf(f, "row %d %.8s %c %u %d\n", a->top + r, fl->begin + 11, file_kind(fl), fl->kb, HEAD_H + r * ROW_H + ROW_H / 2);
+            fprintf(f, "row %d %.8s %c %u %d\n", a->top + r, fl->begin + 11, file_kind(fl), fl->kb, ROWS_Y + r * ROW_H + ROW_H / 2);
         }
         for (int i = 0; i < AB_N; i++) {
             struct lm_rect b = arch_button(a, i);
             fprintf(f, "abtn %d %d %d %d %d\n", i, b.x, b.y, b.w, b.h);
         }
+    }
+    if (a->play) {
+        struct playback *p = a->play;
+        pthread_mutex_lock(&p->cam.lock);
+        fprintf(f, "play paused=%d pos=%lld len=%lld ended=%d failed=%d frames=%u w=%d h=%d listen=%d passed=%u\n", p->paused, p->pos_ms, p->length_ms, p->ended,
+                p->failed, p->cam.frames, p->cam.w, p->cam.h, p->cam.listen, p->passed);
+        fprintf(f, "playmsg %s\n", p->cam.msg);
+        pthread_mutex_unlock(&p->cam.lock);
+        for (int i = 0; i < PB_N; i++) {
+            struct lm_rect b = play_button(a, i);
+            fprintf(f, "pbtn %d %d %d %d %d\n", i, b.x, b.y, b.w, b.h);
+        }
+        struct lm_rect b = play_bar(a);
+        fprintf(f, "pbar %d %d %d %d\n", b.x, b.y, b.w, b.h);
     }
     fprintf(f, "note %s\n", a->note);
     fclose(f);
@@ -1851,10 +2700,14 @@ static void paint(struct wlwin *w)
             chip(w, c->tile.x + c->tile.w - tw - 8, a->single == i ? c->tile.y + 8 : c->tile.y + c->tile.h - 32, info, c->tile.w - 16, 0);
         }
     }
-    if (a->arch >= 0)
+    if (a->play)
+        paint_play(a);
+    else if (a->arch >= 0)
         paint_arch(a);
-    else
+    else {
+        paint_positions(a);
         paint_pad(a);
+    }
     int sy = w->bh - STAT_H;
     wlwin_fill(w, 0, sy, w->bw, STAT_H, lm_theme.bar);
     char status[300];
@@ -1873,10 +2726,14 @@ static void paint(struct wlwin *w)
         snprintf(status, sizeof(status), "Fetching %s... %d %%  -  Esc: stop", a->fetch_what, a->fetch_pct);
     else if (a->note[0])
         snprintf(status, sizeof(status), "%.299s", a->note);
+    else if (a->play)
+        snprintf(status, sizeof(status), "Space: pause  arrows: 20 s  PgUp/PgDn: 1 min  M: sound %s  S: save  Esc: the list", a->sound ? "off" : "on");
     else if (a->arch >= 0)
-        snprintf(status, sizeof(status), "Enter: watch  S: save  arrows: choose, other day  F: movement only  Esc: back");
+        snprintf(status, sizeof(status), "Enter: play  S: save  arrows: choose, other day  F: movement only  Esc: back");
     else if (recording && a->single >= 0 && !a->cam[a->single].rec)
         snprintf(status, sizeof(status), "Recording %d other camera%s  -  Esc: all cameras", recording, recording > 1 ? "s" : "");
+    else if (a->pos_open)
+        snprintf(status, sizeof(status), "1..4: go there  Shift+1..4: set this view  arrows: move  Esc: close");
     else if (a->single >= 0)
         snprintf(status, sizeof(status), "%s (%s)  -  arrows: move  -  Esc: all cameras", a->cam[a->single].name, a->cam[a->single].host);
     else
@@ -1896,6 +2753,7 @@ static void show(struct app *a, int i)
 {
     move_stop(a);
     arch_close(a);
+    positions_close(a);
     for (int k = 0; k < a->n; k++)
         a->cam[k].asked = false;
     a->single = i >= 0 && i < a->n ? i : -1;
@@ -1924,14 +2782,14 @@ static void press_side(struct app *a, int b)
         snapshot(a);
     else if (b == S_REC && g_ffmpeg && !arch)
         toggle_record(a);
-    else if (b == S_SOUND && !arch)
+    else if (b == S_SOUND && (!arch || a->play))
         toggle_sound(a);
     else if (b == S_FOLDER)
         open_folder(a);
     else if (b == S_NIGHT && !arch)
         night_menu(a);
     else if (b == S_POS && !arch)
-        position_menu(a);
+        positions_toggle(a);
     else if (b == S_ALARM && !arch)
         alarm_menu(a);
     else if (b == S_ARCH)
@@ -1976,7 +2834,9 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         a->hover = h;
         a->rhover = rh;
         a->shover = sh;
-        if (a->arch >= 0)
+        if (a->pos_open)
+            w->redraw = true;               /* (what the pointer is on is lit) */
+        if (a->arch >= 0 && !a->play)
             arch_pointer(a, op, args);
         return;
     }
@@ -1985,7 +2845,7 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         wlrail_release(&a->san);
         if (args[2].u == 272 && !a->move_key)
             move_stop(a);
-        if (a->arch >= 0)
+        if (a->arch >= 0 && !a->play)
             arch_pointer(a, op, args);
         w->redraw = true;
         return;
@@ -2008,6 +2868,10 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
         w->redraw = true;
         return;
     }
+    if (a->play) {
+        play_pointer(a, op, args);
+        return;
+    }
     if (a->arch >= 0) {
         arch_pointer(a, op, args);
         return;
@@ -2016,6 +2880,17 @@ static void pointer_event(struct wlwin *w, uint32_t op, const union lm_arg *args
     if (pd != -1) {
         if (pd >= 0)
             move_start(a, pd, 0);
+        return;
+    }
+    if (a->pos_open) {                      /* a click beside the panel puts it away */
+        int at = positions_at(a, a->px, a->py);
+        if (at > 100)
+            position_set(a, at - 101);
+        else if (at > 0)
+            position_go(a, at - 1);
+        else if (at == 0 || at == -1)
+            positions_close(a);
+        w->redraw = true;
         return;
     }
     int t = tile_at(a, a->px, a->py);
@@ -2048,9 +2923,24 @@ static void keyboard_event(struct wlwin *w, uint32_t op, const union lm_arg *arg
             show(a, (int)(ks - '1'));
         else if (ks == '0' || ks == 'g')
             show(a, -1);
+        else if (a->play)
+            play_key(a, ks);
         else
             arch_key(a, ks);
         return;
+    }
+    if (a->pos_open) {                      /* 1..4 go to a position, with Shift set it */
+        if (args[2].u >= 2 && args[2].u < 2 + CCTV_POSITIONS) {
+            if (w->mods & LM_MOD_SHIFT)
+                position_set(a, (int)args[2].u - 2);
+            else
+                position_go(a, (int)args[2].u - 2);
+            return;
+        }
+        if (ks == LM_KS_Escape) {
+            positions_close(a);
+            return;
+        }
     }
     if (ks == LM_KS_Up || ks == LM_KS_Down || ks == LM_KS_Left || ks == LM_KS_Right) {
         if (a->single < 0)
@@ -2182,7 +3072,7 @@ int main(int argc, char **argv)
     static char path[PATH_MAX];
     conf_path(path, sizeof(path), cli_conf);
     a.conf = path;
-    a.single = a.hover = a.rhover = a.shover = a.moving = a.arch = a.click_row = -1;
+    a.single = a.hover = a.rhover = a.shover = a.moving = a.arch = a.click_row = a.pos_ask = -1;
     load_conf(&a);
     const char *dir = getenv("MELLAGUI_CCTV_DIR"), *home = getenv("HOME");
     if (dir && *dir)
@@ -2209,11 +3099,6 @@ int main(int argc, char **argv)
             return 0;
         return cctv_watch(targets, a.n, a.wants_path, a.dir, ffpipe_ffmpeg_path());
     }
-    const char *cache = getenv("XDG_CACHE_HOME");
-    if (cache && *cache)
-        snprintf(a.cache, sizeof(a.cache), "%s/mellagui/cctv", cache);
-    else
-        snprintf(a.cache, sizeof(a.cache), "%s/.cache/mellagui/cctv", home ? home : ".");
     if (list) {
         for (int i = 0; i < a.n; i++)
             printf("%s\t%s:%d\t%s\t%s\n", a.cam[i].name, a.cam[i].host, a.cam[i].port, a.cam[i].user, a.cam[i].pass[0] ? "password set" : "no password");
@@ -2225,16 +3110,6 @@ int main(int argc, char **argv)
     g_dump = getenv("MELLAGUI_CCTV_DUMP");
     wlrail_init(&a.ran);
     wlrail_init(&a.san);
-    /* what was fetched to be watched last time is thrown away */
-    DIR *cd = opendir(a.cache);
-    for (struct dirent *e; cd && (e = readdir(cd));) {
-        size_t n = strlen(e->d_name);
-        if ((n > 4 && !strcmp(e->d_name + n - 4, ".mp4")) || !strncmp(e->d_name, ".part-", 6) || !strncmp(e->d_name, ".video-", 7) || !strncmp(e->d_name, ".sound-", 7)) {
-            if (unlinkat(dirfd(cd), e->d_name, 0) < 0) {}
-        }
-    }
-    if (cd)
-        closedir(cd);
     watcher_start(&a);
     static const struct wlwin_ops ops = { .paint = paint, .pointer = pointer_event, .keyboard = keyboard_event, .menu = menu_event };
     if (wlwin_connect(&a.win, "mellagui-cctv", &ops, &a) < 0)
@@ -2272,12 +3147,16 @@ int main(int argc, char **argv)
         collect_jobs(&a);
         watch_steering(&a);
         collect_arch(&a);
+        if (a.pos_ask >= 0 && now_ms() >= a.pos_ask_until) {
+            a.pos_ask = -1;
+            a.win.redraw = true;
+        }
         if (a.note[0] && now_ms() >= a.note_until) {
             a.note[0] = 0;
             a.win.redraw = true;
         }
-        for (int i = 0; i < a.n; i++) {
-            struct cam *c = &a.cam[i];
+        for (int i = 0; i < a.n + (a.play != NULL); i++) {
+            struct cam *c = i < a.n ? &a.cam[i] : &a.play->cam;
             pthread_mutex_lock(&c->lock);
             if (c->serial != c->seen) {
                 c->seen = c->serial;
@@ -2293,6 +3172,7 @@ int main(int argc, char **argv)
         pthread_mutex_unlock(&c->lock);
         poke(c);
     }
+    playback_free(a.play);
     cctv_arch_free(a.list);
     cctv_arch_free(a.fetch);
     for (int i = 0; i < a.n; i++)           /* a camera that moves is stopped before anything else */
@@ -2305,6 +3185,10 @@ int main(int argc, char **argv)
         cctv_job_free(a.cam[i].rec);
         pthread_join(a.cam[i].thread, NULL);
         free(a.cam[i].px);
+        for (int k = 0; k < CCTV_POSITIONS; k++) {
+            free(a.cam[i].pos[k].px);
+            free(a.cam[i].pos_new[k].px);
+        }
     }
     wlwin_destroy(&a.win);
     return 0;

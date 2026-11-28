@@ -21,6 +21,7 @@
 #define DV_PORT 34567
 #define DV_MSG_STREAM 1412
 #define DV_MSG_PLAY 1426                    /* a piece of a recording of the card; one with nothing in it ends the file */
+#define DV_MSG_REPLAY 1422                  /* the same for a recording that is being played (dv_replay_start) */
 #define DV_MSG_ALARM 1504
 #define DV_MAX_BODY (4u << 20)              /* a longer message or frame is not believed */
 
@@ -36,6 +37,7 @@ enum { DV_CODEC_NONE = 0, DV_CODEC_H264 = 2, DV_CODEC_H265 = 3 };
 struct dv_frame {
     int kind;
     int codec, w, h;                        /* of a key frame (DV_CODEC_*, pixels); of sound: codec = its kind (DV_SOUND_ALAW); 0 otherwise */
+    uint32_t time;                          /* of a key frame: the camera's clock then (dv_seconds), 0 otherwise */
     const uint8_t *data;                    /* video: the elementary stream (Annex B), sound: the samples; valid during the callback only */
     size_t len;
 };
@@ -122,5 +124,14 @@ int dv_files(struct dv_session *s, const char *begin, const char *end, struct dv
 /* Ask for a file: its bytes (a stream of frames like a live one) then come on s->data as messages DV_MSG_PLAY. 0 or -1 (`err`). */
 int dv_play_start(struct dv_session *s, const struct dv_file *f, int wake_fd, char *err, size_t errsz);
 void dv_play_stop(struct dv_session *s, const struct dv_file *f);
+/* Ask for a file to be played, from f->begin on (a later time than the file's own begins at the next key frame after it): messages DV_MSG_REPLAY on
+ * s->data, several times faster than the pictures were taken, so the reader sets the pace by reading; an earlier replay of the session is to be
+ * stopped first. 0 or -1 (`err`). */
+int dv_replay_start(struct dv_session *s, const struct dv_file *f, int wake_fd, char *err, size_t errsz);
+void dv_replay_stop(struct dv_session *s, const struct dv_file *f, int wake_fd);
+
+/* A time of the camera's clock as seconds that can be subtracted (no time zone): of a key frame's field, and of "2026-11-27 22:28:23" (0 = not one). */
+long long dv_seconds(uint32_t packed);
+long long dv_seconds_text(const char *text);
 
 #endif

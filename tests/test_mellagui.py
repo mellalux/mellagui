@@ -33572,15 +33572,14 @@ class TestCctv(Base):
         os.chmod(player, 0o700)
         p = subprocess.Popen([self.EXE, '--size', '700x470'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=dict(os.environ, MELLAGUI_CCTV_CONF=path, MELLAGUI_CCTV_DUMP=self.dump, MELLAGUI_CCTV_DIR=self.saved,
-                                      MELLAGUI_CCTV_PLAYER=player, MELLAGUI_CCTV_FILES='none', MELLAGUI_CCTV_NO_WATCH='1', XDG_CACHE_HOME=os.path.join(self.dir, 'cache'),
-                                      MELLAGUI_CCTV_VIEWER=self.script('viewer')))
+                                      MELLAGUI_CCTV_PLAYER=player, MELLAGUI_CCTV_FILES='none', MELLAGUI_CCTV_NO_WATCH='1', XDG_CACHE_HOME=os.path.join(self.dir, 'cache')))
         self.addCleanup(lambda: (p.poll() is None) and (p.kill(), p.wait()))
         self.win = wait_for_window('mellagui.cctv')
         self.assertIsNotNone(self.win, 'the window did not appear')
         return p
 
     def state(self):
-        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}, 'rec': {}, 'ctl': {}, 'pad': {}, 'want': {}, 'row': {}, 'abtn': {}}
+        st = {'cam': {}, 'msg': {}, 'tile': {}, 'pic': {}, 'rec': {}, 'ctl': {}, 'pad': {}, 'want': {}, 'row': {}, 'abtn': {}, 'ptile': {}, 'pset': {}}
         try:
             with open(self.dump) as f:
                 lines = f.read().splitlines()
@@ -33592,8 +33591,10 @@ class TestCctv(Base):
                 st.update(x.split('=') for x in f[1:])
             elif f[0] in ('cam', 'rec', 'ctl', 'want'):
                 st[f[0]][int(f[1])] = dict(x.split('=', 1) for x in f[2:])
-            elif f[0] == 'arch':
-                st['arch'] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] in ('arch', 'play', 'pos'):
+                st[f[0]] = dict(x.split('=', 1) for x in f[1:])
+            elif f[0] in ('playmsg', 'pbtn', 'pbar'):
+                pass
             elif f[0] == 'row':
                 st['row'][int(f[1])] = (f[2], f[3], int(f[4]), int(f[5]))
             elif f[0] == 'sound':
@@ -33869,11 +33870,45 @@ class TestCctv(Base):
         self.assertEqual(sets[1].split()[1], 'Camera.WhiteLight')
         self.assertEqual(json.loads(sets[1].split(' ', 2)[2]), {'Brightness': 50, 'WorkMode': 'KeepOpen', 'WorkPeriod': {'EHour': 6}})
         self.assertEqual(self.lines(log, 'ptz'), [])
-        self.choose(25, 'Position 3')                                       # P
+        ctl.tap(25)                                                         # P: the strip of positions
+        st = self.wait(lambda s: s['pos']['open'] == '1' and len(s['pset']) == 4, 'the positions')
+        self.assertEqual([st['ptile'][n][4] for n in range(1, 5)], [0, 0, 0, 0])          # no pictures yet
+        w = next(w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cctv')
+        def press(kind, n):
+            x, y, bw, bh = self.state()[kind][n][:4]
+            ctl.click(w['x'] + self.RAIL + x + bw // 2, w['y'] + y + bh // 2)
+        press('pset', 3)                                                    # "Set here"
         self.assertEqual(self.moved(log, 1), ['ptz SetPreset 3 5'])
-        self.wait(lambda s: s['note'] == 'Yard: This view is now position 3', 'told')
-        self.choose(25, 'Go to position 2')
-        self.assertEqual(self.moved(log, 2)[1:], ['ptz GotoPreset 2 5'])
+        self.wait(lambda s: s['note'] == 'Yard: This view is now position 3' and s['ptile'][3][4] == 1, 'told, with a picture')
+        kept = os.path.join(self.dir, 'cctv-positions', 'Yard-3.ppm')
+        with open(kept, 'rb') as f:
+            head, size, _, pixels = f.read().split(b'\n', 3)
+        self.assertEqual(head, b'P6')
+        pw, ph = (int(v) for v in size.split())
+        self.assertTrue(0 < pw <= 192 and 0 < ph <= 144 and len(pixels) == pw * ph * 3, (pw, ph))
+        self.assertTrue(pixels[2] > 200 and pixels[0] < 60, pixels[:3])     # the blue of the stand-in's picture
+        self.assertEqual(os.stat(kept).st_mode & 0o777, 0o600)
+        press('pset', 3)                                                    # one with a picture is asked about
+        self.wait(lambda s: s['pos']['ask'] == '2', 'asked')
+        time.sleep(0.3)
+        self.assertEqual(len(self.lines(log, 'ptz')), 1)
+        press('pset', 3)
+        self.assertEqual(self.moved(log, 2)[1:], ['ptz SetPreset 3 5'])
+        press('ptile', 3)                                                   # its picture: go there
+        self.assertEqual(self.moved(log, 3)[2:], ['ptz GotoPreset 3 5'])
+        ctl.tap(3)                                                          # 2: go there (the keys mean positions, not cameras)
+        self.assertEqual(self.moved(log, 4)[3:], ['ptz GotoPreset 2 5'])
+        ctl.key(KEY_LEFTSHIFT, True)
+        ctl.tap(5)                                                          # Shift+4: set
+        ctl.key(KEY_LEFTSHIFT, False)
+        self.assertEqual(self.moved(log, 5)[4:], ['ptz SetPreset 4 5'])
+        self.wait(lambda s: s['ptile'][4][4] == 1, 'a second picture')
+        ctl.tap(1)                                                          # Esc: only the strip goes
+        self.wait(lambda s: 'pos' not in s and s['view'] == '0', 'closed')
+        ctl.tap(25)
+        self.wait(lambda s: s['ptile'][3][4] == 1 and s['ptile'][1][4] == 0, 'the pictures are still there')
+        ctl.tap(25)
+        self.wait(lambda s: 'pos' not in s, 'closed again')
         ctl.tap(1)
         self.wait(lambda s: s['view'] == '-1', 'grid')
         ctl.tap(49)
@@ -33923,26 +33958,19 @@ class TestCctv(Base):
         ctl.tap(108)                                                        # Down
         st = self.wait(lambda s: s['arch']['sel'] == '1', 'second')
         when = st['row'][1][0]
-        ctl.tap(28)                                                         # Enter: fetched and shown
-        seen = self.logged('viewer', 1)
-        self.assertEqual(len(seen), 1)
-        self.assertEqual(os.path.basename(seen[0]), 'Yard-%s-%s.mp4' % (day.replace('-', ''), when.replace(':', '')))
-        streams, duration = self.probe(seen[0])
-        self.assertEqual([s[0] for s in streams], ['h264', 'aac'])
-        self.assertTrue(5.7 < duration < 6.4, duration)
-        r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'stream=duration', '-of', 'csv=p=0', seen[0]], capture_output=True, text=True, timeout=20)
-        video, sound = (float(x) for x in r.stdout.split())
-        self.assertLess(abs(video - sound), 0.4, (video, sound))           # the pictures go as long as the sound
-        r = subprocess.run(['ffmpeg', '-v', 'error', '-i', seen[0], '-fps_mode', 'passthrough', '-enc_time_base', 'demux', '-f', 'null', '-'], capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.stderr, '')
-        self.assertEqual(os.listdir(os.path.dirname(seen[0])), [os.path.basename(seen[0])])   # no parts left behind
-        ctl.tap(28)                                                         # again: no second fetch
-        self.assertEqual(len(self.logged('viewer', 2)), 2)
-        self.assertEqual(len(self.lines(log, 'claim play')), 1)
-        self.assertIn('[M]', self.lines(log, 'claim play')[0])
         ctl.tap(31)                                                         # S: into the folder
         self.wait(lambda s: s['arch']['fetch'] == '0' and s['note'].startswith('Saved '), 'saved')
-        self.assertEqual(len(self.files('.mp4')), 1)
+        saved = self.files('.mp4')
+        self.assertEqual([os.path.basename(f) for f in saved], ['Yard-%s-%s.mp4' % (day.replace('-', ''), when.replace(':', ''))])
+        streams, duration = self.probe(saved[0])
+        self.assertEqual([s[0] for s in streams], ['h264', 'aac'])
+        self.assertTrue(5.7 < duration < 6.4, duration)
+        r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'stream=duration', '-of', 'csv=p=0', saved[0]], capture_output=True, text=True, timeout=20)
+        video, sound = (float(x) for x in r.stdout.split())
+        self.assertLess(abs(video - sound), 0.4, (video, sound))           # the pictures go as long as the sound
+        r = subprocess.run(['ffmpeg', '-v', 'error', '-i', saved[0], '-fps_mode', 'passthrough', '-enc_time_base', 'demux', '-f', 'null', '-'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stderr, '')
+        self.assertIn('[M]', self.lines(log, 'claim play')[0])
         ctl.tap(31)
         self.wait(lambda s: len(self.files('.mp4')) == 2, 'nothing is written over')
         open(os.path.join(self.dir, 'slow'), 'w').close()
@@ -33964,6 +33992,60 @@ class TestCctv(Base):
         self.assertEqual(self.lines(log, 'ptz'), [])                        # the arrows moved no camera
         ctl.tap(1)
         self.wait(lambda s: 'arch' not in s and s['view'] == '0' and s['cam'][0]['state'] == 'live', 'live again')
+
+    def test_a_recording_plays_as_it_arrives_pauses_and_is_moved_in(self):
+        day = time.strftime('%Y-%m-%d')
+        name = '/idea0/%s/one[R].h264' % day
+        with open(os.path.join(self.dir, 'files.json'), 'w') as f:
+            json.dump([{'BeginTime': day + ' 00:10:00', 'EndTime': day + ' 00:10:40', 'FileName': name, 'FileLength': '0x00000020'}], f)
+        p, log, st = self.alone()
+        ctl.tap(30)                                                         # A
+        self.wait(lambda s: s['arch']['loading'] == '0' and s['arch']['n'] == '1', 'listed')
+        ctl.tap(28)                                                         # Enter: it plays
+        st = self.wait(lambda s: int(s['play']['frames']) > 3 and int(s['play']['pos']) >= 1000, 'playing')
+        self.assertEqual((st['play']['len'], st['play']['paused'], st['play']['w'] != '0'), ('40000', '0', True))
+        t0, at0 = time.time(), int(st['play']['pos'])
+        time.sleep(2.0)
+        at1 = int(self.state()['play']['pos'])
+        self.assertTrue(0.6 < (at1 - at0) / 1000 / (time.time() - t0) < 1.4, (at0, at1))        # its own pace, not the camera's
+        time.sleep(0.2)
+        w = next(w for w in ctl.windows()['windows'] if w['app_id'] == 'mellagui.cctv')
+        r, g, b = self.color_at((w['x'] + self.RAIL + (700 - 2 * self.RAIL) // 2, w['y'] + 470 // 2 - 20))
+        self.assertTrue(r > 180 and g < 70 and b < 70, (r, g, b))
+        self.assertFalse(os.path.exists(self.heard))
+        ctl.tap(50)                                                         # M
+        end = time.time() + 5
+        while time.time() < end and not (os.path.exists(self.heard) and os.path.getsize(self.heard) > 4000):
+            time.sleep(0.05)
+        self.assertGreater(os.path.getsize(self.heard), 4000)
+        ctl.tap(57)                                                         # Space
+        st = self.wait(lambda s: s['play']['paused'] == '1', 'paused')
+        time.sleep(0.4)
+        held = self.state()['play']
+        time.sleep(1.0)
+        self.assertEqual((self.state()['play']['pos'], self.state()['play']['frames']), (held['pos'], held['frames']))
+        ctl.tap(106)                                                        # Right while paused: 20 s on, and a picture of that place
+        st = self.wait(lambda s: int(s['play']['pos']) >= int(held['pos']) + 18000 and int(s['play']['frames']) > int(held['frames']), 'moved')
+        self.assertEqual(st['play']['paused'], '1')
+        self.assertGreater(int(st['play']['passed']), 0)                    # what came before the key frame was not waited through
+        self.assertEqual(len(self.lines(log, 'playback Stop')), 1)
+        self.assertRegex(self.lines(log, 'playback Start')[1], r' 00:10:2\d$')
+        ctl.tap(57)
+        st = self.wait(lambda s: s['play']['ended'] == '1', 'the end', timeout=30)
+        self.assertEqual(st['play']['pos'], '40000')
+        ctl.tap(57)                                                         # again from the beginning
+        self.wait(lambda s: s['play']['ended'] == '0' and 0 < int(s['play']['pos']) < 10000, 'again')
+        x, y, bw, bh = (int(v) for v in next(l for l in open(self.dump).read().splitlines() if l.startswith('pbar ')).split()[1:])
+        ctl.click(w['x'] + self.RAIL + x + bw // 2, w['y'] + y + bh // 2)   # the middle of the bar
+        self.wait(lambda s: 20000 <= int(s['play']['pos']) < 30000, 'the middle')
+        self.assertEqual(self.lines(log, 'login'), ['login admin ok'] * len(self.lines(log, 'login')))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'cache')))   # nothing was written to be watched
+        ctl.tap(1)                                                          # Esc: the list
+        self.wait(lambda s: 'play' not in s and s['arch']['n'] == '1', 'the list')
+        ctl.tap(28)
+        self.wait(lambda s: int(s['play']['frames']) > 2, 'once more')
+        ctl.tap(30)                                                         # A: the live picture
+        self.wait(lambda s: 'play' not in s and 'arch' not in s and s['cam'][0]['state'] == 'live', 'live')
 
     def test_the_alarm_menu_saves_what_is_wanted(self):
         p, log, st = self.alone()

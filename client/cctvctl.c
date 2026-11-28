@@ -197,6 +197,11 @@ static void do_op(struct cctv_ctl *c, const struct op *o)
         stop_now(c);
         r = command(c, o->kind == OP_SAVE ? "SetPreset" : "GotoPreset", o->n);
         snprintf(text, sizeof(text), "%d", o->n);
+        if (r == 0 && o->kind == OP_SAVE && o->n >= 1 && o->n <= CCTV_POSITIONS) {
+            pthread_mutex_lock(&c->lock);
+            c->view.stored[o->n]++;
+            pthread_mutex_unlock(&c->lock);
+        }
         if (r == 0) {
             char m[80];
             snprintf(m, sizeof(m), o->kind == OP_SAVE ? "This view is now position %s" : "Going to position %s", text);
